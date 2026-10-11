@@ -2223,6 +2223,11 @@ The optimized host-row contract is deliberately narrow:
 - Unsupported or mutating collection methods, spread children, Hooks in callbacks, and other
   unproven shapes fall back to normal React.
 
+Keyed rows build their DOM-element lookup only when delegated row events need it. Rows without
+events and rows using ordinary React callbacks skip that lookup; ordinary callbacks still resolve
+the current item and index through the keyed row table. The lookup is rebuilt when a delegated event
+definition is adopted, including after compatible Fast Refresh.
+
 Stable keys must be unique among siblings and come from the item's identity, such as a database ID.
 If duplicate keys appear at runtime, Farm remounts that list container through its original React
 render instead of guessing which row owns the identity. Later updates remain on the React fallback

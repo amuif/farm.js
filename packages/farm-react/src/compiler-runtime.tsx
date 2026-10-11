@@ -9212,6 +9212,8 @@ function createKeyedRowsBlockComponentCore(
 
     private rebuildElementIndex(instances: ReadonlyMap<string, CompilerKeyedRowInstance>): void {
       this.instancesByElement = new WeakMap();
+      // Ordinary row callbacks resolve through this.instances, not the DOM index.
+      if (!this.usesDelegatedEvents()) return;
       for (const instance of instances.values()) {
         this.instancesByElement.set(instance.element, instance);
       }
@@ -10036,8 +10038,10 @@ function createKeyedRowsBlockComponentCore(
               : new Map(rollingWindowInstances);
           if (delta) {
             COMPILER_KEYED_ROLLING_WINDOW_DELTAS.delete(rollingWindowInstances);
-            for (const instance of delta.added) {
-              this.instancesByElement.set(instance.element, instance);
+            if (this.usesDelegatedEvents()) {
+              for (const instance of delta.added) {
+                this.instancesByElement.set(instance.element, instance);
+              }
             }
             for (const key of delta.removedKeys) {
               this.eventHandlers.delete(key);
