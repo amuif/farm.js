@@ -63,6 +63,7 @@ import {
   addMetadataMarkdownAlternate,
   mergeMetadata,
   renderMetadataHead,
+  resolveFarmNotFoundMetadata,
   type FarmMetadataImageReference,
   type MetadataImageKind,
 } from "../metadata";
@@ -3257,14 +3258,30 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
   }
 
   /** The app's not-found component, or null when it relies on the built-in page. */
-  private async loadNotFoundComponent(): Promise<unknown> {
+  private async loadNotFoundModule(): Promise<Record<string, any> | null> {
     const notFoundPath = resolveFarmNotFoundComponentPath(
       this.config,
       getFarmAppDirectories(this.config),
     );
     if (!notFoundPath) return null;
-    const notFoundModule = await this.routeManager.loadRouteModule(notFoundPath);
-    return notFoundModule.default ?? null;
+    return (await this.routeManager.loadRouteModule(notFoundPath)) as Record<string, any>;
+  }
+
+  private async loadNotFoundComponent(): Promise<unknown> {
+    return (await this.loadNotFoundModule())?.default ?? null;
+  }
+
+  /** The not-found document's head: layout and not-found metadata, as production renders it. */
+  private async notFoundMetadataHead(
+    layoutModule: Record<string, any> | null,
+    notFoundModule: Record<string, any> | null,
+  ): Promise<{ head: string; metadata: Record<string, any> }> {
+    const metadata = await resolveFarmNotFoundMetadata([layoutModule], notFoundModule);
+    const { title, tags, hasFavicon } = renderMetadataHead(metadata);
+    return {
+      head: `${hasFavicon ? "" : '<link rel="icon" href="data:,">\n  '}<title>${title}</title>${tags}`,
+      metadata,
+    };
   }
 
   private defaultNotFoundContent(): string {
@@ -3326,29 +3343,34 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
       return;
     }
 
+    // The root layout's metadata applies to the 404 page whether or not the app has its own.
+    const appDir = path.join(this.config.root, this.config.srcDir, "app");
+    const notFoundExtensions = getFarmRendererComponentExtensions(this.config.renderer);
+    let layoutModule: Record<string, any> | null = null;
     try {
+      for (const ext of notFoundExtensions) {
+        const layoutPath = path.join(appDir, `layout${ext}`);
+        if (fs.existsSync(layoutPath)) {
+          layoutModule = (await this.routeManager.loadLayoutModule(layoutPath)) as Record<
+            string,
+            any
+          >;
+          break;
+        }
+      }
+
       // Look for custom not-found page
-      const appDir = path.join(this.config.root, this.config.srcDir, "app");
-      const notFoundExtensions = getFarmRendererComponentExtensions(this.config.renderer);
       const notFoundPath = resolveFarmNotFoundComponentPath(
         this.config,
         getFarmAppDirectories(this.config),
       );
 
       if (notFoundPath) {
-        const NotFoundComponent = await this.loadNotFoundComponent();
+        const notFoundModule = await this.loadNotFoundModule();
+        const NotFoundComponent = notFoundModule?.default ?? null;
 
         if (NotFoundComponent) {
-          // Look for root layout
-          let LayoutComponent: any = null;
-          for (const ext of notFoundExtensions) {
-            const layoutPath = path.join(appDir, `layout${ext}`);
-            if (fs.existsSync(layoutPath)) {
-              const layoutModule = await this.routeManager.loadLayoutModule(layoutPath);
-              LayoutComponent = layoutModule.default;
-              break;
-            }
-          }
+          const LayoutComponent: any = layoutModule?.default ?? null;
 
           // Render the 404 page
           let element: any = this.rendererRuntime.createElement(NotFoundComponent, { pathname });
@@ -3365,7 +3387,8 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
           // Render to string
           const content = await this.rendererRuntime.renderToString(element);
 
-          const html = this.createFullHTML(content, false, pathname, undefined, { req });
+          const { head, metadata } = await this.notFoundMetadataHead(layoutModule, notFoundModule);
+          const html = this.createFullHTML(content, false, pathname, head, { req, metadata });
           res.setHeader("Content-Type", "text/html; charset=utf-8");
           res.write(this.secureDocumentHTML(req, html));
           res.end();
@@ -3379,7 +3402,8 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
     // Render the shared adaptive fallback when the app does not provide its own page.
     const defaultContent = this.defaultNotFoundContent();
 
-    const html = this.createFullHTML(defaultContent, false, pathname, undefined, { req });
+    const { head, metadata } = await this.notFoundMetadataHead(layoutModule, null);
+    const html = this.createFullHTML(defaultContent, false, pathname, head, { req, metadata });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.write(this.secureDocumentHTML(req, html));
     res.end();

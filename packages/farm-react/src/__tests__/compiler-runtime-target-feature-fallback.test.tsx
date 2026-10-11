@@ -5,13 +5,40 @@ import { expect, it, vi } from "vitest";
 import {
   createCompiledComponentWithFeatures,
   keyedRowsIdentityRuntimeFeature,
+  keyedRowsIdentityFilterHintedRuntimeFeature,
+  keyedRowsIdentityFilterOnlyRuntimeFeature,
+  keyedRowsFilterHintedRuntimeFeature,
   keyedRowsMapLookupRuntimeFeature,
   keyedRowsMembershipRuntimeFeature,
   type CompilerStateUpdater,
 } from "../compiler-runtime";
 
 it.each([
+  [keyedRowsIdentityFilterHintedRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
+  [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
+  [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsIdentityFilterHintedRuntimeFeature],
+])("refreshes $0.name when changing to $1.name", (initialFeature, feature) => {
+  const definition = {
+    displayName: "FilteredTargetsRefresh",
+    hmrId: `filtered-targets-refresh-${Math.random()}`,
+    stateSignature: "0",
+    initialize: () => [],
+    render: () => <section />,
+    bindings: [],
+  };
+  const Initial = createCompiledComponentWithFeatures(definition, [initialFeature]);
+  const Compatible = createCompiledComponentWithFeatures(definition, [initialFeature]);
+  const Mixed = createCompiledComponentWithFeatures(definition, [feature]);
+  const SpecializedAgain = createCompiledComponentWithFeatures(definition, [initialFeature]);
+  expect(Compatible).toBe(Initial);
+  expect(Mixed).not.toBe(Initial);
+  expect(SpecializedAgain).not.toBe(Mixed);
+});
+
+it.each([
   keyedRowsIdentityRuntimeFeature,
+  keyedRowsIdentityFilterHintedRuntimeFeature,
+  keyedRowsIdentityFilterOnlyRuntimeFeature,
   keyedRowsMembershipRuntimeFeature,
   keyedRowsMapLookupRuntimeFeature,
 ])("$name falls back before patching a definition with another target kind", async (feature) => {
@@ -19,7 +46,11 @@ it.each([
   const read = vi.fn((item) => item);
   let update!: (value: CompilerStateUpdater) => void;
   const actualKind =
-    feature === keyedRowsIdentityRuntimeFeature ? "membershipTarget" : "identityTarget";
+    feature === keyedRowsIdentityRuntimeFeature ||
+    feature === keyedRowsIdentityFilterHintedRuntimeFeature ||
+    feature === keyedRowsIdentityFilterOnlyRuntimeFeature
+      ? "membershipTarget"
+      : "identityTarget";
   const target = (key: string) => (actualKind === "membershipTarget" ? new Set([key]) : key);
   const Rows = createCompiledComponentWithFeatures(
     {

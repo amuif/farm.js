@@ -215,6 +215,31 @@ retain the no-candidate preload scanner guard. Every response is checked for equ
 same-URL freshness. Output includes raw batch samples, CPU time, and machine load. It is an
 in-process diagnostic, not network latency or a canonical cross-framework result.
 
+## Hydration-planning diagnostic
+
+The focused planner diagnostic measures build/development analysis, not SSR latency or the
+cross-framework score. It compares disabled isolation with active analyze/enabled modes and the
+async-owner exception that still creates client islands while the experiment is off:
+
+```sh
+pnpm --filter @farm.js/core build:runtime
+node benchmarks/hydration-planning/run.mjs > /tmp/hydration-planning-first.json
+node benchmarks/hydration-planning/run.mjs > /tmp/hydration-planning-second.json
+```
+
+Requires Node 24.11+. Five alternating fresh-process pairs per scenario use 200 warmups and 5,000
+measured calls per process, with a warm filesystem cache. The baseline restores only the previous
+placement of the three owner-source read/parse statements in memory. Complete plans are compared
+across arms; read counts and output validation run outside timing. Results include every batch,
+wall/CPU measurements, source/runner hashes, and machine load. Do not run other tests or builds
+alongside measurements or interpret planner-only gains as an equivalent full-build improvement.
+The diagnostic creates and removes only its own temporary fixtures; published results are untouched.
+
+For an independent-runner check, manually dispatch the CI workflow with
+`hydration-planning-benchmark` enabled. The opt-in job builds the runtime, collects two comparisons,
+and uploads both raw JSON files. It does not assert timing thresholds or publish canonical results;
+review the inactive gains alongside active controls and recorded machine load.
+
 ## Slot-route selector diagnostic
 
 The [slot-route diagnostic](../slot-route-inputs/README.md) compares the generated production
@@ -222,6 +247,33 @@ selector with its unprepared baseline, including no-slot, fallback, catch-all an
 controls. It reports lookup time, one-time preparation cost and helper size separately. The
 framework fixture above has no route slots; do not interpret selector gains as improved HTTP
 latency or a changed framework ranking.
+
+## Markdown request URL diagnostic
+
+This opt-in diagnostic compares the generated SSR entry with a baseline that restores only the
+Markdown helper's unconditional URL parse and removes the caller's parsed-URL hint. It does not
+change Markdown negotiation, the dynamic 120-row workload, or published benchmark scores.
+
+```sh
+pnpm --filter @farm.js/core build
+pnpm --filter @farm.js/cli build
+pnpm --dir benchmarks/frameworks --filter farm-framework-benchmark install --frozen-lockfile
+pnpm --dir benchmarks/frameworks/apps/farm exec farm build --preset node-server
+node benchmarks/frameworks/markdown-request-url.mjs > /tmp/markdown-request-url-first.json
+node benchmarks/frameworks/markdown-request-url.mjs > /tmp/markdown-request-url-second.json
+```
+
+Requires Node 24.11+. Five alternating fresh-process pairs cover HTML with no Accept header,
+browser HTML, negotiated Markdown, and `.md` URLs. Each process uses 1,000 warmups and 3,000
+measured requests. All ordered rows, per-request freshness, normalized bodies and headers are
+checked outside timing; body consumption and lifecycle completion are included. Reports retain
+raw batch times, CPU time, load and source hashes. These are in-process means, not HTTP p50/p95
+or a cross-framework ranking. Do not run other tests or builds alongside timing measurements.
+
+Local results are mixed; one fewer URL parse does not by itself establish a latency benefit.
+Use the CI workflow's `markdown-request-url-benchmark` input for two comparisons on an independent
+runner. The diagnostic job retains raw artifacts without publishing scores or asserting timing
+thresholds. Review all active controls before promoting this optimization.
 
 ## Limitations
 

@@ -2,7 +2,7 @@ import { brotliDecompressSync, constants, createBrotliCompress, gunzipSync } fro
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { PluginManager } from "../plugin";
-import { createCompressionPlugin } from "../plugins/compression";
+import { compressFarmResponse, createCompressionPlugin } from "../plugins/compression";
 
 function createManager() {
   const manager = new PluginManager({
@@ -381,4 +381,75 @@ describe("compression plugin", () => {
       await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
     },
   );
+
+  describe("buffered bodies Farm can prove", () => {
+    const text =
+      "<!DOCTYPE html><html><body>" + "<p>farm buffered page</p>".repeat(200) + "</body></html>";
+    // Any read of this body fails, so a compressed result proves it was never pulled.
+    const unreadable = (headers: Record<string, string>) =>
+      new Response(
+        new ReadableStream({
+          pull() {
+            throw new Error("the buffered body must not be read");
+          },
+        }),
+        { status: 201, statusText: "Created", headers },
+      );
+
+    it.each([
+      ["br", (bytes: Buffer) => brotliDecompressSync(bytes).toString()],
+      ["gzip", (bytes: Buffer) => gunzipSync(bytes).toString()],
+    ] as const)("compresses the known text in one call for %s", async (encoding, decode) => {
+      const original = unreadable({
+        "content-type": "text/html; charset=utf-8",
+        "content-length": String(Buffer.byteLength(text)),
+        etag: '"doc"',
+        vary: "Accept",
+      });
+      const response = compressFarmResponse(
+        new Request("https://farm.test/", { headers: { "accept-encoding": encoding } }),
+        original,
+        text,
+      );
+
+      expect(response.status).toBe(201);
+      expect(response.statusText).toBe("Created");
+      expect(response.headers.get("content-encoding")).toBe(encoding);
+      expect(response.headers.has("content-length")).toBe(false);
+      expect(response.headers.get("vary")).toBe("Accept, Accept-Encoding");
+      expect(response.headers.get("etag")).toBe('W/"doc"');
+      expect(decode(Buffer.from(await response.arrayBuffer()))).toBe(text);
+      expect(original.bodyUsed).toBe(true);
+    });
+
+    it("keeps identity and HEAD responses untouched by the buffered path", async () => {
+      const identity = compressFarmResponse(
+        new Request("https://farm.test/", { headers: { "accept-encoding": "identity" } }),
+        new Response(text, { headers: { "content-type": "text/html" } }),
+        text,
+      );
+      expect(identity.headers.has("content-encoding")).toBe(false);
+      expect(await identity.text()).toBe(text);
+
+      const head = compressFarmResponse(
+        new Request("https://farm.test/", { method: "HEAD", headers: { "accept-encoding": "br" } }),
+        new Response(null, { headers: { "content-type": "text/html" } }),
+        text,
+      );
+      expect(head.headers.has("content-encoding")).toBe(false);
+      expect(head.headers.get("vary")).toBe("Accept-Encoding");
+    });
+
+    it("tolerates a consumer cancelling the compressed body before it is ready", async () => {
+      const response = compressFarmResponse(
+        new Request("https://farm.test/", { headers: { "accept-encoding": "br" } }),
+        unreadable({ "content-type": "text/html" }),
+        text,
+      );
+      await response.body!.cancel("client went away");
+      // Let the pending compression callback run against the cancelled stream.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(response.bodyUsed).toBe(true);
+    });
+  });
 });

@@ -50,6 +50,7 @@ const DEFAULT_PRELOAD_CONFIG: ResolvedFarmPreloadConfig = {
 };
 
 const reportedWarnings = new Map<string, number>();
+let nextWarningExpiry = Infinity;
 const PRELOAD_WARNING_TTL_MS = 60_000;
 const MAX_REPORTED_PRELOAD_WARNINGS = 256;
 
@@ -178,9 +179,17 @@ export function reportFarmPreloadWarnings(
   warnings: FarmPreloadBudgetWarning[],
   context = "the rendered document",
 ): void {
+  if (warnings.length === 0 && reportedWarnings.size === 0) return;
   const now = Date.now();
-  for (const [key, reportedAt] of reportedWarnings) {
-    if (now - reportedAt >= PRELOAD_WARNING_TTL_MS) reportedWarnings.delete(key);
+  // Most responses arrive before any entry can expire. Keep empty-call cleanup
+  // and wall-clock rollback semantics without scanning live history each time.
+  if (now >= nextWarningExpiry) {
+    nextWarningExpiry = Infinity;
+    for (const [key, reportedAt] of reportedWarnings) {
+      const expiresAt = reportedAt + PRELOAD_WARNING_TTL_MS;
+      if (now >= expiresAt) reportedWarnings.delete(key);
+      else nextWarningExpiry = Math.min(nextWarningExpiry, expiresAt);
+    }
   }
 
   for (const warning of warnings) {
@@ -188,6 +197,7 @@ export function reportFarmPreloadWarnings(
     const reportedAt = reportedWarnings.get(key);
     if (reportedAt !== undefined && now - reportedAt < PRELOAD_WARNING_TTL_MS) continue;
     reportedWarnings.set(key, now);
+    nextWarningExpiry = Math.min(nextWarningExpiry, now + PRELOAD_WARNING_TTL_MS);
     while (reportedWarnings.size > MAX_REPORTED_PRELOAD_WARNINGS) {
       const oldest = reportedWarnings.keys().next().value;
       if (oldest === undefined) break;
@@ -208,6 +218,7 @@ export function reportFarmPreloadWarnings(
 
 export function clearReportedFarmPreloadWarnings(): void {
   reportedWarnings.clear();
+  nextWarningExpiry = Infinity;
 }
 
 interface PreloadCandidate {
@@ -323,14 +334,21 @@ interface HtmlLinkElement {
 }
 
 function findHtmlLinkElements(html: string): HtmlLinkElement[] {
-  // getHtmlPreloadKind needs a literal `preload` relation token. Without one,
-  // skip document normalization and tag scanning (including modulepreload-only
-  // pages). Possible matches still use the full parser below, even in inert text.
-  // Other runtime input types retain the existing path and its errors.
-  if (typeof html === "string" && !/\bpreload\b/i.test(html)) return [];
+  // getHtmlPreloadKind needs a literal `preload` relation token inside the link
+  // tag, so no link that starts after the last token can be a candidate. Stop
+  // the scan there (font preloads usually sit in <head>), and skip it entirely,
+  // including modulepreload-only pages, when there is no token. Possible matches
+  // still use the full parser below, even in inert text. Other runtime input
+  // types retain the existing full scan and its errors.
+  const lastToken = typeof html === "string" ? findLastPreloadToken(html) : Infinity;
+  if (lastToken === -1) return [];
 
   const elements: HtmlLinkElement[] = [];
-  const lowerHtml = html.toLowerCase();
+  // Fold only the prefix the scan can reach. A raw-text element that opens
+  // before the last token but closes after it folds the rest on demand.
+  let lowerHtml = foldHtmlTagCase(
+    lastToken === Infinity ? html : html.slice(0, lastToken + RAW_TEXT_TAG_LOOKAHEAD),
+  );
   // Sticky matches stay anchored at this tag without slicing the rest of the
   // document. Keep their cursors local to this synchronous scan.
   const rawTextTag = /<(script|style|template|textarea|title|noscript|svg)(?=[\s/>])/y;
@@ -340,10 +358,10 @@ function findHtmlLinkElements(html: string): HtmlLinkElement[] {
 
   while (cursor < html.length) {
     const start = html.indexOf("<", cursor);
-    if (start === -1) break;
+    if (start === -1 || start > lastToken) break;
 
-    if (lowerHtml.startsWith("<!--", start)) {
-      const commentEnd = lowerHtml.indexOf("-->", start + 4);
+    if (html.startsWith("<!--", start)) {
+      const commentEnd = html.indexOf("-->", start + 4);
       cursor = commentEnd === -1 ? html.length : commentEnd + 3;
       continue;
     }
@@ -357,7 +375,11 @@ function findHtmlLinkElements(html: string): HtmlLinkElement[] {
         cursor = openingEnd;
         continue;
       }
-      const closingStart = findHtmlClosingTag(lowerHtml, rawText[1], openingEnd);
+      let closingStart = findHtmlClosingTag(lowerHtml, rawText[1], openingEnd);
+      if (closingStart === -1 && lowerHtml.length < html.length) {
+        lowerHtml = foldHtmlTagCase(html);
+        closingStart = findHtmlClosingTag(lowerHtml, rawText[1], openingEnd);
+      }
       if (closingStart === -1) {
         cursor = html.length;
         continue;
@@ -387,6 +409,29 @@ function findHtmlLinkElements(html: string): HtmlLinkElement[] {
   }
 
   return elements;
+}
+
+// Longest raw-text opener the scan matches at a tag start ("<template", "<textarea",
+// "<noscript") plus its boundary character, with margin.
+const RAW_TEXT_TAG_LOOKAHEAD = 16;
+const PRELOAD_TOKEN = /\bpreload\b/gi;
+
+function findLastPreloadToken(html: string): number {
+  let last = -1;
+  PRELOAD_TOKEN.lastIndex = 0;
+  for (let match = PRELOAD_TOKEN.exec(html); match; match = PRELOAD_TOKEN.exec(html)) {
+    last = match.index;
+  }
+  return last;
+}
+
+function foldHtmlTagCase(html: string): string {
+  const lowerHtml = html.toLowerCase();
+  // Unicode lowercasing can expand UTF-16 offsets (for example, İ -> i̇).
+  // Tag names only need ASCII folding; preserve source offsets for the scan.
+  return lowerHtml.length === html.length
+    ? lowerHtml
+    : html.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
 function findHtmlClosingTag(html: string, tagName: string, start: number): number {
