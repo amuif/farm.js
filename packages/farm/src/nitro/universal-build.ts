@@ -1883,6 +1883,16 @@ async function fetchFarmNavigationDocument(url, headers, recover = true, signal)
     if (recover) window.location.assign(url);
     throw error;
   }
+  // Only an HTML page can be swapped in. A feed, JSON, file, or other API
+  // response belongs to the browser, so it takes the redirect path: a document
+  // navigation that is never cached or reported as a failed navigation.
+  const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
+  if (response.ok && !contentType.includes("text/html")) {
+    response.body?.cancel().catch(() => {});
+    const error = new Error("Farm navigation requires a document load");
+    error.name = "FarmNavigationRedirect";
+    throw error;
+  }
   return response;
 }
 

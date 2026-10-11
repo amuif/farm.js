@@ -193,6 +193,9 @@ repopulating it. Cancelling navigation does not abort a shared background prefet
 When a production HTML request redirects, Farm hands the original URL to a full document
 navigation so the browser preserves the redirect destination, fragments, and push/replace history.
 Prefetching a redirect never navigates the page or caches destination HTML under the original URL.
+A same-origin link whose response is not HTML, such as an RSS feed, JSON, or a file served by an API
+route, is handed to the browser the same way, so it opens as its own document. Prefetching such a
+link never caches it as page HTML.
 Internal `Link` hrefs stay app-relative: when `basePath: "/console"` is configured, `href="/about"`
 renders and navigates to `/console/about`. Do not add the base path to route hrefs yourself.
 For a reusable custom-scheme type, use ``ExternalHref<`customapp:${string}`>`` (or declaration-merge
