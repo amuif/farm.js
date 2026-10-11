@@ -65,6 +65,8 @@ const testSource = String.raw`
     keyedRowsMappedRollingWindowHintedRuntimeFeature,
     keyedRowsStructuralAppendMapHintedRuntimeFeature,
     keyedRowsIdentityRuntimeFeature,
+    keyedRowsIdentityFilterHintedRuntimeFeature,
+    keyedRowsIdentityFilterOnlyRuntimeFeature,
     keyedRowsMembershipRuntimeFeature,
     keyedRowsMapLookupRuntimeFeature,
   } = await import(
@@ -72,16 +74,93 @@ const testSource = String.raw`
   );
   const { List } = await import("@farm.js/react/list");
 
+  // Compiler mutations leave React's previous child fibers stale until the
+  // keyed container is safely re-adopted at a props/Fast Refresh handoff.
+  for (const reactivity of ["static", "hybrid"]) {
+    for (const hydrate of [false, true]) {
+      for (const handoff of ["props", "refresh"]) {
+        const hmrId = "ownership-" + reactivity + hydrate + handoff;
+        let setRows;
+        const calls = [];
+        const definition = (delegated) => ({
+          displayName: "CompatibilityOwnershipRows", hmrId, stateSignature: "1", reactivity,
+          initialize: () => [["a", "b", "c"]],
+          render(props, state, blocks) {
+            const items = () => state[0].get();
+            setRows = (next) => state[0].set(next);
+            return React.createElement("section", null, React.createElement(blocks.KeyedRows, {
+              id: 0, items, rowKey: (item) => item,
+              delegateEvents: props.delegated ?? delegated,
+              events: [{ name: "onClick", path: [1], invoke: (item, index, event) => calls.push(item + ":" + index + ":" + event.currentTarget.tagName) }],
+              bindings: [{ kind: "text", path: [1], read: (item) => [item] }],
+              create: (item) => ({ kind: "element", tag: "li", attributes: [], styles: [], children: [
+                { kind: "element", tag: "input", attributes: [{ name: "value", value: "draft" }], styles: [], children: [] },
+                { kind: "element", tag: "button", attributes: [], styles: [], children: [item] },
+              ] }),
+              render: (event) => React.createElement("ul", null, items().map((item, index) =>
+                React.createElement("li", { key: item },
+                  React.createElement("input", { defaultValue: "draft" }),
+                  React.createElement("button", { onClick: event(item, index, 0) }, item),
+                ),
+              )),
+            }));
+          },
+          bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+        });
+        const Table = createCompiledComponent(definition(true));
+        const container = document.createElement("div");
+        document.body.append(container);
+        const element = (delegated) => React.createElement(React.StrictMode, null, React.createElement(Table, { delegated }));
+        let root;
+        if (hydrate) {
+          container.innerHTML = renderToString(element());
+          flushSync(() => { root = hydrateRoot(container, element()); });
+        } else {
+          root = createRoot(container);
+          flushSync(() => root.render(element()));
+        }
+        const original = container.querySelector("ul");
+        setRows(["b", "c"]);
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(container.querySelector("ul"), original);
+        if (handoff === "props") flushSync(() => root.render(element(false)));
+        else flushSync(() => assert.equal(createCompiledComponent(definition(false)), Table));
+        assert.notEqual(container.querySelector("ul"), original);
+        assert.deepEqual([...container.querySelectorAll("button")].map((button) => button.textContent), ["b", "c"]);
+        const adopted = container.querySelector("ul");
+        const input = container.querySelector("input");
+        input.value = "user draft"; input.focus(); input.setSelectionRange(2, 6);
+        setRows(["b"]);
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(container.querySelector("ul"), adopted);
+        assert.equal(container.querySelector("input"), input);
+        assert.equal(input.value, "user draft");
+        assert.equal(document.activeElement, input);
+        assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 6]);
+        container.querySelector("button").click();
+        assert.equal(calls.at(-1), "b:0:BUTTON");
+        if (handoff === "props") flushSync(() => root.render(element(true)));
+        else flushSync(() => createCompiledComponent(definition(true)));
+        assert.equal(container.querySelector("ul"), adopted);
+        flushSync(() => root.unmount());
+        container.remove();
+      }
+    }
+  }
+
   // Exercise the compiler-selected single-kind paths from the packed package
   // under both supported React majors, including Strict Mode's mount replay.
   for (const [feature, kind] of [
     [keyedRowsIdentityRuntimeFeature, "identityTarget"],
+    [keyedRowsIdentityFilterHintedRuntimeFeature, "identityTarget"],
+    [keyedRowsIdentityFilterOnlyRuntimeFeature, "identityTarget"],
     [keyedRowsMembershipRuntimeFeature, "membershipTarget"],
     [keyedRowsMapLookupRuntimeFeature, "mapLookupTarget"],
   ]) {
     const targetFor = (key) => kind === "identityTarget" ? key : kind === "membershipTarget" ? new Set([key]) : new Map([[key, "yes"]]);
     const isSelected = (value, key) => kind === "identityTarget" ? value === key : kind === "membershipTarget" ? value.has(key) : value.get(key) === "yes";
     let select;
+    let remove;
     const TargetRows = createCompiledComponentWithFeatures({
       displayName: "CompatibilitySingleTargetRows",
       initialize: () => [["a", "b"], targetFor("a")],
@@ -90,8 +169,10 @@ const testSource = String.raw`
         const target = () => state[1].get();
         const selected = (item) => isSelected(target(), item) ? "yes" : "no";
         select = (key) => state[1].set(targetFor(key));
+        remove = (key) => state[0].set((previous) => createCompilerKeyedArrayFilter(previous, previous.filter, (item) => item !== key));
         return React.createElement("section", null, React.createElement(blocks.KeyedRows, {
           id: 0, items, rowKey: (item) => item, structureDependencies: [0],
+          collectionDependency: 0, dependencies: [0, 1], filterIndexIndependent: true,
           bindings: [{ kind: "attribute", name: "data-selected", path: [], dependencies: [1], [kind]: { dependency: 1, read: target }, read: selected }],
           create: (item) => ({ kind: "element", tag: "li", attributes: [{ name: "data-selected", value: selected(item) }], styles: [], children: [item] }),
           render: () => React.createElement("ul", null, items().map((item) => React.createElement("li", { key: item, "data-selected": selected(item) }, item))),
@@ -109,6 +190,18 @@ const testSource = String.raw`
     await Promise.resolve();
     assert.deepEqual([...targetContainer.querySelectorAll("li")], originalRows);
     assert.deepEqual(originalRows.map((row) => row.getAttribute("data-selected")), ["no", "yes"]);
+    remove("a");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual([...targetContainer.querySelectorAll("li")], [originalRows[1]]);
+    select("a");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(originalRows[1].getAttribute("data-selected"), "no");
+    select("b");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(originalRows[1].getAttribute("data-selected"), "yes");
     flushSync(() => targetRoot.unmount());
   }
 

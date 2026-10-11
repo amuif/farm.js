@@ -1,0 +1,360 @@
+import React, { StrictMode, act } from "react";
+import { createRoot, hydrateRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createCompiledComponent,
+  createCompiledComponentWithFeatures,
+  createCompilerKeyedArrayAppend,
+  createCompilerKeyedArrayFilter,
+  createCompilerKeyedArrayMappedRollingWindow,
+  createCompilerKeyedArrayPositionUpdate,
+  createCompilerKeyedArrayPrepend,
+  createCompilerKeyedArrayRollingWindow,
+  createCompilerKeyedArraySlice,
+  keyedRowsMappedRollingWindowHintedRuntimeFeature,
+  type CompiledComponentDefinition,
+} from "../compiler-runtime";
+
+type Mode = "none" | "empty" | "direct" | "missing-path" | "delegated";
+interface Item {
+  id: string;
+  label: string;
+}
+const roots: Root[] = [];
+
+beforeEach(() => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+});
+
+afterEach(async () => {
+  await act(async () => {
+    for (const root of roots.splice(0)) root.unmount();
+  });
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+});
+
+function trackRowIndexWrites() {
+  const writes = { count: 0 };
+  const original = WeakMap.prototype.set;
+  vi.spyOn(WeakMap.prototype, "set").mockImplementation(function (
+    this: WeakMap<object, unknown>,
+    key: object,
+    value: unknown,
+  ) {
+    if (value && typeof value === "object" && "element" in value && value.element === key) {
+      writes.count += 1;
+    }
+    return original.call(this, key, value);
+  });
+  return writes;
+}
+
+function harness(reactivity: "static" | "hybrid") {
+  const calls: string[] = [];
+  const initial = Array.from({ length: 64 }, (_, index) => ({
+    id: `${index}`,
+    label: `Row ${index}`,
+  }));
+  let update: (fn: (items: Item[]) => Item[]) => void = () => undefined;
+  const hmrId = `event-index-${Math.random()}`;
+  function definition(mode: Mode): CompiledComponentDefinition<{ mode?: Mode }> {
+    return {
+      displayName: "EventIndexRows",
+      hmrId,
+      stateSignature: "1",
+      reactivity,
+      initialize: () => [initial],
+      render(props, state, blocks) {
+        const currentMode = props.mode ?? mode;
+        const hasEvents = !["none", "empty"].includes(currentMode);
+        const items = () => state[0].get() as Item[];
+        update = (fn) => state[0].set((previous) => fn(previous as Item[]));
+        return (
+          <section>
+            <blocks.KeyedRows
+              id={0}
+              items={items}
+              collectionDependency={0}
+              dependencies={[0]}
+              structureDependencies={[0]}
+              prependIndexIndependent
+              positionIndexIndependent
+              filterIndexIndependent
+              delegateEvents={currentMode !== "direct" && currentMode !== "none"}
+              events={
+                hasEvents
+                  ? [
+                      {
+                        name: "onClick",
+                        path: currentMode === "missing-path" ? undefined : [],
+                        invoke: (item, index, event) =>
+                          calls.push(
+                            `${(item as Item).label}:${index}:${(event.currentTarget as HTMLElement).dataset.key}`,
+                          ),
+                      },
+                    ]
+                  : currentMode === "empty"
+                    ? []
+                    : undefined
+              }
+              rowKey={(item) => (item as Item).id}
+              create={(item) => ({
+                kind: "element",
+                tag: "button",
+                attributes: [{ name: "data-key", value: (item as Item).id }],
+                styles: [],
+                children: [(item as Item).label],
+              })}
+              bindings={[
+                {
+                  kind: "text",
+                  path: [],
+                  dependencies: [],
+                  read: (item) => [(item as Item).label],
+                },
+              ]}
+              render={(event) => (
+                <div>
+                  {items().map((item, index) => (
+                    <button
+                      data-key={item.id}
+                      key={item.id}
+                      onClick={hasEvents ? event(item, index, 0) : undefined}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    };
+  }
+  return { calls, initial, definition, update: (fn: (items: Item[]) => Item[]) => update(fn) };
+}
+
+async function change(fn: () => void) {
+  await act(async () => {
+    fn();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe("keyed-row delegated element index", () => {
+  for (const reactivity of ["static", "hybrid"] as const) {
+    for (const lifecycle of ["mount", "hydrate"] as const) {
+      it.each(["none", "empty", "direct", "missing-path", "delegated"] as const)(
+        `${reactivity}/${lifecycle}: indexes only incoming delegated rolling-window rows in %s mode`,
+        async (mode) => {
+          const h = harness(reactivity);
+          const Table = createCompiledComponentWithFeatures(h.definition(mode), [
+            keyedRowsMappedRollingWindowHintedRuntimeFeature,
+          ]);
+          const container = document.createElement("div");
+          document.body.append(container);
+          const content = (
+            <StrictMode>
+              <Table />
+            </StrictMode>
+          );
+          if (lifecycle === "hydrate") container.innerHTML = renderToString(content);
+          await act(async () => {
+            const root =
+              lifecycle === "hydrate" ? hydrateRoot(container, content) : createRoot(container);
+            roots.push(root);
+            if (lifecycle === "mount") root.render(content);
+          });
+          const retained = container.querySelector<HTMLButtonElement>('[data-key="32"]')!;
+          retained.focus();
+          const writes = trackRowIndexWrites();
+          let expected = h.initial;
+          await change(() => {
+            for (let index = 0; index < 2; index += 1) {
+              h.update((items) => {
+                const kept = createCompilerKeyedArraySlice(items, items.slice, 1) as Item[];
+                expected = createCompilerKeyedArrayMappedRollingWindow(items, kept, [
+                  ...kept,
+                  { id: `added-${index}`, label: `Added ${index}` },
+                ]) as Item[];
+                return expected;
+              });
+            }
+          });
+          expect(writes.count).toBe(mode === "delegated" ? 2 : 0);
+          const rows = [...container.querySelectorAll<HTMLButtonElement>("button")];
+          expect(rows.map((row) => row.dataset.key)).toEqual(expected.map((item) => item.id));
+          expect(rows.map((row) => row.textContent)).toEqual(expected.map((item) => item.label));
+          expect(container.querySelector('[data-key="32"]')).toBe(retained);
+          expect(document.activeElement).toBe(retained);
+          if (!["none", "empty"].includes(mode)) {
+            await change(() => {
+              retained.click();
+              rows.at(-1)!.click();
+            });
+            expect(h.calls.slice(-2)).toEqual(["Row 32:30:32", "Added 1:63:added-1"]);
+          }
+        },
+      );
+
+      it.each(["none", "empty", "direct", "missing-path", "delegated"] as const)(
+        `${reactivity}/${lifecycle}: indexes only delegated rows in %s mode`,
+        async (mode) => {
+          const h = harness(reactivity);
+          const Table = createCompiledComponent(h.definition(mode));
+          const container = document.createElement("div");
+          document.body.append(container);
+          const content = (
+            <StrictMode>
+              <Table />
+            </StrictMode>
+          );
+          if (lifecycle === "hydrate") container.innerHTML = renderToString(content);
+          const serverRows = [...container.querySelectorAll("button")];
+          const writes = trackRowIndexWrites();
+          await act(async () => {
+            const root =
+              lifecycle === "hydrate" ? hydrateRoot(container, content) : createRoot(container);
+            roots.push(root);
+            if (lifecycle === "mount") root.render(content);
+          });
+          if (lifecycle === "hydrate")
+            expect([...container.querySelectorAll("button")]).toEqual(serverRows);
+          if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
+          else expect(writes.count).toBe(0);
+
+          const retained = container.querySelector<HTMLButtonElement>('[data-key="32"]')!;
+          retained.focus();
+          const operations: Array<(items: Item[]) => Item[]> = [
+            (items) =>
+              createCompilerKeyedArrayAppend(items, [
+                ...items,
+                { id: "appended", label: "Appended" },
+              ]) as Item[],
+            (items) =>
+              createCompilerKeyedArrayPrepend(items, [
+                { id: "prepended", label: "Prepended" },
+                ...items,
+              ]) as Item[],
+            (items) =>
+              createCompilerKeyedArrayPositionUpdate(
+                items,
+                Array.prototype.toSpliced,
+                "insert",
+                1,
+                0,
+                { id: "inserted", label: "Inserted" },
+              ) as Item[],
+            (items) =>
+              createCompilerKeyedArrayFilter(
+                items,
+                items.filter,
+                (item: Item) => item.id !== "0",
+              ) as Item[],
+            (items) => {
+              const kept = createCompilerKeyedArraySlice(items, items.slice, 1) as Item[];
+              return createCompilerKeyedArrayRollingWindow(items, kept, [
+                ...kept,
+                { id: "rolled", label: "Rolled" },
+              ]) as Item[];
+            },
+            (items) => [...items].reverse().map((item) => ({ ...item, label: `${item.label}!` })),
+          ];
+          let expected = h.initial;
+          for (const operation of operations) {
+            writes.count = 0;
+            await change(() =>
+              h.update((items) => {
+                expected = operation(items);
+                return expected;
+              }),
+            );
+            const rows = [...container.querySelectorAll<HTMLButtonElement>("button")];
+            expect(rows.map((row) => row.dataset.key)).toEqual(expected.map((item) => item.id));
+            expect(rows.map((row) => row.textContent)).toEqual(expected.map((item) => item.label));
+            expect(container.querySelector('[data-key="32"]')).toBe(retained);
+            expect(document.activeElement).toBe(retained);
+            if (mode !== "delegated") expect(writes.count).toBe(0);
+            if (!["none", "empty"].includes(mode)) {
+              await change(() => rows.at(-1)!.click());
+              expect(h.calls.at(-1)).toBe(
+                `${expected.at(-1)!.label}:${expected.length - 1}:${expected.at(-1)!.id}`,
+              );
+            }
+          }
+          await change(() => h.update(() => []));
+          expect(container.querySelectorAll("button")).toHaveLength(0);
+          await change(() => h.update(() => [{ id: "new", label: "New" }]));
+          if (!["none", "empty"].includes(mode)) {
+            await change(() => container.querySelector("button")!.click());
+            expect(h.calls.at(-1)).toBe("New:0:new");
+          }
+        },
+      );
+    }
+
+    it(`${reactivity}: rebuilds when Fast Refresh changes event ownership`, async () => {
+      const h = harness(reactivity);
+      const Table = createCompiledComponent(h.definition("none"));
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<Table />));
+      let retained = container.querySelector('[data-key="32"]');
+      const writes = trackRowIndexWrites();
+      let staleReactRows = false;
+      for (const mode of ["delegated", "direct", "empty", "delegated"] as const) {
+        writes.count = 0;
+        await change(() => {
+          expect(createCompiledComponent(h.definition(mode))).toBe(Table);
+        });
+        const adopted = container.querySelector('[data-key="32"]');
+        // The ownership fix resets stale React fibers once at the handoff,
+        // but the following compiler/React update must retain the adopted row.
+        if (staleReactRows) expect(adopted).not.toBe(retained);
+        else expect(adopted).toBe(retained);
+        retained = adopted;
+        if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
+        else expect(writes.count).toBe(0);
+        writes.count = 0;
+        await change(() => h.update((items) => items.slice(1)));
+        expect(container.querySelector('[data-key="32"]')).toBe(retained);
+        if (mode !== "delegated") expect(writes.count).toBe(0);
+        staleReactRows = mode !== "direct";
+        const row = container.querySelector<HTMLButtonElement>("button")!;
+        if (mode !== "empty") {
+          await change(() => row.click());
+          expect(h.calls.at(-1)).toBe(`${row.textContent}:0:${row.dataset.key}`);
+        }
+      }
+    });
+
+    it(`${reactivity}: re-adopts ordinary callbacks when delegation toggles through props`, async () => {
+      const h = harness(reactivity);
+      const Table = createCompiledComponent(h.definition("direct"));
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      const writes = trackRowIndexWrites();
+      for (const mode of ["direct", "delegated", "direct", "delegated"] as const) {
+        writes.count = 0;
+        await act(async () => root.render(<Table mode={mode} />));
+        if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
+        else expect(writes.count).toBe(0);
+        writes.count = 0;
+        await change(() => h.update((items) => items.slice(1)));
+        if (mode === "direct") expect(writes.count).toBe(0);
+        const row = container.querySelector<HTMLButtonElement>("button")!;
+        await change(() => row.click());
+        expect(h.calls.at(-1)).toBe(`${row.textContent}:0:${row.dataset.key}`);
+      }
+    });
+  }
+});
