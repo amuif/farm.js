@@ -5373,6 +5373,7 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   reportFarmPreloadWarnings,
   renderFarmLocaleAlternateLinks,
   renderMetadataHead,
+  resolveFarmNotFoundMetadata,
   resolveFarmRouteContext,
   resolveFarmTrailingSlashRedirect,
   resolveDefaultErrorStatus,
@@ -5673,6 +5674,7 @@ const farmProductionSiteTelemetry = ${
 // Custom 404 page component (if provided)
 const hasCustomNotFound = ${notFoundPath ? "true" : "false"};
 const CustomNotFoundComponent = ${notFoundPath ? "CustomNotFound.default || CustomNotFound" : "null"};
+const CustomNotFoundModule = ${notFoundPath ? "CustomNotFound" : "null"};
 const farmUserConfig = ${
     configModulePath ? "(FarmUserConfigModule.default || FarmUserConfigModule)" : "null"
   };
@@ -8672,6 +8674,14 @@ async function handleFarmRequestInContext(
     notFoundElement = wrapWithFarmIntegrationProviders(notFoundElement);
     
     const html = await ReactDOMServer.renderToString(notFoundElement);
+    // The layouts' and the not-found page's metadata, as the development renderer uses it.
+    const notFoundMetadata = renderMetadataHead(
+      await resolveFarmNotFoundMetadata(
+        applicableLayouts.map((layout) => layout.module),
+        hasCustomNotFound ? CustomNotFoundModule : null,
+      ),
+      { pathname },
+    );
     
     // Check if layout provides full HTML document
     const fullDocument = extractFarmFullDocument(html);
@@ -8680,6 +8690,11 @@ async function handleFarmRequestInContext(
     let fullHtml;
     if (hasFullDocument) {
       fullHtml = ensureFarmDocumentHead(fullDocument)
+        // The not-found title replaces any title the layout rendered, as metadata does on pages.
+        .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
+          "<head" + attrs + ">" +
+          headContent.replace(/<title\\b[^>]*>[\\s\\S]*?<\\/title>\\s*/gi, "") +
+          "\\n  <title>" + notFoundMetadata.title + "</title>" + notFoundMetadata.tags + "\\n</head>")
         .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
         .replace(/<\\/head>/i, () => renderFarmRendererHydrationScript() + '\\n</head>')
         .replace(
@@ -8696,9 +8711,9 @@ async function handleFarmRequestInContext(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  \${notFoundMetadata.hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   <link rel="stylesheet" href="/__farm_client_css_href__">
-  <title>404 - Page Not Found</title>
+  <title>\${notFoundMetadata.title}</title>\${notFoundMetadata.tags}
   \${renderFarmRendererHydrationScript()}
 </head>
 <body>

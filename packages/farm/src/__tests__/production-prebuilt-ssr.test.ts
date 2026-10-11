@@ -4648,6 +4648,48 @@ export function GET() {
     }
   }, 120_000);
 
+  it("titles the not-found page from its own and the root layout's metadata", async () => {
+    // Both document shapes: a layout that renders <html> itself, and one that doesn't.
+    for (const layout of [
+      "export default function Layout({ children }) { return <html><head><title>Hard-coded</title></head><body>{children}</body></html>; }",
+      'export default function Layout({ children }) { return <div id="app">{children}</div>; }',
+    ]) {
+      const root = await createProductionFixture();
+      try {
+        await fs.writeFile(
+          path.join(root, "src", "app", "layout.tsx"),
+          'export const metadata = { title: { template: "%s | Acme", default: "Acme" }, description: "Acme app" };\n' +
+            layout,
+        );
+        await fs.writeFile(
+          path.join(root, "src", "app", "not-found.tsx"),
+          'export const metadata = { title: "Page not found" };\n' +
+            "export default function NotFound() { return <main>custom not found</main>; }",
+        );
+        const config = await resolveConfig(
+          { root, srcDir: "src", images: { provider: "none" }, telemetry: false },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(404);
+            const html = await response.text();
+            expect(html).toContain("custom not found");
+            expect(html.match(/<title>[^<]*<\/title>/g)).toEqual([
+              "<title>Page not found | Acme</title>",
+            ]);
+            expect(html).toContain('<meta name="description" content="Acme app"');
+          },
+          "/missing",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 240_000);
+
   it("answers redirect() and notFound() from pages, streams and middleware", async () => {
     const root = await createProductionFixture();
     const write = async (relativePath: string, source: string) => {
