@@ -4819,6 +4819,26 @@ function parseRouteRenderingDirectiveFromDisk(modulePath: string) {
 
 export function generatePreloadResponseRuntimeSource(): string {
   return `
+// Farm builds buffered HTML responses from strings it already holds. Remember
+// that string per Response object so the budget step can scan it without
+// draining and re-encoding the body. Any wrapper that builds a new Response
+// (plugins, CSP nonces, configured headers) misses the map and falls back to
+// reading the body, so a transformed body is never paired with a stale string.
+const farmBufferedHtml = new WeakMap();
+
+function rememberFarmBufferedHtml(response, html) {
+  // Only candidate-bearing documents are read back; Response.text() strips a
+  // leading BOM, so those keep the body read to preserve that behavior.
+  if (
+    typeof html === "string" &&
+    html.charCodeAt(0) !== 0xfeff &&
+    response.headers.get("x-farm-preload-buffered") === "1"
+  ) {
+    farmBufferedHtml.set(response, html);
+  }
+  return response;
+}
+
 function getFarmBufferedPreloadMarker(html) {
   // Prove eligibility while Farm still owns the complete document string.
   // Candidate-bearing or unknown bodies must retain the full parser path.
@@ -4873,15 +4893,19 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   headers = new Headers(headers);
   headers.delete("x-farm-preload-streaming");
   headers.delete("x-farm-preload-buffered");
-  const html = hasNoHtmlPreloads ? "" : await response.text();
+  const ownedHtml = hasNoHtmlPreloads ? undefined : farmBufferedHtml.get(response);
+  const html = hasNoHtmlPreloads ? "" : (ownedHtml ?? await response.text());
   const managed = manageFarmDocumentPreloads(html, linkHeader, farmPreloadConfig);
+  // A remembered document the budget left unchanged keeps its unread body.
+  const reusesBody = hasNoHtmlPreloads || (ownedHtml !== undefined && managed.html === html);
+  if (ownedHtml !== undefined && !reusesBody) response.body?.cancel().catch(() => {});
   if (managed.linkHeader) headers.set("Link", managed.linkHeader);
   else headers.delete("Link");
   if (managed.html !== html) headers.delete("Content-Length");
   reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
     ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
     : undefined);
-  return new Response(hasNoHtmlPreloads ? response.body : managed.html, {
+  return new Response(reusesBody ? response.body : managed.html, {
     status: response.status,
     statusText: response.statusText,
     headers,
@@ -7793,7 +7817,7 @@ async function handleFarmRequestInContext(
             status: 200,
             durationMs: Date.now() - requestStartTime,
           });
-          return applyProductionMiddlewareHeaders(new Response(cachedPPRShell, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(cachedPPRShell, {
             status: 200,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -7801,7 +7825,7 @@ async function handleFarmRequestInContext(
               ...(farmFontPreloadHeader ? { "Link": farmFontPreloadHeader } : {}),
               ...getPPRHeaders("hit", pprConfig),
             },
-          }), middlewareHeaders);
+          }), middlewareHeaders), cachedPPRShell);
         }
         emitFarmEvent({ type: "ppr.shell.miss", route: pathname, key: pprCacheKey });
       }
@@ -8431,13 +8455,13 @@ async function handleFarmRequestInContext(
           durationMs: Date.now() - requestStartTime,
         });
 
-        return applyProductionMiddlewareHeaders(new Response(
+        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
           fullHtml,
           { 
             status: pageStatus,
             headers: { ...responseHeaders, "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fullHtml) }
           }
-        ), middlewareHeaders);
+        ), middlewareHeaders), fullHtml);
       }
     } catch (error) {
       if (isFarmRedirectError(error)) {
@@ -8537,14 +8561,14 @@ async function handleFarmRequestInContext(
             status: errorStatus,
             durationMs: Date.now() - requestStartTime,
           });
-          return applyProductionMiddlewareHeaders(new Response(errorDocument, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(errorDocument, {
             status: errorStatus,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
               "Cache-Control": "private, no-store",
               "x-farm-preload-buffered": getFarmBufferedPreloadMarker(errorDocument),
             },
-          }), middlewareHeaders);
+          }), middlewareHeaders), errorDocument);
         } catch (boundaryError) {
           console.error("Route error boundary failed:", boundaryError);
         }
@@ -8572,7 +8596,7 @@ async function handleFarmRequestInContext(
         farmResolvedRuntimeConfig.basePath,
         getFarmTheme(request)
       );
-      return applyProductionMiddlewareHeaders(new Response(
+      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
         fallbackDocument,
         {
           status: errorStatus,
@@ -8582,7 +8606,7 @@ async function handleFarmRequestInContext(
             "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fallbackDocument),
           },
         }
-      ), middlewareHeaders);
+      ), middlewareHeaders), fallbackDocument);
     }
   }
 
@@ -8684,13 +8708,13 @@ async function handleFarmRequestInContext(
       durationMs: Date.now() - requestStartTime,
     });
 
-    return applyProductionMiddlewareHeaders(new Response(fullHtml, {
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(fullHtml, {
       status: 404,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fullHtml),
       }
-    }), middlewareHeaders);
+    }), middlewareHeaders), fullHtml);
   } catch (error) {
     console.error("404 render error:", error);
     const fallbackDocument = applyFarmThemeDocument(
@@ -8699,13 +8723,13 @@ async function handleFarmRequestInContext(
       farmResolvedRuntimeConfig.basePath,
       getFarmTheme(request)
     );
-    return applyProductionMiddlewareHeaders(new Response(
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
       fallbackDocument,
       {
         status: 404,
         headers: { "Content-Type": "text/html", "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fallbackDocument) },
       }
-    ), middlewareHeaders);
+    ), middlewareHeaders), fallbackDocument);
   }
   }
   ${
@@ -8766,11 +8790,11 @@ async function handleFarmPluginRequest(request, runtimeOptions, adapterContext) 
   headers.delete("content-length");
   headers.delete("x-farm-preload-streaming");
   headers.set("x-farm-preload-buffered", getFarmBufferedPreloadMarker(html));
-  return new Response(html, {
+  return rememberFarmBufferedHtml(new Response(html, {
     status: response.status,
     statusText: response.statusText,
     headers,
-  });
+  }), html);
 }
 
 ${generatePreloadResponseRuntimeSource()}

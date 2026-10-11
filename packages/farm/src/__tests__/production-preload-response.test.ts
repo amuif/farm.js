@@ -21,7 +21,7 @@ function runtime(mode: FarmPreloadMode = "enforce") {
     "farmPreloadConfig",
     "reportFarmPreloadWarnings",
     "Headers",
-    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, applyFarmPreloadBudget };`,
+    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, rememberFarmBufferedHtml, applyFarmPreloadBudget };`,
   )(
     manageFarmDocumentPreloads,
     manageFarmLinkHeaderPreloads,
@@ -35,6 +35,7 @@ function runtime(mode: FarmPreloadMode = "enforce") {
     }),
   ) as {
     getFarmBufferedPreloadMarker(html: unknown): string;
+    rememberFarmBufferedHtml(response: Response, html: string): Response;
     applyFarmPreloadBudget(response: Response, pathname: string): Promise<Response>;
   };
   return {
@@ -47,6 +48,10 @@ function runtime(mode: FarmPreloadMode = "enforce") {
       headers.set("content-type", "text/html; charset=utf-8");
       headers.set("x-farm-preload-buffered", generated.getFarmBufferedPreloadMarker(html));
       return new Response(html, { ...init, headers });
+    },
+    // A buffered response as Farm's renderer builds it: from a string it keeps.
+    owned(html: string, init: ResponseInit = {}) {
+      return generated.rememberFarmBufferedHtml(this.response(html, init), html);
     },
   };
 }
@@ -100,6 +105,96 @@ describe("production preload response processing", () => {
     expect(original.headers.get("link")).toBe("");
     expect(output.headers.has("link")).toBe(false);
     expect(await output.text()).toBe("html");
+  });
+
+  describe("renderer-owned buffered HTML", () => {
+    const hero = '<link rel="preload" as="image" href="/hero.webp" fetchpriority="high">';
+    const below = '<link rel="preload" as="image" href="/below.webp">';
+
+    it.each(["enforce", "warn"] as const)(
+      "scans the remembered string and keeps the unread body within budget (%s)",
+      async (mode) => {
+        const r = runtime(mode);
+        const html = `<html><head>${hero}</head><body><p>fits 🌱</p></body></html>`;
+        const original = r.owned(html, {
+          status: 201,
+          statusText: "Created",
+          headers: { "content-length": String(Buffer.byteLength(html)) },
+        });
+        original.headers.append("set-cookie", "a=1; Path=/");
+        original.headers.append("set-cookie", "b=2; Path=/");
+        const text = vi.spyOn(original, "text");
+        const output = await r.applyFarmPreloadBudget(original, "/");
+
+        expect(text).not.toHaveBeenCalled();
+        expect(output.body).toBe(original.body);
+        expect(output.status).toBe(201);
+        expect(output.statusText).toBe("Created");
+        expect(output.headers.get("content-length")).toBe(String(Buffer.byteLength(html)));
+        expect(output.headers.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+        expect(output.headers.has("x-farm-preload-buffered")).toBe(false);
+        expect(await output.text()).toBe(html);
+      },
+    );
+
+    it("keeps the body unread when warn mode reports an over-budget document", async () => {
+      const r = runtime("warn");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = r.owned(html);
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(output.body).toBe(original.body);
+      expect(r.report).toHaveBeenCalledWith(
+        [{ kind: "image", count: 2, budget: 1, removed: 0 }],
+        "route /",
+      );
+      expect(await output.text()).toBe(html);
+    });
+
+    it("applies an enforced budget from the remembered string and cancels the body", async () => {
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = r.owned(html, {
+        headers: { "content-length": String(Buffer.byteLength(html)) },
+      });
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(original.bodyUsed).toBe(true);
+      expect(output.headers.has("content-length")).toBe(false);
+      expect(await output.text()).toBe(html.replace(below, ""));
+    });
+
+    it.each([
+      [
+        "a response it did not build",
+        (r: ReturnType<typeof runtime>, html: string) => r.response(html),
+      ],
+      [
+        "a rebuilt response (plugins, CSP, configured headers)",
+        (r: ReturnType<typeof runtime>, html: string) => {
+          const owned = r.owned(html);
+          return new Response(owned.body, { status: owned.status, headers: owned.headers });
+        },
+      ],
+      [
+        "a document that starts with a BOM",
+        (r: ReturnType<typeof runtime>, html: string) => r.owned(`\ufeff${html}`),
+      ],
+    ])("reads the body back for %s", async (_label, build) => {
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = build(r, html);
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).toHaveBeenCalledOnce();
+      // Response.text() drops a leading BOM; the output keeps that behavior.
+      expect(await output.text()).toBe(html.replace(below, ""));
+    });
   });
 
   it("still strips unrecognized internal markers from HTML responses", async () => {
