@@ -3802,70 +3802,109 @@ export const GET = createEndpoint(
     }
   }, 120_000);
 
-  it("keeps plugin-replaced requests current during production rendering", async () => {
-    const root = await createProductionFixture();
-    const runtimePlugin = `
+  it.each([false, true])(
+    "keeps plugin-replaced requests current during production rendering (headers: %s)",
+    async (withHeaders) => {
+      const root = await createProductionFixture();
+      const runtimePlugin = `
 {
   name: "production-runtime-request-context",
   runtime: {
     before({ request }) {
       const headers = new Headers(request.headers);
       headers.set("x-plugin-request", "transformed");
-      return new Request(request, { headers });
+      const url = new URL(request.url);
+      url.pathname = "/base/target";
+      return new Request(new Request(url, request), { headers });
     },
   },
 }`;
 
-    try {
-      await fs.writeFile(
-        path.join(root, "farm.config.mjs"),
-        `export default { plugins: [${runtimePlugin}] };`,
-      );
-      await fs.writeFile(
-        path.join(root, "src", "app", "page.tsx"),
-        `
+      try {
+        await fs.writeFile(
+          path.join(root, "farm.config.mjs"),
+          `export default { plugins: [${runtimePlugin}] };`,
+        );
+        await fs.mkdir(path.join(root, "src", "app", "target"));
+        await fs.writeFile(
+          path.join(root, "src", "app", "target", "page.tsx"),
+          `
 import { getCurrentRequest } from "@farm.js/core/request";
 
 export default function Page() {
-  return <main data-plugin-request={getCurrentRequest().headers.get("x-plugin-request")}>plugin request context</main>;
+  return <main data-plugin-request={getCurrentRequest().headers.get("x-plugin-request")} data-plugin-url={getCurrentRequest().url}>
+    <link rel="preload" as="image" href="/first.webp" />
+    <link rel="preload" as="image" href="/second.webp" />
+    plugin request context
+  </main>;
 }
 `.trim(),
-      );
-      const config = await resolveConfig(
-        {
-          root,
-          srcDir: "src",
-          images: { provider: "none" },
-          generateBuildId: () => "production-runtime-request-context-test",
-          plugins: [
-            definePlugin({
-              name: "production-runtime-request-context",
-              runtime: {
-                before({ request }) {
-                  const headers = new Headers(request.headers);
-                  headers.set("x-plugin-request", "transformed");
-                  return new Request(request, { headers });
+        );
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            basePath: "/base",
+            images: { provider: "none" },
+            telemetry: false,
+            headers: () =>
+              withHeaders
+                ? [
+                    { source: "/incoming", headers: [{ key: "x-response-path", value: "stale" }] },
+                    {
+                      source: "/target",
+                      headers: [
+                        { key: "x-response-path", value: "current" },
+                        { key: "Set-Cookie", value: "first=1; Path=/" },
+                        { key: "Set-Cookie", value: "second=2; Path=/" },
+                      ],
+                    },
+                  ]
+                : [],
+            generateBuildId: () => "production-runtime-request-context-test",
+            plugins: [
+              definePlugin({
+                name: "production-runtime-request-context",
+                runtime: {
+                  before({ request }) {
+                    const headers = new Headers(request.headers);
+                    headers.set("x-plugin-request", "transformed");
+                    const url = new URL(request.url);
+                    url.pathname = "/base/target";
+                    return new Request(new Request(url, request), { headers });
+                  },
                 },
-              },
-            }),
-          ],
-        },
-        "production",
-      );
-      await build(config, { root, preset: "node-server" });
+              }),
+            ],
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
 
-      await runProductionRequest(
-        path.join(root, ".farm", ".output", "server"),
-        async (response) => {
-          expect(response.status).toBe(200);
-          const html = await response.text();
-          expect(html.match(/<main[^>]*>/)?.[0]).toContain('data-plugin-request="transformed"');
-        },
-      );
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  }, 120_000);
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(200);
+            const html = await response.text();
+            expect(html.match(/<main[^>]*>/)?.[0]).toContain('data-plugin-request="transformed"');
+            expect(html.match(/<main[^>]*>/)?.[0]).toContain("/base/target?q=one&amp;q=two");
+            expect(html).toContain('href="/first.webp"');
+            expect(html).not.toContain('href="/second.webp"');
+            expect(response.headers.get("x-response-path")).toBe(withHeaders ? "current" : null);
+            if (withHeaders)
+              expect(response.headers.getSetCookie()).toEqual([
+                "first=1; Path=/",
+                "second=2; Path=/",
+              ]);
+          },
+          "/base/incoming?q=one&q=two",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
 
   it("honors NITRO_BUILDER=rollup", async () => {
     const root = await createProductionFixture();
@@ -4608,6 +4647,48 @@ export function GET() {
       await fs.rm(root, { recursive: true, force: true });
     }
   }, 120_000);
+
+  it("titles the not-found page from its own and the root layout's metadata", async () => {
+    // Both document shapes: a layout that renders <html> itself, and one that doesn't.
+    for (const layout of [
+      "export default function Layout({ children }) { return <html><head><title>Hard-coded</title></head><body>{children}</body></html>; }",
+      'export default function Layout({ children }) { return <div id="app">{children}</div>; }',
+    ]) {
+      const root = await createProductionFixture();
+      try {
+        await fs.writeFile(
+          path.join(root, "src", "app", "layout.tsx"),
+          'export const metadata = { title: { template: "%s | Acme", default: "Acme" }, description: "Acme app" };\n' +
+            layout,
+        );
+        await fs.writeFile(
+          path.join(root, "src", "app", "not-found.tsx"),
+          'export const metadata = { title: "Page not found" };\n' +
+            "export default function NotFound() { return <main>custom not found</main>; }",
+        );
+        const config = await resolveConfig(
+          { root, srcDir: "src", images: { provider: "none" }, telemetry: false },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(404);
+            const html = await response.text();
+            expect(html).toContain("custom not found");
+            expect(html.match(/<title>[^<]*<\/title>/g)).toEqual([
+              "<title>Page not found | Acme</title>",
+            ]);
+            expect(html).toContain('<meta name="description" content="Acme app"');
+          },
+          "/missing",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 240_000);
 
   it("answers redirect() and notFound() from pages, streams and middleware", async () => {
     const root = await createProductionFixture();

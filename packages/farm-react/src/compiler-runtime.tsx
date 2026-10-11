@@ -2863,6 +2863,10 @@ export interface CompilerHostElement {
 
 export type CompilerKeyedRowElement = CompilerHostElement;
 
+// Shared by every delegated row onChange so React sees a handler without a
+// per-row allocation; the container's delegated listener does the work.
+const delegatedRowChangePlaceholder: React.EventHandler<React.SyntheticEvent> = () => undefined;
+
 export interface CompilerKeyedRowEvent {
   name: string;
   /** Host-element path relative to the keyed row root. */
@@ -6710,13 +6714,14 @@ interface KeyedUpdateRuntime {
     root: Element,
     reactOwnedRows: boolean,
   ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  // Returns a fresh runtime-owned native map after validating all retained rows.
   filter?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
     instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<string, CompilerKeyedRowInstance> | undefined;
   prepend?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
@@ -6779,6 +6784,15 @@ const keyedUpdateRuntime: KeyedUpdateRuntime = {
 
 const keyedFilterUpdateRuntime: KeyedUpdateRuntime = {
   ...keyedUpdateRuntime,
+  filter: reconcileCompilerKeyedArrayFilter,
+};
+
+// Only selected when the compiler emits removal hints without map/append hints.
+// Other updates continue through the existing full keyed reconciliation path.
+const keyedFilterOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: () => undefined,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
   filter: reconcileCompilerKeyedArrayFilter,
 };
 
@@ -8622,14 +8636,15 @@ function reconcileCompilerKeyedArrayPrepend(
     }
   }
 
-  const knownKeys = new Set(instances.keys());
+  // Check committed rows in place; only the incoming prefix needs its own key set.
+  const incomingKeys = new Set<string>();
   const prepended: CompilerKeyedRowInstance[] = [];
   try {
     for (let index = 0; index < prefixLength; index += 1) {
       const item = finalValue[index];
       const key = keyedRowIdentity(props.rowKey(item, index));
-      if (knownKeys.has(key)) return undefined;
-      knownKeys.add(key);
+      if (instances.has(key) || incomingKeys.has(key)) return undefined;
+      incomingKeys.add(key);
       const descriptor = props.create(item, index);
       prepended.push({
         key,
@@ -8963,7 +8978,7 @@ function reconcileCompilerKeyedArrayFilter(
   collectionToken: object | undefined,
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -9120,6 +9135,7 @@ function createKeyedRowsBlockComponentCore(
     declare private stop: (() => void) | undefined;
     declare private id: number | undefined;
     private instances = new Map<string, CompilerKeyedRowInstance>();
+    private reactElements: readonly Element[] = [];
     private keyedTargets = options.keyedTargets?.(this.props);
     private collectionToken: object | undefined;
     private renderVersion = 0;
@@ -9159,7 +9175,14 @@ function createKeyedRowsBlockComponentCore(
         return (event) => this.currentProps.events?.[eventId]?.invoke(item, index, event);
       }
       if (this.usesDelegatedEvents()) {
-        return undefined as unknown as React.EventHandler<React.SyntheticEvent>;
+        // The container's delegated listener runs the handler. React still checks
+        // that controlled value/checked fields carry onChange, so give change
+        // events one shared no-op instead of none; other events stay unset.
+        return (
+          this.currentProps.events?.[eventId]?.name === "onChange"
+            ? delegatedRowChangePlaceholder
+            : undefined
+        ) as React.EventHandler<React.SyntheticEvent>;
       }
       const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
       let handlers = this.eventHandlers.get(key);
@@ -9189,6 +9212,8 @@ function createKeyedRowsBlockComponentCore(
 
     private rebuildElementIndex(instances: ReadonlyMap<string, CompilerKeyedRowInstance>): void {
       this.instancesByElement = new WeakMap();
+      // Ordinary row callbacks resolve through this.instances, not the DOM index.
+      if (!this.usesDelegatedEvents()) return;
       for (const instance of instances.values()) {
         this.instancesByElement.set(instance.element, instance);
       }
@@ -9342,17 +9367,18 @@ function createKeyedRowsBlockComponentCore(
       );
     }
 
-    private pruneEventHandlers(keys: readonly string[]): void {
-      const active = new Set(keys);
+    // Call only after committing this.instances: it is the authoritative live-key set.
+    private pruneEventHandlers(): void {
+      if (this.eventHandlers.size === 0) return;
       for (const key of this.eventHandlers.keys()) {
-        if (!active.has(key)) this.eventHandlers.delete(key);
+        if (!this.instances.has(key)) this.eventHandlers.delete(key);
       }
     }
 
-    private pruneConditionalListeners(keys: readonly string[]): void {
-      const active = new Set(keys);
+    private pruneConditionalListeners(): void {
+      if (this.conditionalListeners.size === 0) return;
       for (const key of this.conditionalListeners.keys()) {
-        if (!active.has(key)) this.conditionalListeners.delete(key);
+        if (!this.instances.has(key)) this.conditionalListeners.delete(key);
       }
     }
 
@@ -9417,9 +9443,10 @@ function createKeyedRowsBlockComponentCore(
       }
       this.cleanupHostScopes();
       this.instances = instances;
+      this.reactElements = elements;
       this.rebuildElementIndex(instances);
-      this.pruneEventHandlers(rows.keys);
-      this.pruneConditionalListeners(rows.keys);
+      this.pruneEventHandlers();
+      this.pruneConditionalListeners();
       this.commitCurrentCollection();
       return true;
     }
@@ -9911,8 +9938,8 @@ function createKeyedRowsBlockComponentCore(
       }
       this.instances = keyedRowInstancesByKey(nextInstances);
       this.rebuildElementIndex(this.instances);
-      this.pruneEventHandlers(rows.keys);
-      this.pruneConditionalListeners(rows.keys);
+      this.pruneEventHandlers();
+      this.pruneConditionalListeners();
       this.commitCurrentCollection(dirtyState);
       this.notifyConditionalChanges(conditionalChanges, afterCommit);
     }
@@ -9964,9 +9991,8 @@ function createKeyedRowsBlockComponentCore(
           if (positionedInstances !== this.instances) {
             this.instances = new Map(positionedInstances);
             this.rebuildElementIndex(this.instances);
-            const keys = [...this.instances.keys()];
-            this.pruneEventHandlers(keys);
-            this.pruneConditionalListeners(keys);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
           }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -9989,9 +10015,8 @@ function createKeyedRowsBlockComponentCore(
             // Pure reorders keep the same element -> instance associations;
             // those instances already hold their current item and index.
             this.rebuildElementIndex(this.instances);
-            const keys = [...this.instances.keys()];
-            this.pruneEventHandlers(keys);
-            this.pruneConditionalListeners(keys);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
           }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -10013,8 +10038,10 @@ function createKeyedRowsBlockComponentCore(
               : new Map(rollingWindowInstances);
           if (delta) {
             COMPILER_KEYED_ROLLING_WINDOW_DELTAS.delete(rollingWindowInstances);
-            for (const instance of delta.added) {
-              this.instancesByElement.set(instance.element, instance);
+            if (this.usesDelegatedEvents()) {
+              for (const instance of delta.added) {
+                this.instancesByElement.set(instance.element, instance);
+              }
             }
             for (const key of delta.removedKeys) {
               this.eventHandlers.delete(key);
@@ -10022,9 +10049,8 @@ function createKeyedRowsBlockComponentCore(
             }
           } else {
             this.rebuildElementIndex(this.instances);
-            const keys = [...this.instances.keys()];
-            this.pruneEventHandlers(keys);
-            this.pruneConditionalListeners(keys);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
           }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -10038,11 +10064,10 @@ function createKeyedRowsBlockComponentCore(
           this.hasReactOwnedRows(),
         );
         if (filteredInstances) {
-          this.instances = new Map(filteredInstances);
+          this.instances = filteredInstances;
           this.rebuildElementIndex(this.instances);
-          const keys = [...this.instances.keys()];
-          this.pruneEventHandlers(keys);
-          this.pruneConditionalListeners(keys);
+          this.pruneEventHandlers();
+          this.pruneConditionalListeners();
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
           return;
@@ -10101,6 +10126,17 @@ function createKeyedRowsBlockComponentCore(
       }
       if (nextState.fallback || this.state.fallback) return true;
       if (definitionChanged || wasReactOwned || willBeReactOwned) {
+        const elements = this.root?.children;
+        if (
+          elements &&
+          (elements.length !== this.reactElements.length ||
+            this.reactElements.some((element, index) => element !== elements[index]))
+        ) {
+          // React still owns the child fibers from its last render, not rows
+          // inserted, removed, or reordered by the compiler since adoption.
+          // Reset only that stale host container before handing it back to React.
+          this.fallbackVersion += 1;
+        }
         // Parent prop updates and Fast Refresh definitions must pass through
         // React so event locations, static row markup, and proxy identities
         // cannot remain tied to an older render definition.
@@ -10144,6 +10180,7 @@ function createKeyedRowsBlockComponentCore(
       // captureRoot clears the element on a real unmount; retain it for replay adoption.
       this.cleanupHostScopes();
       this.instances.clear();
+      this.reactElements = [];
       this.keyedTargets?.clear();
       this.instancesByElement = new WeakMap();
       this.eventHandlers.clear();
@@ -10160,7 +10197,7 @@ function createKeyedRowsBlockComponentCore(
       }
       return React.cloneElement(container, {
         ...this.delegatedContainerProps(container),
-        key: this.state.fallback ? `react-${this.fallbackVersion}` : "compiled",
+        key: `${this.state.fallback ? "react" : "compiled"}-${this.fallbackVersion}`,
         ref: this.captureRoot,
       } as React.Attributes);
     }
@@ -10877,6 +10914,26 @@ export const keyedRowsFilterHintedRuntimeFeature: CompilerRuntimeFeature = {
   create: (owner) => ({
     KeyedRows: createKeyedRowsBlockComponent(owner, {
       keyedUpdates: keyedFilterUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsIdentityFilterHintedRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:identity-filter-hinted",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedIdentityTargetRuntime,
+      keyedUpdates: keyedFilterUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsIdentityFilterOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:identity-filter-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedIdentityTargetRuntime,
+      keyedUpdates: keyedFilterOnlyUpdateRuntime,
     }),
   }),
 };
