@@ -4820,10 +4820,11 @@ function parseRouteRenderingDirectiveFromDisk(modulePath: string) {
 export function generatePreloadResponseRuntimeSource(): string {
   return `
 // Farm builds buffered HTML responses from strings it already holds. Remember
-// that string per Response object so the budget step can scan it without
-// draining and re-encoding the body. Any wrapper that builds a new Response
-// (plugins, CSP nonces, configured headers) misses the map and falls back to
-// reading the body, so a transformed body is never paired with a stale string.
+// that string per body stream so the budget step can scan it without draining
+// and re-encoding the body. Header-only rebuilds (middleware and configured
+// headers) pass the same stream through and keep the entry; anything that
+// changes the body (plugins, CSP nonces, clone/tee) creates a new stream and
+// falls back to reading it, so a changed body is never paired with a stale string.
 const farmBufferedHtml = new WeakMap();
 
 function rememberFarmBufferedHtml(response, html) {
@@ -4832,11 +4833,18 @@ function rememberFarmBufferedHtml(response, html) {
   if (
     typeof html === "string" &&
     html.charCodeAt(0) !== 0xfeff &&
+    response.body &&
     response.headers.get("x-farm-preload-buffered") === "1"
   ) {
-    farmBufferedHtml.set(response, html);
+    farmBufferedHtml.set(response.body, html);
   }
   return response;
+}
+
+function getFarmOwnedBufferedHtml(response) {
+  const body = response.body;
+  if (!body || response.bodyUsed || body.locked) return undefined;
+  return farmBufferedHtml.get(body);
 }
 
 function getFarmBufferedPreloadMarker(html) {
@@ -4893,7 +4901,7 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   headers = new Headers(headers);
   headers.delete("x-farm-preload-streaming");
   headers.delete("x-farm-preload-buffered");
-  const ownedHtml = hasNoHtmlPreloads ? undefined : farmBufferedHtml.get(response);
+  const ownedHtml = hasNoHtmlPreloads ? undefined : getFarmOwnedBufferedHtml(response);
   const html = hasNoHtmlPreloads ? "" : (ownedHtml ?? await response.text());
   const managed = manageFarmDocumentPreloads(html, linkHeader, farmPreloadConfig);
   // A remembered document the budget left unchanged keeps its unread body.

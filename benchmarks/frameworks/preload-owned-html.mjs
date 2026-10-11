@@ -35,10 +35,13 @@ if (arm === "baseline" || arm === "candidate") {
         marker,
         'function getFarmBufferedPreloadMarker(html) { return "1"; }',
       );
+      // The bundler prints `undefined` as `void 0`, so match either form.
       const owned =
-        "const ownedHtml = hasNoHtmlPreloads ? undefined : farmBufferedHtml.get(response);";
-      assert.equal(source.split(owned).length, 2, "build the candidate first");
-      source = source.replace(owned, arm === "baseline" ? "const ownedHtml = undefined;" : owned);
+        /const ownedHtml = hasNoHtmlPreloads \? (?:undefined|void 0) : getFarmOwnedBufferedHtml\(response\);/g;
+      assert.equal([...source.matchAll(owned)].length, 1, "build the candidate first");
+      source = source.replace(owned, (match) =>
+        arm === "baseline" ? "const ownedHtml = void 0;" : match,
+      );
       // Hold the independent no-candidate parser optimization constant in both
       // arms, including builds made before that change has landed on main.
       const scanner = /function findHtmlLinkElements\(html\)\s*\{/g;

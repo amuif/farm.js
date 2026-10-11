@@ -168,16 +168,45 @@ describe("production preload response processing", () => {
       expect(await output.text()).toBe(html.replace(below, ""));
     });
 
+    it("keeps the remembered string through header-only rebuilds", async () => {
+      // Middleware and configured response headers rebuild the Response around
+      // the same body stream; the remembered string still describes it.
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}</head><body><p>fits</p></body></html>`;
+      const owned = r.owned(html);
+      const headers = new Headers(owned.headers);
+      headers.set("cache-control", "private, no-store");
+      const rebuilt = new Response(owned.body, { status: owned.status, headers });
+      const text = vi.spyOn(rebuilt, "text");
+      const output = await r.applyFarmPreloadBudget(rebuilt, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(output.body).toBe(owned.body);
+      expect(output.headers.get("cache-control")).toBe("private, no-store");
+      expect(await output.text()).toBe(html);
+    });
+
     it.each([
       [
         "a response it did not build",
         (r: ReturnType<typeof runtime>, html: string) => r.response(html),
       ],
       [
-        "a rebuilt response (plugins, CSP, configured headers)",
+        "a transformed body (plugins, CSP nonces)",
         (r: ReturnType<typeof runtime>, html: string) => {
           const owned = r.owned(html);
-          return new Response(owned.body, { status: owned.status, headers: owned.headers });
+          return new Response(owned.body!.pipeThrough(new TransformStream()), {
+            status: owned.status,
+            headers: owned.headers,
+          });
+        },
+      ],
+      [
+        "a cloned response (its body becomes a tee branch)",
+        (r: ReturnType<typeof runtime>, html: string) => {
+          const owned = r.owned(html);
+          void owned.clone();
+          return owned;
         },
       ],
       [
