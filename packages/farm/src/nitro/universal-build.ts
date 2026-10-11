@@ -4820,22 +4820,18 @@ function parseRouteRenderingDirectiveFromDisk(modulePath: string) {
 export function generatePreloadResponseRuntimeSource(): string {
   return `
 // Farm builds buffered HTML responses from strings it already holds. Remember
-// that string per body stream so the budget step can scan it without draining
-// and re-encoding the body. Header-only rebuilds (middleware and configured
-// headers) pass the same stream through and keep the entry; anything that
-// changes the body (plugins, CSP nonces, clone/tee) creates a new stream and
-// falls back to reading it, so a changed body is never paired with a stale string.
+// that string per body stream so later steps can use it instead of draining and
+// re-encoding the body: the preload budget scans it, and compression compresses
+// it in one call. Header-only rebuilds (middleware and configured headers) pass
+// the same stream through and keep the entry; anything that changes the body
+// (plugins, CSP nonces, clone/tee) creates a new stream and falls back to
+// reading it, so a changed body is never paired with a stale string.
 const farmBufferedHtml = new WeakMap();
 
 function rememberFarmBufferedHtml(response, html) {
-  // Only candidate-bearing documents are read back; Response.text() strips a
-  // leading BOM, so those keep the body read to preserve that behavior.
-  if (
-    typeof html === "string" &&
-    html.charCodeAt(0) !== 0xfeff &&
-    response.body &&
-    response.headers.get("x-farm-preload-buffered") === "1"
-  ) {
+  // Response.text() strips a leading BOM, so a BOM document keeps reading its
+  // body to preserve that behavior.
+  if (typeof html === "string" && html.charCodeAt(0) !== 0xfeff && response.body) {
     farmBufferedHtml.set(response.body, html);
   }
   return response;
@@ -4913,11 +4909,13 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
     ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
     : undefined);
-  return new Response(reusesBody ? response.body : managed.html, {
+  const output = new Response(reusesBody ? response.body : managed.html, {
     status: response.status,
     statusText: response.statusText,
     headers,
   });
+  // A rebuilt document is still a complete string Farm holds.
+  return reusesBody ? output : rememberFarmBufferedHtml(output, managed.html);
 }
 `.trim();
 }
@@ -8876,7 +8874,7 @@ async function handleFarmFetch(request, context) {
         const response = await _runWithCurrentRequest(request, () =>
           _runWithAfterRequest(request, runRequest, context),
         );
-        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response)" : "response"};
+        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response, getFarmOwnedBufferedHtml(response))" : "response"};
       }),
     {
       onResponseFinished: typeof context?.onResponseFinished === "function"

@@ -3,6 +3,10 @@ name: CI
 on:
   workflow_dispatch:
     inputs:
+      compression-benchmark:
+        description: Compare buffered and streamed response compression on the maintained fixture
+        type: boolean
+        default: false
       preload-owned-html-benchmark:
         description: Compare renderer-owned buffered HTML on the maintained fixture
         type: boolean
@@ -58,6 +62,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  compression-benchmark:
+    name: Compression Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.compression-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Build local framework packages
+        run: |
+          pnpm --filter @farm.js/core build
+          pnpm --filter @farm.js/cli build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+      - name: Install and build the maintained fixture
+        run: |
+          pnpm --dir benchmarks/frameworks --filter farm-framework-benchmark install --frozen-lockfile
+          pnpm --dir benchmarks/frameworks/apps/farm exec farm build --preset node-server
+      - name: Collect two independent comparisons
+        run: |
+          node benchmarks/frameworks/compression.mjs > "${{ runner.temp }}/compression-first.json"
+          node benchmarks/frameworks/compression.mjs > "${{ runner.temp }}/compression-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compression-${{ github.sha }}
+          path: ${{ runner.temp }}/compression-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
   preload-owned-html-benchmark:
     name: Preload Owned HTML Diagnostic
     if: github.event_name == 'workflow_dispatch' && inputs.preload-owned-html-benchmark

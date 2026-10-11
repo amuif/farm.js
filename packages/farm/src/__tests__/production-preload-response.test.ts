@@ -21,7 +21,7 @@ function runtime(mode: FarmPreloadMode = "enforce") {
     "farmPreloadConfig",
     "reportFarmPreloadWarnings",
     "Headers",
-    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, rememberFarmBufferedHtml, applyFarmPreloadBudget };`,
+    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, rememberFarmBufferedHtml, getFarmOwnedBufferedHtml, applyFarmPreloadBudget };`,
   )(
     manageFarmDocumentPreloads,
     manageFarmLinkHeaderPreloads,
@@ -36,6 +36,7 @@ function runtime(mode: FarmPreloadMode = "enforce") {
   ) as {
     getFarmBufferedPreloadMarker(html: unknown): string;
     rememberFarmBufferedHtml(response: Response, html: string): Response;
+    getFarmOwnedBufferedHtml(response: Response): string | undefined;
     applyFarmPreloadBudget(response: Response, pathname: string): Promise<Response>;
   };
   return {
@@ -166,6 +167,24 @@ describe("production preload response processing", () => {
       expect(original.bodyUsed).toBe(true);
       expect(output.headers.has("content-length")).toBe(false);
       expect(await output.text()).toBe(html.replace(below, ""));
+    });
+
+    it("hands compression the complete text of every buffered document", async () => {
+      // Compression can only skip its stream bridge for bodies Farm proves complete.
+      const r = runtime("enforce");
+      const plain = "<html><body><p>no hints</p></body></html>";
+      const noHints = await r.applyFarmPreloadBudget(r.owned(plain), "/");
+      expect(r.getFarmOwnedBufferedHtml(noHints)).toBe(plain);
+
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const trimmed = await r.applyFarmPreloadBudget(r.owned(html), "/");
+      expect(r.getFarmOwnedBufferedHtml(trimmed)).toBe(html.replace(below, ""));
+
+      const transformed = r.owned(plain);
+      const piped = new Response(transformed.body!.pipeThrough(new TransformStream()), {
+        headers: transformed.headers,
+      });
+      expect(r.getFarmOwnedBufferedHtml(piped)).toBeUndefined();
     });
 
     it("keeps the remembered string through header-only rebuilds", async () => {
