@@ -2229,6 +2229,15 @@ render instead of guessing which row owns the identity. Later updates remain on 
 for that mounted list. Interactive fallback handlers use ordinary per-render item/index closures,
 not ambiguous keyed lookup. Unsupported source shapes also keep React ownership from the beginning.
 
+When a parent-prop change or compatible Fast Refresh hands a compiled keyed-row container back to
+React, Farm checks its direct row elements against the last React adoption. If compiler updates
+have inserted, removed, replaced, or reordered those elements, Farm remounts that container once
+before React reconciles it, then adopts the new tree. This preserves the compiled component's
+local state, but the stale container's DOM identity, focus, selection, and uncontrolled form values
+reset at that handoff. A current row structure is not remounted; same-key binding updates and later
+React-owned updates retain their existing controls and user state. Ordinary compiler updates do
+not perform this handoff check.
+
 Once a keyed list or keyed-range container is on React fallback, updates with unique keys reconcile
 in place. Unchanged form controls, user-entered values, focus, selection, local component state, and
 DOM identity therefore survive later safe updates. A render containing duplicate keys still forces
@@ -2487,7 +2496,8 @@ definition assigns that mounted boundary a different internal block ID. Later lo
 remain routed to the previous definition. Compiler-owned host conditionals, keyed rows, and
 conditional, keyed, and mixed ranges also pass through React once when their definition changes,
 then Farm re-adopts them. This refreshes their static markup even when binding values are unchanged
-while preserving matching branch, range, and keyed DOM identity. React-owned conditional
+while preserving matching branch, range, and keyed DOM identity, except for the stale keyed-row
+container handoff described above. React-owned conditional
 boundaries move their retained root registration with the same ID change, so neighboring path-based
 bindings continue to skip the branch React preserved. Interactive keyed rows validate the complete
 refreshed row set before Farm reapplies bindings; a later invalid row therefore returns the

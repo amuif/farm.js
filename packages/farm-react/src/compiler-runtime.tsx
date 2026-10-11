@@ -9135,6 +9135,7 @@ function createKeyedRowsBlockComponentCore(
     declare private stop: (() => void) | undefined;
     declare private id: number | undefined;
     private instances = new Map<string, CompilerKeyedRowInstance>();
+    private reactElements: readonly Element[] = [];
     private keyedTargets = options.keyedTargets?.(this.props);
     private collectionToken: object | undefined;
     private renderVersion = 0;
@@ -9440,6 +9441,7 @@ function createKeyedRowsBlockComponentCore(
       }
       this.cleanupHostScopes();
       this.instances = instances;
+      this.reactElements = elements;
       this.rebuildElementIndex(instances);
       this.pruneEventHandlers();
       this.pruneConditionalListeners();
@@ -10120,6 +10122,17 @@ function createKeyedRowsBlockComponentCore(
       }
       if (nextState.fallback || this.state.fallback) return true;
       if (definitionChanged || wasReactOwned || willBeReactOwned) {
+        const elements = this.root?.children;
+        if (
+          elements &&
+          (elements.length !== this.reactElements.length ||
+            this.reactElements.some((element, index) => element !== elements[index]))
+        ) {
+          // React still owns the child fibers from its last render, not rows
+          // inserted, removed, or reordered by the compiler since adoption.
+          // Reset only that stale host container before handing it back to React.
+          this.fallbackVersion += 1;
+        }
         // Parent prop updates and Fast Refresh definitions must pass through
         // React so event locations, static row markup, and proxy identities
         // cannot remain tied to an older render definition.
@@ -10163,6 +10176,7 @@ function createKeyedRowsBlockComponentCore(
       // captureRoot clears the element on a real unmount; retain it for replay adoption.
       this.cleanupHostScopes();
       this.instances.clear();
+      this.reactElements = [];
       this.keyedTargets?.clear();
       this.instancesByElement = new WeakMap();
       this.eventHandlers.clear();
@@ -10179,7 +10193,7 @@ function createKeyedRowsBlockComponentCore(
       }
       return React.cloneElement(container, {
         ...this.delegatedContainerProps(container),
-        key: this.state.fallback ? `react-${this.fallbackVersion}` : "compiled",
+        key: `${this.state.fallback ? "react" : "compiled"}-${this.fallbackVersion}`,
         ref: this.captureRoot,
       } as React.Attributes);
     }
