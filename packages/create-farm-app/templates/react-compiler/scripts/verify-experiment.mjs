@@ -68,7 +68,7 @@ try {
   await page.getByRole("heading", { name: /compiler handles the rest/i }).waitFor();
   assert.equal(
     (await page.locator("[data-compiler-status]").textContent())?.trim(),
-    `experimental.compiler: ${String(compilerEnabled)}`,
+    `compiler: ${String(compilerEnabled)}`,
   );
 
   const executions = {};

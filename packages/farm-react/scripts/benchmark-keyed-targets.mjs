@@ -15,7 +15,7 @@ async function bundle(kind, controlFeature) {
     css: { postcss: { plugins: [] } },
     plugins: [
       ...createFarmRendererPlugin({
-        rendererOptions: { experimental: { compiler: { onUnsupported: "error" } } },
+        rendererOptions: { compiler: { onUnsupported: "error" } },
       }),
       {
         name: "full-target-runtime-control",

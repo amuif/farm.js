@@ -23,8 +23,13 @@ export interface ReactCompilerOptions {
 }
 
 export interface ReactRendererOptions {
+  /**
+   * Farm's AOT compiler. `true` enables automatic inference; an object
+   * customizes selection. Unsupported components always stay on React.
+   */
+  compiler?: boolean | ReactCompilerOptions;
   experimental?: {
-    /** `true` enables automatic inference; an object customizes selection. */
+    /** @deprecated Use the top-level `compiler` option. */
     compiler?: boolean | ReactCompilerOptions;
   };
 }
@@ -122,9 +127,30 @@ const REACT_RENDERER: Readonly<FarmRenderer> = Object.freeze({
   },
 });
 
-/** Select React and optionally enable Farm's experimental AOT compiler. */
+let warnedExperimentalCompiler = false;
+
+function resolveCompilerOption(
+  options: ReactRendererOptions,
+): boolean | ReactCompilerOptions | undefined {
+  const legacy = options.experimental?.compiler;
+  if (legacy === undefined) return options.compiler;
+  if (options.compiler !== undefined) {
+    throw new TypeError(
+      "Configure the React compiler with `compiler` only; remove `experimental.compiler`.",
+    );
+  }
+  if (!warnedExperimentalCompiler) {
+    warnedExperimentalCompiler = true;
+    console.warn(
+      "[farm] `react({ experimental: { compiler } })` is deprecated. Use `react({ compiler })`.",
+    );
+  }
+  return legacy;
+}
+
+/** Select React and optionally enable Farm's AOT compiler. */
 export function react(options: ReactRendererOptions = {}): FarmRenderer {
-  const compiler = options.experimental?.compiler;
+  const compiler = resolveCompilerOption(options);
   const normalizedCompiler = compiler ? normalizeReactCompilerOptions(compiler) : false;
 
   return {
@@ -142,7 +168,7 @@ export function react(options: ReactRendererOptions = {}): FarmRenderer {
       functionComponents: true,
     },
     options: {
-      experimental: { compiler: normalizedCompiler },
+      compiler: normalizedCompiler,
     },
   };
 }

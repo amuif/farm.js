@@ -152,9 +152,7 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
 });
 ```
@@ -170,7 +168,11 @@ compiler: {
 }
 ```
 
-Omitting `experimental.compiler` or setting it to `false` disables the transform.
+Omitting `compiler` or setting it to `false` disables the transform.
+
+The option used to live at `react({ experimental: { compiler } })`. That form still works as a
+deprecated alias: it logs a one-time deprecation warning and behaves exactly like the top-level
+option. Setting both keys is an error.
 
 ### Combine the compiler with isolated hydration
 
@@ -186,9 +188,7 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
   experimental: {
     isolatedClientHydration: "enabled",
@@ -280,12 +280,10 @@ Annotation mode is useful for a staged rollout or a strict, reviewed set of comp
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      mode: "annotation",
-      directive: "use compiler",
-      onUnsupported: "warn",
-    },
+  compiler: {
+    mode: "annotation",
+    directive: "use compiler",
+    onUnsupported: "warn",
   },
 }),
 ```
@@ -351,10 +349,8 @@ fallback behavior:
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      report: true,
-    },
+  compiler: {
+    report: true,
   },
 }),
 ```

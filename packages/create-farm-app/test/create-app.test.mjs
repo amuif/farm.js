@@ -397,7 +397,7 @@ test("generates the experimental React Compiler starter with the shared dark sta
 
     const config = await readFile(path.join(generatedDir, "farm.config.ts"), "utf8");
     assert.match(config, /from "@farm\.js\/react"/);
-    assert.match(config, /experimental:\s*\{\s*compiler: compilerEnabled/s);
+    assert.match(config, /react\(\{\s*compiler: compilerEnabled/s);
     assert.match(config, /FARM_REACT_COMPILER_ENABLED/);
     assert.match(config, /theme:\s*\{\s*default: "dark"/s);
 

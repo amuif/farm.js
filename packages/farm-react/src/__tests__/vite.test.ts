@@ -25,12 +25,21 @@ describe("React renderer Vite integration", () => {
 
   it("installs automatic inference from compiler: true", () => {
     const plugins = createFarmRendererPlugin({
-      rendererOptions: react({ experimental: { compiler: true } }).options,
+      rendererOptions: react({ compiler: true }).options,
     });
 
     expect(plugins).toHaveLength(1);
     expect(plugins[0]?.name).toBe("farm:react-aot-compiler");
     expect(plugins[0]?.enforce).toBe("pre");
+  });
+
+  it("still accepts renderer options in the deprecated experimental shape", () => {
+    // Renderer options built by an older react() or by hand keep working.
+    const plugins = createFarmRendererPlugin({
+      rendererOptions: { experimental: { compiler: true } },
+    });
+    expect(plugins.map((plugin) => plugin.name)).toEqual(["farm:react-aot-compiler"]);
+    expect(createFarmRendererPlugin({ rendererOptions: { compiler: false } })).toEqual([]);
   });
 
   it("writes a compiler coverage report after a production build", async () => {
@@ -61,11 +70,7 @@ describe("React renderer Vite integration", () => {
       root,
       logLevel: "silent",
       plugins: createFarmRendererPlugin({
-        rendererOptions: react({
-          experimental: {
-            compiler: { report: true },
-          },
-        }).options,
+        rendererOptions: react({ compiler: { report: true } }).options,
       }),
       build: {
         write: false,
@@ -119,11 +124,7 @@ describe("React renderer Vite integration", () => {
       logLevel: "silent",
       plugins: createFarmRendererPlugin({
         ssr: true,
-        rendererOptions: react({
-          experimental: {
-            compiler: { report: true },
-          },
-        }).options,
+        rendererOptions: react({ compiler: { report: true } }).options,
       }),
       build: {
         write: false,

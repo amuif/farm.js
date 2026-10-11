@@ -24,9 +24,7 @@ The starter enables the compiler through the React renderer:
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: true,
-  },
+  compiler: true,
 }),
 ```
 

@@ -11,15 +11,18 @@ interface RendererPluginOptions {
 function readCompilerOptions(
   rendererOptions: Readonly<Record<string, unknown>> | undefined,
 ): NormalizedReactCompilerOptions | false {
+  // Renderer options built by an older `react()` or by hand may still carry
+  // the deprecated `experimental.compiler` shape.
   const experimental = rendererOptions?.experimental;
-  if (!experimental || typeof experimental !== "object") return false;
-  const compiler = (experimental as { compiler?: unknown }).compiler;
+  const compiler =
+    rendererOptions?.compiler ??
+    (experimental && typeof experimental === "object"
+      ? (experimental as { compiler?: unknown }).compiler
+      : undefined);
   if (!compiler) return false;
   if (compiler === true) return normalizeReactCompilerOptions(true);
   if (typeof compiler !== "object") {
-    throw new TypeError(
-      "React experimental.compiler must be a boolean or compiler options object.",
-    );
+    throw new TypeError("React compiler must be a boolean or compiler options object.");
   }
   const normalized = compiler as Partial<NormalizedReactCompilerOptions>;
   if (
