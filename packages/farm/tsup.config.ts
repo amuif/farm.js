@@ -69,6 +69,7 @@ export const farmPackageBuildOptions = {
     "internal/isolated-boundary": "src/client/isolated-boundary.ts",
     "internal/production-runtime": "src/nitro/production-runtime.ts",
     "internal/product-telemetry-runtime": "src/product-telemetry.ts",
+    "internal/infra-analytics-runtime": "src/infra-analytics-runtime.ts",
     "internal/metadata-image-runtime": "src/metadata-image.ts",
     "internal/app-markdown-runtime": "src/app-markdown-runtime.ts",
     "internal/docs-precompiled-runtime": "src/docs/precompiled-runtime.ts",

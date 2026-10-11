@@ -1,7 +1,9 @@
 // @vitest-environment node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -292,6 +294,7 @@ async function runProductionRequest(
   assertion: (response: Response) => Promise<void>,
   pathname = "/",
   requestInit?: RequestInit,
+  env: Record<string, string | undefined> = {},
 ): Promise<void> {
   const port = await getAvailablePort();
   const output: string[] = [];
@@ -300,6 +303,7 @@ async function runProductionRequest(
     cwd: serverDir,
     env: {
       ...process.env,
+      ...env,
       HOST: "127.0.0.1",
       PORT: String(port),
     },
@@ -717,7 +721,8 @@ export default function Page() {
   return (
     <main data-csp-nonce-page>
       Nonce-protected production output
-      <script nonce="stale-build-nonce">window.appReady=true</script>
+      <script nonce="stale-build-nonce" dangerouslySetInnerHTML={{ __html: "window.city='İİİİİİİİ 🌱';" }} />
+      <script>window.appReady=true</script>
     </main>
   );
 }
@@ -753,6 +758,7 @@ export default function Page() {
 
           expect(firstNonce).toBeTruthy();
           expect(firstPolicy).not.toContain("'unsafe-inline'");
+          expect(firstHtml).toContain("window.city='İİİİİİİİ 🌱';");
           expect(firstScripts.length).toBeGreaterThan(0);
           expect(firstScripts.every((tag) => tag.includes(`nonce="${firstNonce}"`))).toBe(true);
 
@@ -863,6 +869,57 @@ export default function Page() {
     },
     120_000,
   );
+
+  it("hashes Unicode inline scripts exactly in prerendered production HTML", async () => {
+    const root = await createProductionFixture();
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+export const ssg = true;
+export default function Page() {
+  return <main>İstanbul
+    <script nonce="old" dangerouslySetInnerHTML={{ __html: "window.city='İİİİİİİİ 🌱';" }} />
+    <script>window.appReady=true</script>
+  </main>;
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-csp-unicode-hash-test",
+          security: { csp: { nonce: true, policy: "script-src 'self'" } },
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          const policy = response.headers.get("content-security-policy");
+          expect(html).toContain("window.city='İİİİİİİİ 🌱';");
+          expect(html).not.toMatch(/<script\b[^>]*\bnonce\s*=/i);
+          expect(policy).not.toContain("'nonce-");
+          const contents = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+            .filter(([, attributes]) => !/(?:^|\s)src\s*=/i.test(attributes!))
+            .map(([, , content]) => content!);
+          expect(contents.length).toBeGreaterThanOrEqual(2);
+          for (const content of contents) {
+            expect(policy).toContain(
+              `'sha256-${createHash("sha256").update(content).digest("base64")}'`,
+            );
+          }
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("matches application routes beneath the configured basePath", async () => {
     const root = await createProductionFixture();
@@ -1429,6 +1486,176 @@ export function CopyButton({ text }) {
       );
       expect(serverJavaScript).not.toContain("production_site_active");
       expect(serverJavaScript).not.toContain("production_site_attestation");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.each([
+    { label: "without a plugin runtime", withPlugin: false },
+    { label: "alongside a runtime plugin", withPlugin: true },
+  ])(
+    "sends Farm Infra analytics only when the environment links a project, $label",
+    async ({ withPlugin }) => {
+      const root = await createProductionFixture();
+      const received: { headers: Record<string, string | string[] | undefined>; body: string }[] =
+        [];
+      const receiver = createHttpServer((request, response) => {
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          received.push({ headers: request.headers, body });
+          response.writeHead(202).end();
+        });
+      });
+      await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+      const receiverPort = (receiver.address() as { port: number }).port;
+      const key = `fti_${"t".repeat(43)}`;
+
+      try {
+        await fs.mkdir(path.join(root, "src", "app", "users", "[id]"), { recursive: true });
+        await fs.writeFile(
+          path.join(root, "src", "app", "users", "[id]", "page.tsx"),
+          `export default function User({ params }) { return <main data-user={params.id}>user</main>; }`,
+        );
+        // The same plugin in the built config and in the runtime config module.
+        const pluginSource = `{
+  name: "fixture-runtime",
+  runtime: {
+    after({ response }) {
+      const headers = new Headers(response.headers);
+      headers.set("x-fixture-plugin", "ran");
+      return new Response(response.body, { status: response.status, headers });
+    },
+  },
+}`;
+        const fixturePlugin = definePlugin({
+          name: "fixture-runtime",
+          runtime: { after: ({ response }) => response },
+        });
+        if (withPlugin) {
+          await fs.writeFile(
+            path.join(root, "farm.config.ts"),
+            `export default { plugins: [${pluginSource}] };`,
+          );
+        }
+        // No Infra variables at build time: the server reads them when it starts.
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            images: { provider: "none" },
+            telemetry: false,
+            ...(withPlugin ? { plugins: [fixturePlugin] } : {}),
+            generateBuildId: () => "infra-analytics-test",
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        const serverDir = path.join(root, ".farm", ".output", "server");
+        const pathname = "/users/private-customer?secret=private-query";
+
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            await expect(response.text()).resolves.toContain('data-user="private-customer"');
+          },
+          pathname,
+        );
+        // The server flushes on shutdown, so an unlinked app has had every chance to send.
+        expect(received).toEqual([]);
+
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            expect(response.headers.get("x-fixture-plugin")).toBe(withPlugin ? "ran" : null);
+            await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 5_000 });
+          },
+          pathname,
+          { headers: { "user-agent": "Claude-User/1.0", cookie: "session=private-cookie" } },
+          { FARMJS_API_KEY: key, FARMJS_API_URL: `http://127.0.0.1:${receiverPort}` },
+        );
+        expect(received[0]!.headers.authorization).toBe(`Bearer ${key}`);
+        expect(received[0]!.body).not.toContain("private");
+        expect(JSON.parse(received[0]!.body)).toEqual({
+          schemaVersion: 1,
+          events: [
+            {
+              id: expect.any(String),
+              requestId: expect.any(String),
+              timestamp: expect.any(String),
+              kind: "request",
+              route: "/users/[id]",
+              method: "GET",
+              status: 200,
+              durationMs: expect.any(Number),
+              agent: { family: "anthropic", category: "agent", identity: "self-reported" },
+            },
+          ],
+        });
+      } finally {
+        await new Promise((resolve) => receiver.close(resolve));
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it("marks Nitro's prerender worker so built-in analytics ignores build requests", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `export const ssg = true;
+export default function Page() {
+  return <main data-prerender-marker={String(process.env.FARM_PRERENDER)}>static</main>;
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "infra-analytics-prerender-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      // createFarmInfraAnalyticsPlugin returns null whenever this marker is set.
+      await expect(
+        fs.readFile(path.join(root, ".farm", ".output", "public", "index.html"), "utf8"),
+      ).resolves.toContain('data-prerender-marker="1"');
+      expect(process.env.FARM_PRERENDER).toBeUndefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("leaves Farm Infra analytics out of the server when analytics is false", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          analytics: false,
+          generateBuildId: () => "infra-analytics-disabled-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      const serverJavaScript = await readJavaScriptOutput(
+        path.join(root, ".farm", ".output", "server"),
+      );
+      expect(serverJavaScript).not.toContain("farm:infra-analytics");
+      expect(serverJavaScript).not.toContain("FARMJS_PROJECT_ID");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

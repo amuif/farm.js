@@ -172,6 +172,9 @@
       "internal/product-telemetry-runtime": [
         "./dist/internal/product-telemetry-runtime.d.ts"
       ],
+      "internal/infra-analytics-runtime": [
+        "./dist/internal/infra-analytics-runtime.d.ts"
+      ],
       "internal/metadata-image-runtime": [
         "./dist/internal/metadata-image-runtime.d.ts"
       ],
@@ -597,6 +600,11 @@
       "types": "./dist/internal/product-telemetry-runtime.d.ts",
       "import": "./dist/internal/product-telemetry-runtime.mjs",
       "require": "./dist/internal/product-telemetry-runtime.cjs"
+    },
+    "./internal/infra-analytics-runtime": {
+      "types": "./dist/internal/infra-analytics-runtime.d.ts",
+      "import": "./dist/internal/infra-analytics-runtime.mjs",
+      "require": "./dist/internal/infra-analytics-runtime.cjs"
     },
     "./internal/metadata-image-runtime": {
       "types": "./dist/internal/metadata-image-runtime.d.ts",
