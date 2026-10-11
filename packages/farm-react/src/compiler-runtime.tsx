@@ -5113,6 +5113,31 @@ interface NestedReadKeyedRange {
   keys: string[];
 }
 
+// Undefined means structural reconciliation is still required. Prove the entire
+// key order before updating scopes, which may themselves contain nested blocks.
+function reconcileStableNestedKeyedRows(
+  range: CompilerKeyedRange,
+  previous: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  rows: NestedReadKeyedRange,
+): boolean | undefined {
+  if (rows.keys.length !== previous.size) return undefined;
+  let index = 0;
+  for (const key of previous.keys()) {
+    if (rows.keys[index++] !== key) return undefined;
+  }
+  index = 0;
+  for (const existing of previous.values()) {
+    const item = rows.items[index];
+    const descriptor = range.create(item, index);
+    if (!existing.scope?.update(descriptor)) return false;
+    applyKeyedRowBindings(range, existing, item, index);
+    existing.item = item;
+    existing.index = index;
+    index += 1;
+  }
+  return true;
+}
+
 class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
   private readonly instances: Array<Map<string, CompilerKeyedRowInstance>> = [];
   private readonly staticSegments: Element[][] = [];
@@ -5276,6 +5301,8 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
   private reconcileRange(rangeIndex: number, rows: NestedReadKeyedRange): boolean {
     const range = this.block.ranges[rangeIndex];
     const previous = this.instances[rangeIndex];
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
     const oldIndices = new Map<string, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);
@@ -5708,6 +5735,8 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const instance = this.instances[rangeIndex];
     if (instance.kind !== "keyed") return false;
     const previous = instance.value;
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
     const oldIndices = new Map<string, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);

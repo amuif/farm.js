@@ -2577,6 +2577,16 @@ const testSource = String.raw`
             ];
           }),
         }, "Update nested keyed rows"),
+        React.createElement("button", {
+          "data-nested-keyed-stable": true,
+          onClick: () => state[0].set((current) => current.map((project) => ({
+            ...project,
+            tasks: project.tasks.map((task) => ({
+              ...task, title: task.title + "!",
+              tags: task.tags.map((tag) => ({ ...tag, label: tag.label + "!" })),
+            })),
+          }))),
+        }, "Update stable nested rows"),
         React.createElement(blocks.KeyedRows, {
           id: 0,
           hostBlocks: true,
@@ -2631,6 +2641,17 @@ const testSource = String.raw`
   assert.equal(originalProjectB.querySelector("ul > i"), originalNestedStatic);
   assert.equal(originalTaskB2.querySelector(":scope > span").textContent, "Ship now");
   assert.equal(originalTagB2Y.textContent, "Now updated");
+  // Stable-order reuse must still update deeper child scopes from the packed runtime.
+  const stableNestedNodes = [...nestedKeyedContainer.querySelectorAll("[data-project], [data-task], [data-tag]")];
+  for (let round = 1; round <= 2; round += 1) {
+    nestedKeyedContainer.querySelector("[data-nested-keyed-stable]").click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual([...nestedKeyedContainer.querySelectorAll("[data-project], [data-task], [data-tag]")], stableNestedNodes);
+    assert.equal(originalTaskB2.querySelector(":scope > span").textContent, "Ship now" + "!".repeat(round));
+    assert.equal(originalTagB2Y.textContent, "Now updated" + "!".repeat(round));
+    assert.equal(originalProjectB.querySelector("ul > i"), originalNestedStatic);
+  }
   assert.equal(nestedKeyedExecutions, initialNestedKeyedExecutions);
   flushSync(() => nestedKeyedRoot.unmount());
 

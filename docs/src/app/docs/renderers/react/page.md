@@ -2003,6 +2003,12 @@ projects applies LIS to the outer list. Reordering one project's tasks applies a
 only inside that project. A surviving project, task, and every static sibling keep their DOM
 identity; updating the inner task does not rerun the component or either map callback.
 
+When the complete inner key order is unchanged, the nested scope reuses its row table and skips
+position-map construction and LIS planning. Every key is still validated and every child scope
+and binding is still updated. Insertions, removals, and reorders use the existing structural path.
+The same rule applies to keyed ranges beside host-only conditions in nested mixed ranges; it does
+not expand which row shapes the compiler accepts.
+
 The inner scope moves with its outer key and is cleaned when that project is removed. React still
 renders or hydrates the original nested lists, after which the compiler adopts the existing DOM.
 An outer and inner update queued together are read from the same latest collection. Duplicate keys
