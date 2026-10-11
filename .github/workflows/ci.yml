@@ -3,6 +3,26 @@ name: CI
 on:
   workflow_dispatch:
     inputs:
+      compression-benchmark:
+        description: Compare buffered and streamed response compression on the maintained fixture
+        type: boolean
+        default: false
+      preload-owned-html-benchmark:
+        description: Compare renderer-owned buffered HTML on the maintained fixture
+        type: boolean
+        default: false
+      preload-scanning-benchmark:
+        description: Compare preload tag scanning against main on an isolated runner
+        type: boolean
+        default: false
+      response-pathname-benchmark:
+        description: Compare production response pathname work on an isolated runner
+        type: boolean
+        default: false
+      preload-warning-history-benchmark:
+        description: Compare preload warning history work on an isolated runner
+        type: boolean
+        default: false
       markdown-request-url-benchmark:
         description: Compare Markdown request URL reuse on an isolated runner
         type: boolean
@@ -42,6 +62,149 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  compression-benchmark:
+    name: Compression Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.compression-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Build local framework packages
+        run: |
+          pnpm --filter @farm.js/core build
+          pnpm --filter @farm.js/cli build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+      - name: Install and build the maintained fixture
+        run: |
+          pnpm --dir benchmarks/frameworks --filter farm-framework-benchmark install --frozen-lockfile
+          pnpm --dir benchmarks/frameworks/apps/farm exec farm build --preset node-server
+      - name: Collect two independent comparisons
+        run: |
+          node benchmarks/frameworks/compression.mjs > "${{ runner.temp }}/compression-first.json"
+          node benchmarks/frameworks/compression.mjs > "${{ runner.temp }}/compression-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compression-${{ github.sha }}
+          path: ${{ runner.temp }}/compression-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  preload-owned-html-benchmark:
+    name: Preload Owned HTML Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.preload-owned-html-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Build local framework packages
+        run: |
+          pnpm --filter @farm.js/core build
+          pnpm --filter @farm.js/cli build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+      - name: Install and build the maintained fixture
+        run: |
+          pnpm --dir benchmarks/frameworks --filter farm-framework-benchmark install --frozen-lockfile
+          pnpm --dir benchmarks/frameworks/apps/farm exec farm build --preset node-server
+      - name: Collect two independent alternating comparisons
+        run: |
+          node benchmarks/frameworks/preload-owned-html.mjs > "${{ runner.temp }}/preload-owned-html-first.json"
+          node benchmarks/frameworks/preload-owned-html.mjs > "${{ runner.temp }}/preload-owned-html-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: preload-owned-html-${{ github.sha }}
+          path: ${{ runner.temp }}/preload-owned-html-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  preload-scanning-benchmark:
+    name: Preload Scanning Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.preload-scanning-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Verify output equivalence and collect two comparisons
+        run: |
+          baseline="$(git merge-base HEAD origin/main)"
+          node benchmarks/preload-scanning/verify.mjs "$baseline"
+          node benchmarks/preload-scanning/run.mjs "$baseline" > "${{ runner.temp }}/preload-scanning-first.json"
+          node benchmarks/preload-scanning/run.mjs "$baseline" > "${{ runner.temp }}/preload-scanning-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: preload-scanning-${{ github.sha }}
+          path: ${{ runner.temp }}/preload-scanning-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  response-pathname-benchmark:
+    name: Response Pathname Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.response-pathname-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Collect two alternating comparisons
+        run: |
+          node benchmarks/response-pathname/run.mjs > "${{ runner.temp }}/response-pathname-first.json"
+          node benchmarks/response-pathname/run.mjs > "${{ runner.temp }}/response-pathname-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: response-pathname-${{ github.sha }}
+          path: ${{ runner.temp }}/response-pathname-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  preload-warning-history-benchmark:
+    name: Preload Warning History Diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.preload-warning-history-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Collect two alternating comparisons
+        run: |
+          node benchmarks/preload-warning-history/run.mjs > "${{ runner.temp }}/preload-warning-history-first.json"
+          node benchmarks/preload-warning-history/run.mjs > "${{ runner.temp }}/preload-warning-history-second.json"
+      - name: Retain raw samples for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: preload-warning-history-${{ github.sha }}
+          path: ${{ runner.temp }}/preload-warning-history-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
   configured-headers-benchmark:
     name: Configured Headers Diagnostic
     if: github.event_name == 'workflow_dispatch' && inputs.configured-headers-benchmark
@@ -457,6 +620,59 @@ jobs:
         run: |
           pnpm lint
           pnpm format:check
+
+  react-compiler-browser:
+    name: React Compiler Browser (${{ matrix.builder }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        builder:
+          - rolldown
+          - rollup
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.13"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Build framework packages
+        run: |
+          pnpm --filter @farm.js/core build
+          pnpm --filter @farm.js/cli build
+          pnpm --filter @farm.js/react build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+      # Production build of the compiler example, then a real browser through
+      # every compiled component (bindings, blocks, keyed rows, ranges, islands).
+      - name: Verify compiled output in the browser
+        run: pnpm --dir examples/react-compiler experiment
+        env:
+          FARM_VITE_BUILDER: ${{ matrix.builder }}
+          FARM_EXPERIMENT_SCREENSHOT: ${{ runner.temp }}/react-compiler/aot-edge-lab.png
+      # Compiler off, static and hybrid builds of the heavy workload must agree.
+      - name: Verify compiler modes agree on the heavy workload
+        run: pnpm --dir examples/react-compiler experiment:heavy
+        env:
+          FARM_VITE_BUILDER: ${{ matrix.builder }}
+      - name: Upload failure screenshots
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: react-compiler-browser-${{ matrix.builder }}
+          path: |
+            ${{ runner.temp }}/react-compiler/
+            /tmp/farm-react-*
+          if-no-files-found: ignore
+          retention-days: 7
 
   react-compiler-compat:
     name: React Compiler (React ${{ matrix.react-version }})

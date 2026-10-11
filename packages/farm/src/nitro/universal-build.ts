@@ -1883,6 +1883,16 @@ async function fetchFarmNavigationDocument(url, headers, recover = true, signal)
     if (recover) window.location.assign(url);
     throw error;
   }
+  // Only an HTML page can be swapped in. A feed, JSON, file, or other API
+  // response belongs to the browser, so it takes the redirect path: a document
+  // navigation that is never cached or reported as a failed navigation.
+  const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
+  if (response.ok && !contentType.includes("text/html")) {
+    response.body?.cancel().catch(() => {});
+    const error = new Error("Farm navigation requires a document load");
+    error.name = "FarmNavigationRedirect";
+    throw error;
+  }
   return response;
 }
 
@@ -4819,6 +4829,30 @@ function parseRouteRenderingDirectiveFromDisk(modulePath: string) {
 
 export function generatePreloadResponseRuntimeSource(): string {
   return `
+// Farm builds buffered HTML responses from strings it already holds. Remember
+// that string per body stream so later steps can use it instead of draining and
+// re-encoding the body: the preload budget scans it, and compression compresses
+// it in one call. Header-only rebuilds (middleware and configured headers) pass
+// the same stream through and keep the entry; anything that changes the body
+// (plugins, CSP nonces, clone/tee) creates a new stream and falls back to
+// reading it, so a changed body is never paired with a stale string.
+const farmBufferedHtml = new WeakMap();
+
+function rememberFarmBufferedHtml(response, html) {
+  // Response.text() strips a leading BOM, so a BOM document keeps reading its
+  // body to preserve that behavior.
+  if (typeof html === "string" && html.charCodeAt(0) !== 0xfeff && response.body) {
+    farmBufferedHtml.set(response.body, html);
+  }
+  return response;
+}
+
+function getFarmOwnedBufferedHtml(response) {
+  const body = response.body;
+  if (!body || response.bodyUsed || body.locked) return undefined;
+  return farmBufferedHtml.get(body);
+}
+
 function getFarmBufferedPreloadMarker(html) {
   // Prove eligibility while Farm still owns the complete document string.
   // Candidate-bearing or unknown bodies must retain the full parser path.
@@ -4826,7 +4860,7 @@ function getFarmBufferedPreloadMarker(html) {
   return typeof html === "string" && html.charCodeAt(0) !== 0xfeff && !/\\bpreload\\b/i.test(html) ? "none" : "1";
 }
 
-async function applyFarmPreloadBudget(response, pathname) {
+async function applyFarmPreloadBudget(response, pathname, request) {
   let headers = response.headers;
   const linkHeader = headers.get("Link") || "";
   const isHtml = headers.get("Content-Type")?.toLowerCase().includes("text/html");
@@ -4848,7 +4882,9 @@ async function applyFarmPreloadBudget(response, pathname) {
 
   if (isStreaming || !isBuffered || response.body === null) {
     const managed = manageFarmLinkHeaderPreloads(linkHeader, farmPreloadConfig);
-    reportFarmPreloadWarnings(managed.warnings, "route " + pathname);
+    reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
+      ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
+      : undefined);
     // Unknown streams retain their body and ownership when no headers change.
     // Empty Link values and even unrecognized internal markers still need cleanup.
     if (!headers.has("x-farm-preload-streaming") &&
@@ -4871,17 +4907,25 @@ async function applyFarmPreloadBudget(response, pathname) {
   headers = new Headers(headers);
   headers.delete("x-farm-preload-streaming");
   headers.delete("x-farm-preload-buffered");
-  const html = hasNoHtmlPreloads ? "" : await response.text();
+  const ownedHtml = hasNoHtmlPreloads ? undefined : getFarmOwnedBufferedHtml(response);
+  const html = hasNoHtmlPreloads ? "" : (ownedHtml ?? await response.text());
   const managed = manageFarmDocumentPreloads(html, linkHeader, farmPreloadConfig);
+  // A remembered document the budget left unchanged keeps its unread body.
+  const reusesBody = hasNoHtmlPreloads || (ownedHtml !== undefined && managed.html === html);
+  if (ownedHtml !== undefined && !reusesBody) response.body?.cancel().catch(() => {});
   if (managed.linkHeader) headers.set("Link", managed.linkHeader);
   else headers.delete("Link");
   if (managed.html !== html) headers.delete("Content-Length");
-  reportFarmPreloadWarnings(managed.warnings, "route " + pathname);
-  return new Response(hasNoHtmlPreloads ? response.body : managed.html, {
+  reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
+    ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
+    : undefined);
+  const output = new Response(reusesBody ? response.body : managed.html, {
     status: response.status,
     statusText: response.statusText,
     headers,
   });
+  // A rebuilt document is still a complete string Farm holds.
+  return reusesBody ? output : rememberFarmBufferedHtml(output, managed.html);
 }
 `.trim();
 }
@@ -5329,6 +5373,7 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   reportFarmPreloadWarnings,
   renderFarmLocaleAlternateLinks,
   renderMetadataHead,
+  resolveFarmNotFoundMetadata,
   resolveFarmRouteContext,
   resolveFarmTrailingSlashRedirect,
   resolveDefaultErrorStatus,
@@ -5629,6 +5674,7 @@ const farmProductionSiteTelemetry = ${
 // Custom 404 page component (if provided)
 const hasCustomNotFound = ${notFoundPath ? "true" : "false"};
 const CustomNotFoundComponent = ${notFoundPath ? "CustomNotFound.default || CustomNotFound" : "null"};
+const CustomNotFoundModule = ${notFoundPath ? "CustomNotFound" : "null"};
 const farmUserConfig = ${
     configModulePath ? "(FarmUserConfigModule.default || FarmUserConfigModule)" : "null"
   };
@@ -7485,9 +7531,13 @@ async function handleFarmRequestInContext(
       ? "withFarmIntegrationSetCookies(middlewareResult.headers, farmIntegrationSetCookies)"
       : "middlewareResult.headers"
   };
-  url = new URL(request.url);
-  pathname = url.pathname;
-  routePathname = getFarmRoutePathname(pathname);
+  // A Request's url is already serialized, so an unchanged href means middleware
+  // kept the URL and the pre-middleware parse still describes it.
+  if (request.url !== url.href) {
+    url = new URL(request.url);
+    pathname = url.pathname;
+    routePathname = getFarmRoutePathname(pathname);
+  }
 
   // Middleware may replace the Request when it rewrites a URL. Re-enter the
   // request store so pages, layouts, and route context observe that rewritten
@@ -7785,7 +7835,7 @@ async function handleFarmRequestInContext(
             status: 200,
             durationMs: Date.now() - requestStartTime,
           });
-          return applyProductionMiddlewareHeaders(new Response(cachedPPRShell, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(cachedPPRShell, {
             status: 200,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -7793,7 +7843,7 @@ async function handleFarmRequestInContext(
               ...(farmFontPreloadHeader ? { "Link": farmFontPreloadHeader } : {}),
               ...getPPRHeaders("hit", pprConfig),
             },
-          }), middlewareHeaders);
+          }), middlewareHeaders), cachedPPRShell);
         }
         emitFarmEvent({ type: "ppr.shell.miss", route: pathname, key: pprCacheKey });
       }
@@ -8423,13 +8473,13 @@ async function handleFarmRequestInContext(
           durationMs: Date.now() - requestStartTime,
         });
 
-        return applyProductionMiddlewareHeaders(new Response(
+        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
           fullHtml,
           { 
             status: pageStatus,
             headers: { ...responseHeaders, "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fullHtml) }
           }
-        ), middlewareHeaders);
+        ), middlewareHeaders), fullHtml);
       }
     } catch (error) {
       if (isFarmRedirectError(error)) {
@@ -8529,14 +8579,14 @@ async function handleFarmRequestInContext(
             status: errorStatus,
             durationMs: Date.now() - requestStartTime,
           });
-          return applyProductionMiddlewareHeaders(new Response(errorDocument, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(errorDocument, {
             status: errorStatus,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
               "Cache-Control": "private, no-store",
               "x-farm-preload-buffered": getFarmBufferedPreloadMarker(errorDocument),
             },
-          }), middlewareHeaders);
+          }), middlewareHeaders), errorDocument);
         } catch (boundaryError) {
           console.error("Route error boundary failed:", boundaryError);
         }
@@ -8564,7 +8614,7 @@ async function handleFarmRequestInContext(
         farmResolvedRuntimeConfig.basePath,
         getFarmTheme(request)
       );
-      return applyProductionMiddlewareHeaders(new Response(
+      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
         fallbackDocument,
         {
           status: errorStatus,
@@ -8574,7 +8624,7 @@ async function handleFarmRequestInContext(
             "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fallbackDocument),
           },
         }
-      ), middlewareHeaders);
+      ), middlewareHeaders), fallbackDocument);
     }
   }
 
@@ -8624,6 +8674,14 @@ async function handleFarmRequestInContext(
     notFoundElement = wrapWithFarmIntegrationProviders(notFoundElement);
     
     const html = await ReactDOMServer.renderToString(notFoundElement);
+    // The layouts' and the not-found page's metadata, as the development renderer uses it.
+    const notFoundMetadata = renderMetadataHead(
+      await resolveFarmNotFoundMetadata(
+        applicableLayouts.map((layout) => layout.module),
+        hasCustomNotFound ? CustomNotFoundModule : null,
+      ),
+      { pathname },
+    );
     
     // Check if layout provides full HTML document
     const fullDocument = extractFarmFullDocument(html);
@@ -8632,6 +8690,11 @@ async function handleFarmRequestInContext(
     let fullHtml;
     if (hasFullDocument) {
       fullHtml = ensureFarmDocumentHead(fullDocument)
+        // The not-found title replaces any title the layout rendered, as metadata does on pages.
+        .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
+          "<head" + attrs + ">" +
+          headContent.replace(/<title\\b[^>]*>[\\s\\S]*?<\\/title>\\s*/gi, "") +
+          "\\n  <title>" + notFoundMetadata.title + "</title>" + notFoundMetadata.tags + "\\n</head>")
         .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
         .replace(/<\\/head>/i, () => renderFarmRendererHydrationScript() + '\\n</head>')
         .replace(
@@ -8648,9 +8711,9 @@ async function handleFarmRequestInContext(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  \${notFoundMetadata.hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   <link rel="stylesheet" href="/__farm_client_css_href__">
-  <title>404 - Page Not Found</title>
+  <title>\${notFoundMetadata.title}</title>\${notFoundMetadata.tags}
   \${renderFarmRendererHydrationScript()}
 </head>
 <body>
@@ -8676,13 +8739,13 @@ async function handleFarmRequestInContext(
       durationMs: Date.now() - requestStartTime,
     });
 
-    return applyProductionMiddlewareHeaders(new Response(fullHtml, {
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(fullHtml, {
       status: 404,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fullHtml),
       }
-    }), middlewareHeaders);
+    }), middlewareHeaders), fullHtml);
   } catch (error) {
     console.error("404 render error:", error);
     const fallbackDocument = applyFarmThemeDocument(
@@ -8691,13 +8754,13 @@ async function handleFarmRequestInContext(
       farmResolvedRuntimeConfig.basePath,
       getFarmTheme(request)
     );
-    return applyProductionMiddlewareHeaders(new Response(
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
       fallbackDocument,
       {
         status: 404,
         headers: { "Content-Type": "text/html", "x-farm-preload-buffered": getFarmBufferedPreloadMarker(fallbackDocument) },
       }
-    ), middlewareHeaders);
+    ), middlewareHeaders), fallbackDocument);
   }
   }
   ${
@@ -8758,11 +8821,11 @@ async function handleFarmPluginRequest(request, runtimeOptions, adapterContext) 
   headers.delete("content-length");
   headers.delete("x-farm-preload-streaming");
   headers.set("x-farm-preload-buffered", getFarmBufferedPreloadMarker(html));
-  return new Response(html, {
+  return rememberFarmBufferedHtml(new Response(html, {
     status: response.status,
     statusText: response.statusText,
     headers,
-  });
+  }), html);
 }
 
 ${generatePreloadResponseRuntimeSource()}
@@ -8800,14 +8863,18 @@ async function handleFarmFetch(request, context) {
         const runtimeOptions = farmPluginRuntime ? getFarmPluginRequestOptions(request) : null;
         const prepareResponse = async (runtimeRequest, responsePromise) => {
           const response = await responsePromise;
-          const pathname = new URL(runtimeRequest.url).pathname;
-          const routePathname = getFarmRoutePathname(pathname);
+          // Headers need the path eagerly; preload reporting needs it only for
+          // actual warnings. Keep the current plugin request, not a render URL.
+          const routePathname = configuredHeaderRoutes.length > 0
+            ? getFarmRoutePathname(new URL(runtimeRequest.url).pathname)
+            : undefined;
           return applyFarmPreloadBudget(
             applyFarmCspNonceToResponse(
               applyConfiguredResponseHeaders(response, routePathname),
               farmSecurityConfig,
             ),
             routePathname,
+            runtimeRequest,
           );
         };
         const runRequest = () => farmPluginRuntime
@@ -8832,7 +8899,7 @@ async function handleFarmFetch(request, context) {
         const response = await _runWithCurrentRequest(request, () =>
           _runWithAfterRequest(request, runRequest, context),
         );
-        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response)" : "response"};
+        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response, getFarmOwnedBufferedHtml(response))" : "response"};
       }),
     {
       onResponseFinished: typeof context?.onResponseFinished === "function"

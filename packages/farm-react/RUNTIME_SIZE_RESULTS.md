@@ -174,6 +174,77 @@ Regression coverage includes hybrid/static compiler selection, same-list and sib
 hints, queued map/filter and append/filter updates, legacy exports, HMR capability changes,
 hydration, Strict Mode, randomized removals, and unexpected map/append updates followed by removals.
 
+## Committed row membership during cleanup
+
+Keyed-row cleanup now checks the already-committed row Map directly. It no longer snapshots all
+live keys after filter, position, structural reorder, or rolling-window updates, or constructs a
+temporary Set for each populated event-handler/conditional-listener registry. Adoption and full
+reconciliation use the same committed Map. Empty registries still return immediately, removed
+callbacks are pruned, and retained callback identity and unsubscribe ownership are unchanged.
+
+Removing one of 10,000 rows avoids a 9,999-key cleanup array, even when both registries are empty.
+With 10,000 live keys and both registries populated, a cleanup pair also avoids two Sets and
+20,000 key insertions. These are deterministic allocation reductions, not operation-time claims.
+The two focused regression files cover all six cleanup call sites, empty/populated registries,
+1,000/10,000-key membership, callback identity, independent lists, failed adoption, and stale
+unsubscribe after re-registration:
+
+```bash
+pnpm --filter @farm.js/react exec vitest run src/__tests__/compiler-runtime-keyed-cleanup.test.ts src/__tests__/compiler-runtime-keyed-cleanup-commits.test.ts
+```
+
+Against merged commit `10daf746`, using the pinned upstream application and identical React
+19.2.0 / Vite 5.4.21 build settings described above, the actual source change measures:
+
+| Build  |       Raw |     Gzip |   Brotli |
+| ------ | --------: | -------: | -------: |
+| Before | 236,081 B | 73,081 B | 62,498 B |
+| After  | 235,879 B | 73,028 B | 62,487 B |
+| Saved  |     202 B |     53 B |     11 B |
+
+Both builds pass the same 12 production-browser controls in Chrome 154.0.8037.99 on macOS arm64
+with Node 24.21.0, including 10,000-row removal, DOM identity, and selection after removal; neither
+logs page/console errors. The runtime-size and target-specialization gates pass, with direct-binding
+and isolated-core controls unchanged. No public API, eligibility rules, native method evaluation,
+React fallback, other renderer, or compiler-disabled path changes. Browser CPU, first paint, and
+framework-ranking improvements have not been measured.
+
+## Plain prepend key validation
+
+The plain prepend fast path now checks each incoming key against the committed row Map and a Set
+of incoming keys only. It no longer copies every committed key into a temporary Set before
+validation. Prepending one row to 10,000 avoids a 10,000-key copy; the remaining Set holds only the
+prefix. The committed Map is read, not mutated, during validation. Retained-row validation,
+preparation before DOM mutation, and complete fallback are unchanged. Structural and mapped
+structural prepend still reject any committed key, including removed rows, and keep their existing
+validation.
+
+The regression counts `keys()` calls on the committed Map while a hinted prepend runs on 256 and
+2,048 rows. It covers the complete runtime and the compiler-selected `prepend-hinted` and
+`filter-prepend-hinted` runtimes. It fails on the previous implementation (`expected 1 to be +0`)
+and passes with this change. The same file covers reused committed keys, duplicate keys within one
+prefix and across queued prefixes, empty prefixes, and late key, descriptor, and binding failures.
+Each of those cases takes the complete fallback with an unchanged DOM at the point of failure and
+retained row identity:
+
+```bash
+pnpm --filter @farm.js/react exec vitest run src/__tests__/compiler-runtime-keyed-array-prepend-hints.test.tsx
+```
+
+The `test:runtime-size` fixtures were built before (`b405c215`) and after the source change with Node
+24.21.0, React 19.2.8, and Vite 5.4.20 on macOS 26.2 arm64. The raw size of every fixture is
+unchanged; the minified code differs, so compressed sizes move by a few bytes:
+
+| `keyed-prepend.tsx`, compiler on |       Raw |     Gzip |   Brotli |
+| -------------------------------- | --------: | -------: | -------: |
+| Before                           | 238,108 B | 73,112 B | 62,575 B |
+| After                            | 238,108 B | 73,111 B | 62,529 B |
+
+The structural-prepend fixtures also keep identical raw sizes, with gzip within 2 B and Brotli
+within 73 B. The runtime-size gate passes without a baseline update. These are deterministic
+allocation counts, not browser CPU, first-paint, or framework-ranking results. The pinned upstream
+application was not rebuilt for this change because it does not retain prepend hints.
+
 ## Existing production benchmark audit
 
 The existing js-framework-benchmark application was also rebuilt before and after runtime

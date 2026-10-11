@@ -126,6 +126,30 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       },
     );
 
+    it.each(["push", "replace", "pop"])(
+      "loads a non-HTML route response as a document for %s instead of swapping it",
+      async (action) => {
+        const { router, window, runtime, fetch } = setup();
+        // An API or programmatic api() route such as an RSS feed.
+        fetch.mockResolvedValue(
+          new Response("<rss></rss>", { headers: { "Content-Type": "application/xml" } }),
+        );
+        await router.navigate("/base/feed.xml", { action });
+        const method = action === "pop" ? "reload" : action === "replace" ? "replace" : "assign";
+        expect(window.location[method as keyof typeof window.location]).toHaveBeenCalledTimes(1);
+        if (action !== "pop") {
+          expect(window.location[method as "replace" | "assign"]).toHaveBeenCalledWith(
+            "https://example.test/base/feed.xml",
+          );
+        }
+        expect(runtime.failNavigation).not.toHaveBeenCalled();
+        expect(runtime.markNavigationLoaded).not.toHaveBeenCalled();
+        expect(router.activeNavigation).toBeNull();
+        expect(router.currentPath).toBe("/base/home");
+        expect(router.prefetchCache.size).toBe(0);
+      },
+    );
+
     it("shares a pending redirect without a second speculative request", async () => {
       const { router, fetch, prefetch, window } = setup();
       let resolve!: (response: Response) => void;

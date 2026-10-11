@@ -47,6 +47,7 @@ export {
   addMetadataMarkdownAlternate,
   mergeMetadata,
   renderMetadataHead,
+  resolveFarmNotFoundMetadata,
 } from "../metadata";
 export { createFarmMetadataRouteResponse } from "../metadata-route";
 export { createFarmAgentRobots } from "../agent-crawlers";

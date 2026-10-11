@@ -19,6 +19,9 @@ const methods = [...source.matchAll(/  fetchPage: async function\([^]*?\n  },/g)
 
 afterEach(() => vi.unstubAllGlobals());
 
+const html = (body: string) =>
+  new Response(body, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+
 for (const [index, renderer] of ["html", "react"].entries()) {
   describe(`${renderer} production prefetch ownership`, () => {
     function setup() {
@@ -75,7 +78,7 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       const preload = page("/about", { prefetch: true });
       const navigation = page();
       expect(fetch).toHaveBeenCalledTimes(1);
-      requests[0].resolve(new Response("about"));
+      requests[0].resolve(html("about"));
       expect(await preload).toBe("about");
       expect(await navigation).toBe("about");
       expect(router.pendingPrefetches.size).toBe(0);
@@ -92,7 +95,7 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       await expect(navigation).rejects.toMatchObject({ name: "AbortError" });
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(requests[0].options.signal).toBeUndefined();
-      requests[0].resolve(new Response("about"));
+      requests[0].resolve(html("about"));
       await preload;
       expect(router.readFreshPrefetch("/about")).toBe("about");
     });
@@ -105,7 +108,7 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       requests[0].reject(new Error("offline"));
       await failed;
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-      requests[1].resolve(new Response("retry"));
+      requests[1].resolve(html("retry"));
       expect(await navigation).toBe("retry");
       expect(router.pendingPrefetches.size).toBe(0);
     });
@@ -115,9 +118,9 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       const preload = page("/about", { prefetch: true });
       const fresh = page("/about", { fresh: true });
       expect(fetch).toHaveBeenCalledTimes(2);
-      requests[1].resolve(new Response("fresh"));
+      requests[1].resolve(html("fresh"));
       await fresh;
-      requests[0].resolve(new Response("old"));
+      requests[0].resolve(html("old"));
       await preload;
       expect(router.readFreshPrefetch("/about")).not.toBe("old");
       expect(router.pendingPrefetches.size).toBe(0);
@@ -127,7 +130,7 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       const { page, requests, router } = setup();
       const preload = page("/about", { prefetch: true });
       router.clearCache();
-      requests[0].resolve(new Response("old"));
+      requests[0].resolve(html("old"));
       await preload;
       expect(router.prefetchCache.size).toBe(0);
       expect(router.pendingPrefetches.size).toBe(0);
@@ -139,8 +142,8 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       window.__FARM_DEPLOYMENT_ID__ = "two";
       const navigation = page();
       expect(fetch).toHaveBeenCalledTimes(2);
-      requests[1].resolve(new Response("new release"));
-      requests[0].resolve(new Response("old release"));
+      requests[1].resolve(html("new release"));
+      requests[0].resolve(html("old release"));
       await Promise.all([preload, navigation]);
     });
 
@@ -155,20 +158,56 @@ for (const [index, renderer] of ["html", "react"].entries()) {
       expect(router.pendingPrefetches.size).toBe(0);
       expect(router.prefetchCache.size).toBe(0);
       const retry = page("/about", { prefetch: true });
-      requests[1].resolve(new Response("retry"));
+      requests[1].resolve(html("retry"));
       expect(await retry).toBe("retry");
     });
+
+    it.each([
+      ["an XML", "application/xml"],
+      ["a JSON", "application/json"],
+      ["a plain-text", "text/plain"],
+      ["an untyped", null],
+    ])(
+      "hands %s response to the browser instead of caching it as page HTML",
+      async (_kind, contentType) => {
+        const { page, requests, fetch, router } = setup();
+        const preload = page("/feed.xml", { prefetch: true });
+        const navigation = page("/feed.xml");
+        // A feed or file the router will not swap must not keep downloading.
+        const cancel = vi.fn();
+        const body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("<rss></rss>"));
+            controller.close();
+          },
+          cancel,
+        });
+        requests[0].resolve(
+          new Response(body, { headers: contentType ? { "Content-Type": contentType } : {} }),
+        );
+        for (const result of await Promise.allSettled([preload, navigation])) {
+          expect(result).toMatchObject({
+            status: "rejected",
+            reason: { name: "FarmNavigationRedirect" },
+          });
+        }
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(cancel).toHaveBeenCalledTimes(1);
+        expect(router.prefetchCache.size).toBe(0);
+        expect(router.pendingPrefetches.size).toBe(0);
+      },
+    );
 
     it("a cleared record cannot remove a replacement prefetch or publish old HTML", async () => {
       const { page, requests, router } = setup();
       const old = page("/about", { prefetch: true });
       router.clearPrefetchedPath("/about");
       const replacement = page("/about", { prefetch: true });
-      requests[0].resolve(new Response("old"));
+      requests[0].resolve(html("old"));
       await old;
       expect(router.pendingPrefetches.size).toBe(1);
       expect(router.prefetchCache.size).toBe(0);
-      requests[1].resolve(new Response("new"));
+      requests[1].resolve(html("new"));
       await replacement;
       expect(router.pendingPrefetches.size).toBe(0);
       expect(router.readFreshPrefetch("/about")).toBe("new");
@@ -218,8 +257,8 @@ for (const [index, renderer] of ["html", "react"].entries()) {
         expect(new Headers(requests[1].options.headers).get("X-Farm-Intercept-From")).toBe(
           "/gallery",
         );
-        requests[0].resolve(new Response("ordinary"));
-        requests[1].resolve(new Response("intercepted"));
+        requests[0].resolve(html("ordinary"));
+        requests[1].resolve(html("intercepted"));
         expect(await preload).toBe("ordinary");
         expect(await navigation).toBe("intercepted");
       });

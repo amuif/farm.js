@@ -21,7 +21,7 @@ function runtime(mode: FarmPreloadMode = "enforce") {
     "farmPreloadConfig",
     "reportFarmPreloadWarnings",
     "Headers",
-    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, applyFarmPreloadBudget };`,
+    `${generatePreloadResponseRuntimeSource()}; return { getFarmBufferedPreloadMarker, rememberFarmBufferedHtml, getFarmOwnedBufferedHtml, applyFarmPreloadBudget };`,
   )(
     manageFarmDocumentPreloads,
     manageFarmLinkHeaderPreloads,
@@ -35,6 +35,8 @@ function runtime(mode: FarmPreloadMode = "enforce") {
     }),
   ) as {
     getFarmBufferedPreloadMarker(html: unknown): string;
+    rememberFarmBufferedHtml(response: Response, html: string): Response;
+    getFarmOwnedBufferedHtml(response: Response): string | undefined;
     applyFarmPreloadBudget(response: Response, pathname: string): Promise<Response>;
   };
   return {
@@ -47,6 +49,10 @@ function runtime(mode: FarmPreloadMode = "enforce") {
       headers.set("content-type", "text/html; charset=utf-8");
       headers.set("x-farm-preload-buffered", generated.getFarmBufferedPreloadMarker(html));
       return new Response(html, { ...init, headers });
+    },
+    // A buffered response as Farm's renderer builds it: from a string it keeps.
+    owned(html: string, init: ResponseInit = {}) {
+      return generated.rememberFarmBufferedHtml(this.response(html, init), html);
     },
   };
 }
@@ -76,7 +82,8 @@ describe("production preload response processing", () => {
       const output = await r.applyFarmPreloadBudget(original, "/");
       expect(output).toBe(original);
       expect(r.headerCopies).not.toHaveBeenCalled();
-      expect(r.report).toHaveBeenCalledExactlyOnceWith([], "route /");
+      // Keep the cleanup call, but no route context is needed without warnings.
+      expect(r.report).toHaveBeenCalledExactlyOnceWith([], undefined);
       expect(output.statusText).toBe("Created");
       expect(output.headers.getSetCookie()).toEqual(["first=1; Path=/", "second=2; Path=/"]);
       expect(original.bodyUsed).toBe(false);
@@ -99,6 +106,143 @@ describe("production preload response processing", () => {
     expect(original.headers.get("link")).toBe("");
     expect(output.headers.has("link")).toBe(false);
     expect(await output.text()).toBe("html");
+  });
+
+  describe("renderer-owned buffered HTML", () => {
+    const hero = '<link rel="preload" as="image" href="/hero.webp" fetchpriority="high">';
+    const below = '<link rel="preload" as="image" href="/below.webp">';
+
+    it.each(["enforce", "warn"] as const)(
+      "scans the remembered string and keeps the unread body within budget (%s)",
+      async (mode) => {
+        const r = runtime(mode);
+        const html = `<html><head>${hero}</head><body><p>fits 🌱</p></body></html>`;
+        const original = r.owned(html, {
+          status: 201,
+          statusText: "Created",
+          headers: { "content-length": String(Buffer.byteLength(html)) },
+        });
+        original.headers.append("set-cookie", "a=1; Path=/");
+        original.headers.append("set-cookie", "b=2; Path=/");
+        const text = vi.spyOn(original, "text");
+        const output = await r.applyFarmPreloadBudget(original, "/");
+
+        expect(text).not.toHaveBeenCalled();
+        expect(output.body).toBe(original.body);
+        expect(output.status).toBe(201);
+        expect(output.statusText).toBe("Created");
+        expect(output.headers.get("content-length")).toBe(String(Buffer.byteLength(html)));
+        expect(output.headers.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+        expect(output.headers.has("x-farm-preload-buffered")).toBe(false);
+        expect(await output.text()).toBe(html);
+      },
+    );
+
+    it("keeps the body unread when warn mode reports an over-budget document", async () => {
+      const r = runtime("warn");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = r.owned(html);
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(output.body).toBe(original.body);
+      expect(r.report).toHaveBeenCalledWith(
+        [{ kind: "image", count: 2, budget: 1, removed: 0 }],
+        "route /",
+      );
+      expect(await output.text()).toBe(html);
+    });
+
+    it("applies an enforced budget from the remembered string and cancels the body", async () => {
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = r.owned(html, {
+        headers: { "content-length": String(Buffer.byteLength(html)) },
+      });
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(original.bodyUsed).toBe(true);
+      expect(output.headers.has("content-length")).toBe(false);
+      expect(await output.text()).toBe(html.replace(below, ""));
+    });
+
+    it("hands compression the complete text of every buffered document", async () => {
+      // Compression can only skip its stream bridge for bodies Farm proves complete.
+      const r = runtime("enforce");
+      const plain = "<html><body><p>no hints</p></body></html>";
+      const noHints = await r.applyFarmPreloadBudget(r.owned(plain), "/");
+      expect(r.getFarmOwnedBufferedHtml(noHints)).toBe(plain);
+
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const trimmed = await r.applyFarmPreloadBudget(r.owned(html), "/");
+      expect(r.getFarmOwnedBufferedHtml(trimmed)).toBe(html.replace(below, ""));
+
+      const transformed = r.owned(plain);
+      const piped = new Response(transformed.body!.pipeThrough(new TransformStream()), {
+        headers: transformed.headers,
+      });
+      expect(r.getFarmOwnedBufferedHtml(piped)).toBeUndefined();
+    });
+
+    it("keeps the remembered string through header-only rebuilds", async () => {
+      // Middleware and configured response headers rebuild the Response around
+      // the same body stream; the remembered string still describes it.
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}</head><body><p>fits</p></body></html>`;
+      const owned = r.owned(html);
+      const headers = new Headers(owned.headers);
+      headers.set("cache-control", "private, no-store");
+      const rebuilt = new Response(owned.body, { status: owned.status, headers });
+      const text = vi.spyOn(rebuilt, "text");
+      const output = await r.applyFarmPreloadBudget(rebuilt, "/");
+
+      expect(text).not.toHaveBeenCalled();
+      expect(output.body).toBe(owned.body);
+      expect(output.headers.get("cache-control")).toBe("private, no-store");
+      expect(await output.text()).toBe(html);
+    });
+
+    it.each([
+      [
+        "a response it did not build",
+        (r: ReturnType<typeof runtime>, html: string) => r.response(html),
+      ],
+      [
+        "a transformed body (plugins, CSP nonces)",
+        (r: ReturnType<typeof runtime>, html: string) => {
+          const owned = r.owned(html);
+          return new Response(owned.body!.pipeThrough(new TransformStream()), {
+            status: owned.status,
+            headers: owned.headers,
+          });
+        },
+      ],
+      [
+        "a cloned response (its body becomes a tee branch)",
+        (r: ReturnType<typeof runtime>, html: string) => {
+          const owned = r.owned(html);
+          void owned.clone();
+          return owned;
+        },
+      ],
+      [
+        "a document that starts with a BOM",
+        (r: ReturnType<typeof runtime>, html: string) => r.owned(`\ufeff${html}`),
+      ],
+    ])("reads the body back for %s", async (_label, build) => {
+      const r = runtime("enforce");
+      const html = `<html><head>${hero}${below}</head><body></body></html>`;
+      const original = build(r, html);
+      const text = vi.spyOn(original, "text");
+      const output = await r.applyFarmPreloadBudget(original, "/");
+
+      expect(text).toHaveBeenCalledOnce();
+      // Response.text() drops a leading BOM; the output keeps that behavior.
+      expect(await output.text()).toBe(html.replace(below, ""));
+    });
   });
 
   it("still strips unrecognized internal markers from HTML responses", async () => {
