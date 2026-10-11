@@ -2863,6 +2863,10 @@ export interface CompilerHostElement {
 
 export type CompilerKeyedRowElement = CompilerHostElement;
 
+// Shared by every delegated row onChange so React sees a handler without a
+// per-row allocation; the container's delegated listener does the work.
+const delegatedRowChangePlaceholder: React.EventHandler<React.SyntheticEvent> = () => undefined;
+
 export interface CompilerKeyedRowEvent {
   name: string;
   /** Host-element path relative to the keyed row root. */
@@ -9170,7 +9174,14 @@ function createKeyedRowsBlockComponentCore(
         return (event) => this.currentProps.events?.[eventId]?.invoke(item, index, event);
       }
       if (this.usesDelegatedEvents()) {
-        return undefined as unknown as React.EventHandler<React.SyntheticEvent>;
+        // The container's delegated listener runs the handler. React still checks
+        // that controlled value/checked fields carry onChange, so give change
+        // events one shared no-op instead of none; other events stay unset.
+        return (
+          this.currentProps.events?.[eventId]?.name === "onChange"
+            ? delegatedRowChangePlaceholder
+            : undefined
+        ) as React.EventHandler<React.SyntheticEvent>;
       }
       const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
       let handlers = this.eventHandlers.get(key);
