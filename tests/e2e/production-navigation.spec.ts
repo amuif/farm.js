@@ -33,3 +33,20 @@ test("production relative navigation and prefetch keep the current document path
   await expect(page).toHaveURL(/\/users\/456#details$/);
   expect(requests).toHaveLength(beforeHash);
 });
+
+test("production plain links to API routes load the response as a document", async ({ page }) => {
+  await page.goto("/");
+  await expect.poll(() => page.evaluate(() => !!(window as any).__FARM_SPA_ROUTER__)).toBe(true);
+  // A root-layout anchor to a feed or other API route, not a Farm <Link>.
+  await page.evaluate(() => {
+    const link = document.createElement("a");
+    link.id = "api-document-link";
+    link.setAttribute("href", "/api/hello?name=Farm");
+    link.textContent = "API";
+    document.body.append(link);
+  });
+  await page.click("#api-document-link");
+  await expect(page).toHaveURL(/\/api\/hello\?name=Farm$/);
+  await expect.poll(() => page.evaluate(() => document.contentType)).toBe("application/json");
+  await expect(page.locator("body")).toContainText("Hello Peeps, Farm!");
+});
