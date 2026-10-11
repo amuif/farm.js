@@ -106,6 +106,7 @@ import { resolveFarmInstrumentationFile } from "../instrumentation";
 import { getFarmPresetRuntime } from "../deployment";
 import { isFarmPreviewDeploymentEnvironment } from "../deployment-environment";
 import { resolveFarmInstrumentationRuntime } from "../instrumentation-runtime";
+import { FARM_PRERENDER_ENV } from "../plugins/infra-analytics";
 import {
   getFarmRendererCapabilities,
   getFarmRendererStreamingCapabilitiesForRuntime,
@@ -4966,6 +4967,9 @@ function generateVirtualEntryCode(
       (metadata) => metadata.kind === "robots" && metadata.pattern === "/",
     );
   const hasPluginRuntime = hasRuntimeIntegrationConfig || hasServerRuntimePlugins;
+  // Decided when the server starts, from its environment; see createFarmInfraAnalyticsPlugin.
+  const hasInfraAnalyticsRuntime =
+    config.analytics !== false && resolveFarmInstrumentationRuntime(preset) === "nodejs";
   const hasPrecompiledDocs = Boolean(farmDocsPrecompiledManifest);
   const adapterOwnsDocsRuntime = Boolean(
     isReactRenderer(config.renderer) &&
@@ -5400,6 +5404,11 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   const pluginRuntimeImport = hasPluginRuntime
     ? `import { PluginManager } from "@farm.js/core/plugin";`
     : "";
+  // A server with a plugin runtime gets the plugin (it also correlates MCP tool calls).
+  // Without one, a direct recorder avoids importing the plugin runtime.
+  const infraAnalyticsImport = hasInfraAnalyticsRuntime
+    ? `import { ${hasPluginRuntime ? "createFarmInfraAnalyticsPlugin" : "createFarmInfraAnalyticsRecorder"} } from "@farm.js/core/internal/infra-analytics-runtime";`
+    : "";
   const compressionRuntimeImport = hasCompressionRuntime
     ? `import { compressFarmResponse${hasPluginRuntime ? ", createCompressionPlugin" : ""} } from "@farm.js/core/internal/compression-runtime";`
     : "";
@@ -5610,6 +5619,7 @@ ${productionRuntimeImport}
 ${productionSiteTelemetryImport}
 ${metadataImageRuntimeImport}
 ${pluginRuntimeImport}
+${infraAnalyticsImport}
 ${compressionRuntimeImport}
 ${i18nServerImport}
 ${docsHandlerImport}
@@ -5777,6 +5787,13 @@ const serverRuntimeIntegrations = Object.fromEntries(
 const integrationRuntimeConfig = Object.assign({}, ...farmRuntimeConfigs, {
   integrations: configuredIntegrations,
 });
+const farmInfraAnalytics = ${
+    hasInfraAnalyticsRuntime
+      ? hasPluginRuntime
+        ? "createFarmInfraAnalyticsPlugin()"
+        : "createFarmInfraAnalyticsRecorder()"
+      : "null"
+  };
 const configuredPlugins = [
   ${hasCompressionRuntime && hasPluginRuntime ? "createCompressionPlugin()," : ""}
   ${hasRuntimeIntegrationConfig ? "...resolveIntegrationPlugins(serverRuntimeIntegrations)," : ""}
@@ -5788,6 +5805,7 @@ const configuredPlugins = [
   ),`
       : ""
   }
+  ${hasInfraAnalyticsRuntime && hasPluginRuntime ? "...(farmInfraAnalytics ? [farmInfraAnalytics] : [])," : ""}
 ];
 const farmPluginRuntime = ${
     hasPluginRuntime
@@ -5878,7 +5896,11 @@ export const farmProductionLifecycle = createFarmProductionLifecycle({
   },
   close: async (reason) => {
     try {
-      await farmPluginRuntime?.closeRuntime(reason);
+      await farmPluginRuntime?.closeRuntime(reason);${
+        hasInfraAnalyticsRuntime && !hasPluginRuntime
+          ? "\n      await farmInfraAnalytics?.close();"
+          : ""
+      }
     } finally {
       await farmInstrumentationLifecycle.shutdown();
     }
@@ -8894,7 +8916,18 @@ async function handleFarmFetch(request, context) {
                   : undefined,
               },
             )
-          : prepareResponse(request, handleFarmRequest(request, context));
+          : ${
+            hasInfraAnalyticsRuntime && !hasPluginRuntime
+              ? `farmInfraAnalytics
+            ? farmInfraAnalytics.record(
+                request,
+                getFarmPluginRequestOptions(request),
+                typeof context?.waitUntil === "function" ? context.waitUntil.bind(context) : undefined,
+                () => prepareResponse(request, handleFarmRequest(request, context)),
+              )
+            : `
+              : ""
+          }prepareResponse(request, handleFarmRequest(request, context));
 
         const response = await _runWithCurrentRequest(request, () =>
           _runWithAfterRequest(request, runRequest, context),
@@ -9704,7 +9737,16 @@ export default async function farmNitroEventHandler(event) {
   }
   if (prerenderRoutes.length > 0) {
     logger.info(`📄 Pre-rendering ${prerenderRoutes.length} SSG page(s)`);
-    await nitroBuilder.prerender(nitroInstance);
+    // Nitro's prerender worker copies this environment, so built-in analytics
+    // doesn't report the build's own page requests as traffic.
+    const previousPrerender = process.env[FARM_PRERENDER_ENV];
+    process.env[FARM_PRERENDER_ENV] = "1";
+    try {
+      await nitroBuilder.prerender(nitroInstance);
+    } finally {
+      if (previousPrerender === undefined) delete process.env[FARM_PRERENDER_ENV];
+      else process.env[FARM_PRERENDER_ENV] = previousPrerender;
+    }
   }
   const sharpRuntimeStagePromise =
     imageRuntime === "node"

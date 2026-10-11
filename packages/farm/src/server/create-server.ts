@@ -15,6 +15,7 @@ import {
   createCompressionPlugin,
   createLoggerPlugin,
 } from "../plugins";
+import { createFarmInfraAnalyticsPlugin } from "../plugins/infra-analytics";
 import {
   createFarmClientOptimizeDepsConfig,
   createFarmClientOptimizeDepsEntries,
@@ -212,6 +213,11 @@ export async function createServer(config: FarmConfig = {}) {
         pluginManager.addPlugins(resolvedConfig.plugins);
       }
     }
+
+    // Only an app whose environment links it to a Farm Infra project gets this plugin.
+    const infraAnalytics =
+      (resolvedConfig || config).analytics !== false ? createFarmInfraAnalyticsPlugin() : null;
+    if (infraAnalytics) pluginManager.addPlugin(infraAnalytics);
 
     if (mode === "development") {
       const hasLogger = pluginManager.getPlugins().some((p) => p.name === "farm:logger");

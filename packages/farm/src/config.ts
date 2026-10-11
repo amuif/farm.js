@@ -1082,6 +1082,7 @@ export async function resolveConfig(
     api,
     observability: userConfig.observability ?? false,
     telemetry: userConfig.telemetry !== false,
+    analytics: userConfig.analytics !== false,
     devtools: resolveFarmDevtoolsConfig(userConfig.devtools, mode),
     storage: userConfig.storage || {},
     schema: resolveSchemaConfig(userConfig.schema),
