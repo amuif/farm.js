@@ -3144,7 +3144,9 @@ function getCompilerHmrRegistry(): CompilerHmrRegistry {
 }
 
 function renderTextValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map(renderTextValue).join("");
+  if (Array.isArray(value)) {
+    return value.length === 1 ? renderTextValue(value[0]) : value.map(renderTextValue).join("");
+  }
   if (value === null || value === undefined || typeof value === "boolean") return "";
   return String(value);
 }
@@ -3658,7 +3660,11 @@ function hasUnsafeCompilerFallbackKeys(descriptor: CompilerHostElement): boolean
 
 function findCompilerHostTarget(root: Element, path: readonly number[]): Element | null {
   let current: Element | null = root;
-  for (const index of path) current = current?.children[index] || null;
+  // Walking siblings avoids materializing a live HTMLCollection per step.
+  for (const index of path) {
+    current = current && current.firstElementChild;
+    for (let step = 0; step < index && current; step += 1) current = current.nextElementSibling;
+  }
   return current;
 }
 
@@ -3729,6 +3735,8 @@ function applyStaticRangeBindings(
 
 interface CompilerKeyedRowInstance extends CompilerHostInstance {
   key: string;
+  /** Binding targets of a cloneRows row, whose structure never changes. */
+  targets?: Element[];
   item: unknown;
   index: number;
   conditionalValues: ReadonlyMap<number, readonly unknown[]>;
@@ -4472,29 +4480,38 @@ function createKeyedRowInstance(
     index,
     conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
   };
-  if (template) {
-    props.bindings.forEach((binding, bindingIndex) =>
-      commitKeyedRowBinding(
-        binding,
-        instance,
-        bindingIndex,
-        instance.values[bindingIndex],
-        findCompilerHostTarget(element, binding.path),
-      ),
-    );
-  } else if (props.cloneRows) {
-    const skeleton = keyedRowTemplate(props, element);
-    if (skeleton) KEYED_ROW_TEMPLATES.set(props, skeleton);
+  if (props.cloneRows) {
+    const targets = props.bindings.map((binding) => findCompilerHostTarget(element, binding.path));
+    if (targets.every(Boolean)) instance.targets = targets as Element[];
+    if (template) {
+      props.bindings.forEach((binding, bindingIndex) =>
+        commitKeyedRowBinding(
+          binding,
+          instance,
+          bindingIndex,
+          instance.values[bindingIndex],
+          targets[bindingIndex],
+        ),
+      );
+    } else {
+      const skeleton = keyedRowTemplate(props, element, targets);
+      if (skeleton) KEYED_ROW_TEMPLATES.set(props, skeleton);
+    }
   }
   return instance;
 }
 
-function keyedRowTemplate(props: CompilerKeyedRowSource, element: Element): Element | undefined {
+function keyedRowTemplate(
+  props: CompilerKeyedRowSource,
+  element: Element,
+  targets: readonly (Element | null)[],
+): Element | undefined {
   // A clone updates bound attributes in place, which keeps a built row's
   // attribute order only if this row has every one of them. Otherwise wait for
   // a row that does.
-  for (const binding of props.bindings) {
-    const target = findCompilerHostTarget(element, binding.path);
+  for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
+    const binding = props.bindings[bindingIndex];
+    const target = targets[bindingIndex];
     if (!target || binding.kind === "style") return undefined;
     if (
       binding.kind === "attribute" &&
@@ -4525,10 +4542,7 @@ function applyKeyedRowBindings(
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
     if (Object.is(instance.values[bindingIndex], nextValues[bindingIndex])) continue;
     targets ||= [];
-    targets[bindingIndex] = findCompilerHostTarget(
-      instance.element,
-      props.bindings[bindingIndex].path,
-    );
+    targets[bindingIndex] = keyedRowBindingTarget(props, instance, bindingIndex);
   }
   if (!targets) return;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
@@ -4554,8 +4568,19 @@ function applyKeyedRowBinding(
   const binding = props.bindings[bindingIndex];
   const value = normalizedKeyedRowBindingValue(binding, binding.read(item, index));
   if (Object.is(instance.values[bindingIndex], value)) return;
-  const target = findCompilerHostTarget(instance.element, binding.path);
+  const target = keyedRowBindingTarget(props, instance, bindingIndex);
   commitKeyedRowBinding(binding, instance, bindingIndex, value, target);
+}
+
+function keyedRowBindingTarget(
+  props: CompilerKeyedRowBindingSource,
+  instance: CompilerKeyedRowInstance,
+  bindingIndex: number,
+): Element | null {
+  return (
+    instance.targets?.[bindingIndex] ||
+    findCompilerHostTarget(instance.element, props.bindings[bindingIndex].path)
+  );
 }
 
 function commitKeyedRowBinding(
@@ -4568,7 +4593,13 @@ function commitKeyedRowBinding(
   instance.values[bindingIndex] = value;
   if (!target) return;
   if (binding.kind === "text") {
-    target.textContent = value as string;
+    // Like React's setTextContent: update a lone text node in place.
+    const text = target.firstChild;
+    if (value && text && text === target.lastChild && text.nodeType === 3) {
+      (text as Text).data = value as string;
+    } else {
+      target.textContent = value as string;
+    }
   } else if (binding.kind === "style" && binding.name) {
     updateStyle(target, binding.name, value);
   } else if (binding.kind === "attribute" && binding.name) {
@@ -4593,7 +4624,7 @@ function prepareKeyedRowBindingUpdate(
   const rawValue = binding.read(item, index);
   const value = normalizedKeyedRowBindingValue(binding, rawValue);
   if (Object.is(instance.values[bindingIndex], value)) return null;
-  const target = findCompilerHostTarget(instance.element, binding.path);
+  const target = keyedRowBindingTarget(props, instance, bindingIndex);
   if (!target || (binding.kind !== "text" && !binding.name)) return undefined;
   return [bindingIndex, target, value];
 }
@@ -4609,14 +4640,17 @@ function prepareKeyedRowBindingUpdates(
   item: unknown,
   index: number,
 ): CompilerPreparedKeyedRowBindingUpdate[] | undefined {
-  const updates: CompilerPreparedKeyedRowBindingUpdate[] = [];
+  let updates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
     const update = prepareKeyedRowBindingUpdate(props, instance, item, index, bindingIndex);
     if (update === undefined) return undefined;
-    if (update) updates.push(update);
+    if (update) (updates ||= []).push(update);
   }
-  return updates;
+  return updates || NO_KEYED_ROW_BINDING_UPDATES;
 }
+
+// Shared by every row with nothing to patch; callers only iterate it.
+const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdate[] = [];
 
 function applyPreparedKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,

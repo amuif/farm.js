@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCompiledComponent,
   type CompiledComponentDefinition,
@@ -272,6 +272,24 @@ describe("cloned keyed rows", () => {
 
     expect(built.creates).toBeGreaterThanOrEqual(105);
     expect(cloned.creates).toBe(1);
+  });
+
+  it("patches cloned rows through their saved targets and keeps lone text nodes", async () => {
+    const view = mountRows("table", true);
+    await view.render();
+    await view.rows(() => rows(1, 20));
+    const label = view.container.querySelector("tbody tr:nth-child(11) a")!;
+    const text = label.firstChild;
+    const walk = vi.spyOn(Element.prototype, "firstElementChild", "get");
+
+    await view.rows((current) =>
+      current.map((row, index) => (index % 10 === 0 ? { ...row, label: `${row.label} !!!` } : row)),
+    );
+
+    expect(walk).not.toHaveBeenCalled();
+    expect(label.textContent).toBe("#11 row 11 !!!");
+    // React's setTextContent also writes a lone text node's data in place.
+    expect(label.firstChild).toBe(text);
   });
 
   it("waits for a row that has every bound attribute before cloning", async () => {
