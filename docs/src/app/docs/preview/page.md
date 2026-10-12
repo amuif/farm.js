@@ -66,15 +66,21 @@ non-interactive terminals, the hosted default is used.
 Gateways configured with `FARM_INFRA_URL` use your Farm.js Infrastructure account instead of the
 legacy GitHub device flow. You do not need to link GitHub in the dashboard.
 
-1. With an existing dashboard API key, supply it through `FARM_PREVIEW_TOKEN` (use your
-   CI secret store, not a command-line argument). The CLI requests a tunnel grant directly.
+1. With a Farm.js Infrastructure API key in `FARMJS_API_KEY`, the same key analytics uses,
+   the CLI signs in with it and never opens a browser. It reads the key from your shell or
+   your CI secrets, and from the app's `.env` files the way `farm dev` does. Set
+   `FARMJS_API_URL` too if Infrastructure isn't at `https://infra.farmjs.dev`: the key is
+   only sent to a gateway that signs in through that Infrastructure.
 2. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
    for you to confirm the matching code and explicitly authorize your terminal.
 3. Return to the CLI. Choose the preview duration when prompted, or pass `--expires`.
 4. Once the tunnel is ready, the CLI prints its public URL and a dashboard link.
 
-CI never waits for browser approval: provide a credential, otherwise the command fails
-with instructions. Device approval signs the first-party CLI into your Infra account;
+CI never waits for browser approval: set `FARMJS_API_KEY`, otherwise the command fails
+with instructions. For CI, create a key restricted to the preview's project, with an
+expiry, rather than an account-wide key. `FARM_PREVIEW_TOKEN` is deprecated: it still works
+and prints a warning, and `FARMJS_API_KEY` replaces it. The hosted gateway still uses GitHub
+sign-in, which doesn't accept API keys. Device approval signs the first-party CLI into your Infra account;
 the saved credential is a Better Auth session token, not a third-party OAuth access token.
 The gateway verifies that credential or API key whenever it issues a new, name-scoped
 grant. A grant cannot outlive the verified account session or API key expiry. API keys
@@ -392,17 +398,19 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 
 ## Environment Variables
 
-| Variable                        | Purpose                                                                                                          |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `FARM_PREVIEW_GATEWAY_URL`      | Override the hosted gateway URL.                                                                                 |
-| `FARM_PREVIEW_RELAY_URL`        | Override the persistent WebSocket relay URL.                                                                     |
-| `FARM_PREVIEW_DOMAIN`           | Override the preview domain used for generated hostnames.                                                        |
-| `FARM_PREVIEW_NAME`             | Provide a default readable preview name.                                                                         |
-| `FARM_PREVIEW_PROJECT`          | Stable dashboard project slug; overridden by `--project`.                                                        |
-| `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                        |
-| `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                             |
-| `FARM_PREVIEW_TOKEN`            | Farm.js Infrastructure API key or saved account credential for CI; accepted format depends on gateway auth mode. |
-| `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                              |
+| Variable                        | Purpose                                                                                                         |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `FARM_PREVIEW_GATEWAY_URL`      | Override the hosted gateway URL.                                                                                |
+| `FARM_PREVIEW_RELAY_URL`        | Override the persistent WebSocket relay URL.                                                                    |
+| `FARM_PREVIEW_DOMAIN`           | Override the preview domain used for generated hostnames.                                                       |
+| `FARM_PREVIEW_NAME`             | Provide a default readable preview name.                                                                        |
+| `FARM_PREVIEW_PROJECT`          | Stable dashboard project slug; overridden by `--project`.                                                       |
+| `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                       |
+| `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                            |
+| `FARMJS_API_KEY`                | Farm.js Infrastructure API key. Signs previews in without a browser on a gateway that uses that Infrastructure. |
+| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://infra.farmjs.dev`.                                       |
+| `FARM_PREVIEW_TOKEN`            | Deprecated. Use `FARMJS_API_KEY`. Still accepted, with a warning.                                               |
+| `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                             |
 
 ## Troubleshooting
 

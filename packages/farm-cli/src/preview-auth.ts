@@ -43,6 +43,57 @@ export interface PreviewCredentialStore {
   delete(gatewayUrl: string): Promise<void>;
 }
 
+/** Where Farm.js Infrastructure lives unless FARMJS_API_URL says otherwise, as for analytics. */
+const DEFAULT_INFRA_URL = "https://infra.farmjs.dev";
+
+export interface PreviewEnvironmentCredential {
+  token: string;
+  source: "FARMJS_API_KEY" | "FARM_PREVIEW_TOKEN";
+}
+
+/**
+ * The credential the environment gives this gateway, if any. FARMJS_API_KEY is a
+ * Farm.js Infrastructure key, so it only goes to a gateway that signs in through that
+ * same Infrastructure: a GitHub sign-in gateway, or another installation, can't use it.
+ * FARM_PREVIEW_TOKEN is deprecated but still honored.
+ */
+export function previewCredentialFromEnvironment(
+  config: PreviewAuthPublicConfig,
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = (message) => logger.warn(message),
+): PreviewEnvironmentCredential | undefined {
+  const legacy = env.FARM_PREVIEW_TOKEN?.trim() || undefined;
+  const key = env.FARMJS_API_KEY?.trim() || undefined;
+  if (
+    key &&
+    config.provider === "device" &&
+    sameOrigin(config.issuer, env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)
+  ) {
+    if (legacy && legacy !== key) {
+      throw new Error(
+        "FARMJS_API_KEY and the deprecated FARM_PREVIEW_TOKEN hold different credentials. Unset FARM_PREVIEW_TOKEN.",
+      );
+    }
+    return { token: key, source: "FARMJS_API_KEY" };
+  }
+  if (!legacy) return undefined;
+  // Only where an API key works; a GitHub sign-in gateway has no replacement to point to.
+  if (config.provider === "device") {
+    warn(
+      "FARM_PREVIEW_TOKEN is deprecated. Set FARMJS_API_KEY to your Farm.js Infrastructure API key instead.",
+    );
+  }
+  return { token: legacy, source: "FARM_PREVIEW_TOKEN" };
+}
+
+function sameOrigin(left: string | undefined, right: string) {
+  try {
+    return !!left && new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
 interface GitHubDeviceAuthorization {
   device_code: string;
   user_code: string;
@@ -76,9 +127,10 @@ export async function authorizePreviewGatewayPlan(
     throw new Error("The Farm Preview gateway returned an unsupported login configuration.");
   }
 
+  const environment = options.forceLogin ? undefined : previewCredentialFromEnvironment(config);
   let accountToken = options.forceLogin
     ? undefined
-    : process.env.FARM_PREVIEW_TOKEN || (await runtime.credentials.get(plan.gatewayUrl));
+    : environment?.token || (await runtime.credentials.get(plan.gatewayUrl));
   if (!accountToken) {
     const account = await loginWithPreviewDeviceFlow(plan.gatewayUrl, config, runtime);
     accountToken = account.token;
@@ -91,12 +143,12 @@ export async function authorizePreviewGatewayPlan(
   let grant = await requestTunnelGrant(plan, accountToken, expiresInMs, runtime.fetch);
 
   if (grant.unauthorized) {
-    if (process.env.FARM_PREVIEW_TOKEN && !options.forceLogin) {
+    if (environment) {
       throw new Error(
-        "FARM_PREVIEW_TOKEN was rejected by the hosted gateway. Replace or unset it before retrying.",
+        `${environment.source} was rejected by the preview gateway. Replace or unset it before retrying.`,
       );
     }
-    if (!process.env.FARM_PREVIEW_TOKEN) await runtime.credentials.delete(plan.gatewayUrl);
+    await runtime.credentials.delete(plan.gatewayUrl);
     const account = await loginWithPreviewDeviceFlow(plan.gatewayUrl, config, runtime);
     accountToken = account.token;
     await runtime.credentials.set(plan.gatewayUrl, accountToken);
@@ -197,7 +249,9 @@ async function loginWithPreviewDeviceFlow(
 ): Promise<PreviewAccountExchange> {
   if (runtime.interactive === false)
     throw new Error(
-      "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARM_PREVIEW_TOKEN to a Farm.js Infrastructure API key, or sign in once from an interactive terminal.",
+      config.provider === "device"
+        ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://infra.farmjs.dev), or sign in once from an interactive terminal."
+        : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);
   const issuer = safeAuthUrl(config.issuer || "");

@@ -66,6 +66,9 @@ const DEFAULT_PREVIEW_PORTS = [3000, 4319, 5173, 4173, 8080];
 const PREVIEW_URL_PATTERN = /https:\/\/[^\s"')\]}]+/g;
 
 export async function previewFarm(options: PreviewFarmOptions = {}): Promise<PreviewFarmResult> {
+  // Loading the config reads the app's .env files the way farm dev does, so a
+  // FARMJS_API_KEY kept there signs the preview in. A broken config doesn't stop it.
+  await loadAppConfig(options.root || process.cwd(), options.configPath).catch(() => undefined);
   const target = await resolvePreviewTarget(options);
 
   logger.info("Creating public preview for the running app...");
@@ -457,9 +460,22 @@ async function isReachable(url: string, timeoutMs: number) {
   }
 }
 
+const appConfigs = new Map<string, ReturnType<typeof loadConfig>>();
+
+/** The app's config, loaded once per root for this process. */
+function loadAppConfig(root: string, configPath?: string) {
+  const key = `${root}\0${configPath ?? ""}`;
+  let config = appConfigs.get(key);
+  if (!config) {
+    config = loadConfig(root, configPath, "development");
+    appConfigs.set(key, config);
+  }
+  return config;
+}
+
 async function readConfigPort(root: string, configPath?: string) {
   try {
-    const config = await loadConfig(root, configPath, "development");
+    const config = await loadAppConfig(root, configPath);
     const vite = config?.vite;
     if (!vite || typeof vite === "function") return undefined;
     return normalizePort(vite.server?.port);

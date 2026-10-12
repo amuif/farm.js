@@ -440,6 +440,26 @@ test("carries a configured relay credential without putting it in the relay URL"
   }
 });
 
+test("reads the app's .env files, as farm dev does, even with an explicit port", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-preview-env-"));
+  const previous = process.env.FARM_PREVIEW_NAME;
+  delete process.env.FARM_PREVIEW_NAME;
+  try {
+    await fs.writeFile(path.join(root, ".env"), "FARM_PREVIEW_NAME=from-dotenv\n");
+    const result = await previewFarm({
+      root,
+      provider: "farm",
+      port: 3000,
+      noProbe: true,
+      dryRun: true,
+    });
+    assert.equal(result.plan.requestedName, "from-dotenv");
+  } finally {
+    restoreEnv("FARM_PREVIEW_NAME", previous);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("keeps relay credentials out of public preview results", async () => {
   const previousToken = process.env.FARM_PREVIEW_RELAY_TOKEN;
   process.env.FARM_PREVIEW_RELAY_TOKEN = "do-not-expose-this-relay-credential";

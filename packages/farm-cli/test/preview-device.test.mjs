@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-const { authorizePreviewGatewayPlan } = createRequire(import.meta.url)("../dist/index.js");
+const { authorizePreviewGatewayPlan, previewCredentialFromEnvironment } = createRequire(
+  import.meta.url,
+)("../dist/index.js");
 const plan = {
   provider: "farm-gateway",
   gatewayUrl: "https://preview.example.com",
@@ -141,4 +143,131 @@ test("missing CI credentials, denied/expired codes and off-origin verification U
     );
     assert.equal(f.opened.length, 0);
   }
+});
+
+async function withEnv(values, run) {
+  const names = ["FARMJS_API_KEY", "FARMJS_API_URL", "FARM_PREVIEW_TOKEN"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  Object.assign(process.env, values);
+  try {
+    return await run();
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+}
+
+test("FARMJS_API_KEY signs previews in without a browser on its own Infrastructure", async () => {
+  await withEnv(
+    { FARMJS_API_KEY: "farmjs_fixture_key", FARMJS_API_URL: "https://infra.example.com" },
+    async () => {
+      for (const interactive of [true, false]) {
+        const f = fixture({ interactive });
+        const result = await authorizePreviewGatewayPlan(plan, {
+          runtime: f.runtime,
+          expiresInMs: 60000,
+        });
+        assert.equal(f.opened.length, 0);
+        assert.equal(f.saved.length, 0);
+        assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer farmjs_fixture_key");
+        assert.equal(result.relayToken, "scoped-grant");
+      }
+      const rejected = fixture({ reject: true, interactive: false });
+      await assert.rejects(
+        authorizePreviewGatewayPlan(plan, { runtime: rejected.runtime, expiresInMs: 60000 }),
+        /FARMJS_API_KEY was rejected/,
+      );
+      assert.equal(rejected.opened.length, 0);
+    },
+  );
+});
+
+test("FARMJS_API_KEY never goes to a GitHub sign-in gateway or another Infrastructure", async () => {
+  for (const [env, config] of [
+    // The hosted gateway still signs in with GitHub, which has no idea what an API key is.
+    [{ FARMJS_API_KEY: "farmjs_fixture_key" }, { provider: "github", issuer: undefined }],
+    // An API key belongs to one installation; the default is https://infra.farmjs.dev.
+    [{ FARMJS_API_KEY: "farmjs_fixture_key" }, {}],
+    [{ FARMJS_API_KEY: "farmjs_fixture_key", FARMJS_API_URL: "https://other.example.com" }, {}],
+  ]) {
+    await withEnv(env, async () => {
+      const f = fixture({ cached: "saved-login", config });
+      await authorizePreviewGatewayPlan(plan, { runtime: f.runtime, expiresInMs: 60000 });
+      assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer saved-login");
+      assert.ok(!f.calls.some(({ init }) => JSON.stringify(init).includes("farmjs_fixture_key")));
+    });
+  }
+});
+
+test("FARM_PREVIEW_TOKEN still works, deprecated, and can't disagree with FARMJS_API_KEY", () => {
+  const infra = { provider: "device", issuer: "https://infra.farmjs.dev/api/auth" };
+  const warnings = [];
+  const warn = (message) => warnings.push(message);
+  assert.deepEqual(
+    previewCredentialFromEnvironment(infra, { FARMJS_API_KEY: " farmjs_k " }, warn),
+    {
+      token: "farmjs_k",
+      source: "FARMJS_API_KEY",
+    },
+  );
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(
+    previewCredentialFromEnvironment(infra, { FARM_PREVIEW_TOKEN: "legacy" }, warn),
+    {
+      token: "legacy",
+      source: "FARM_PREVIEW_TOKEN",
+    },
+  );
+  assert.match(warnings[0], /FARM_PREVIEW_TOKEN is deprecated\. Set FARMJS_API_KEY/);
+  // A GitHub sign-in gateway has no API-key replacement to point to.
+  const github = { provider: "github" };
+  assert.equal(
+    previewCredentialFromEnvironment(github, { FARM_PREVIEW_TOKEN: "legacy" }, warn).token,
+    "legacy",
+  );
+  assert.equal(warnings.length, 1);
+  assert.equal(
+    previewCredentialFromEnvironment(github, { FARMJS_API_KEY: "farmjs_k" }, warn),
+    undefined,
+  );
+  // The same value in both is fine; different values are ambiguous.
+  assert.equal(
+    previewCredentialFromEnvironment(
+      infra,
+      { FARMJS_API_KEY: "farmjs_k", FARM_PREVIEW_TOKEN: "farmjs_k" },
+      warn,
+    ).source,
+    "FARMJS_API_KEY",
+  );
+  assert.throws(
+    () =>
+      previewCredentialFromEnvironment(
+        infra,
+        { FARMJS_API_KEY: "farmjs_k", FARM_PREVIEW_TOKEN: "other" },
+        warn,
+      ),
+    /Unset FARM_PREVIEW_TOKEN/,
+  );
+});
+
+test("the CI error only suggests an API key where the gateway accepts one", async () => {
+  await withEnv({}, async () => {
+    const infra = fixture({ interactive: false });
+    await assert.rejects(
+      authorizePreviewGatewayPlan(plan, { runtime: infra.runtime }),
+      /Set FARMJS_API_KEY to a Farm\.js Infrastructure API key/,
+    );
+    const github = fixture({
+      interactive: false,
+      config: { provider: "github", issuer: undefined },
+    });
+    await assert.rejects(
+      authorizePreviewGatewayPlan(plan, { runtime: github.runtime }),
+      (error) =>
+        /only supports browser sign-in/.test(error.message) && !/API key/.test(error.message),
+    );
+  });
 });
