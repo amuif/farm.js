@@ -658,6 +658,17 @@ jobs:
         env:
           FARM_VITE_BUILDER: ${{ matrix.builder }}
           FARM_EXPERIMENT_SCREENSHOT: ${{ runner.temp }}/react-compiler/aot-edge-lab.png
+      - name: Build the compiler starter's generator and devtools
+        if: matrix.builder == 'rolldown'
+        run: |
+          pnpm --filter @farm.js/create-app build
+          pnpm --filter @farm.js/devtools build
+      - name: Verify the packed compiler starter with compiler on and off
+        if: matrix.builder == 'rolldown'
+        run: pnpm test:packed-compiler
+        env:
+          FARM_VITE_BUILDER: ${{ matrix.builder }}
+          FARM_EXPERIMENT_SCREENSHOT: ${{ runner.temp }}/react-compiler/packed-starter.png
       # Compiler off, static and hybrid builds of the heavy workload must agree.
       - name: Verify compiler modes agree on the heavy workload
         run: pnpm --dir examples/react-compiler experiment:heavy

@@ -41,6 +41,16 @@ preparation in a draft PR until these release gates have been recorded on its fi
   preserve generated code and runtime size; runtime changes need paired correctness-controlled
   before/after benchmarks.
 
+After building the core, CLI, devtools, React, and create-app packages, run the generated-starter
+gate with `pnpm test:packed-compiler`. It installs the generator and reachable Farm packages from
+local tarballs outside the workspace, type-checks the generated app, and builds and browser-tests
+the unchanged compiler starter with the compiler both enabled and disabled. It does not publish.
+Install the workspace Playwright browser with `pnpm exec playwright install chromium`, or set
+`FARM_EXPERIMENT_BROWSER_PATH` to an existing Chrome/Chromium executable. Screenshots default to
+the system temporary directory as `farm-packed-react-compiler-on.png` and
+`farm-packed-react-compiler-off.png`; `FARM_EXPERIMENT_SCREENSHOT` selects another base filename.
+The existing `pnpm test:packed-app` still checks the basic starter without requiring a browser.
+
 After those gates pass, make the independent version promotion as a dedicated release change,
 not a shared-group bump. Use the versioning tool for the chosen non-prerelease version and run
 `scripts/sync-release-versions.js` so starter dependencies follow the actual React package version.

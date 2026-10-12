@@ -52,6 +52,10 @@ The command builds the app, opens the production output in Chromium, checks both
 that the compiled update does not execute the component again, and saves a screenshot to
 `/tmp/farm-react-compiler-starter.png`.
 
+Set `FARM_REACT_COMPILER=false` when running `pnpm experiment` to verify the ordinary React path
+too. `FARM_EXPERIMENT_BROWSER_PATH` can point to an existing Chrome/Chromium executable instead of
+Playwright's downloaded browser. `FARM_EXPERIMENT_SCREENSHOT` overrides the screenshot location.
+
 For batching, multiple bindings, safe keyed-list fallback, and the full compiler-on/off benchmark,
 see the maintained
 [React Compiler example](https://github.com/farming-labs/farm.js/tree/main/examples/react-compiler).

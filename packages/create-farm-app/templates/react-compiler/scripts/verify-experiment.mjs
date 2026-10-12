@@ -55,7 +55,10 @@ async function readNumber(page, selector) {
 let browser;
 try {
   await waitForServer();
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.FARM_EXPERIMENT_BROWSER_PATH || undefined,
+  });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const browserErrors = [];
 
