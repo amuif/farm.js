@@ -6829,13 +6829,31 @@ interface RowConditionalState {
 }
 
 interface KeyedRowConditionalRuntime {
-  Component: React.ComponentType<RowConditionalProps>;
   readValues(
     props: Pick<CompilerKeyedRowsBlockProps, "conditionals">,
     item: unknown,
     index: number,
   ): ReadonlyMap<number, readonly unknown[]>;
   changed(previous: readonly unknown[] | undefined, next: readonly unknown[]): boolean;
+  /** Renders one row's conditional boundary. */
+  element(props: RowConditionalProps): React.ReactElement;
+  /** Subscribes a block's conditional boundaries to its listener map. */
+  owner(listeners: RowConditionalListeners): RowConditionalOwner;
+  /** Refreshes changed boundaries synchronously, then calls afterCommit once. */
+  notify(
+    listeners: RowConditionalListeners,
+    changes: readonly RowConditionalChange[],
+    afterCommit?: () => void,
+  ): void;
+}
+
+type RowConditionalListeners = Map<string, Map<number, RowConditionalRefresh>>;
+
+interface RowConditionalChange {
+  key: string;
+  id: number;
+  item: unknown;
+  index: number;
 }
 
 interface KeyedRowHostRuntime {
@@ -9149,9 +9167,46 @@ function createKeyedRowConditionalRuntime(): KeyedRowConditionalRuntime {
   }
 
   return {
-    Component: FarmKeyedRowConditional,
+    element: (props) =>
+      React.createElement(FarmKeyedRowConditional, {
+        key: `${props.rowKey}:${props.id}`,
+        ...props,
+      }),
     readValues: readKeyedRowConditionalValues,
     changed: keyedRowConditionalChanged,
+    owner: (listeners) => ({
+      subscribe(key, id, refresh) {
+        let row = listeners.get(key);
+        if (!row) {
+          row = new Map();
+          listeners.set(key, row);
+        }
+        row.set(id, refresh);
+        return () => {
+          const current = listeners.get(key);
+          if (current?.get(id) !== refresh) return;
+          current.delete(id);
+          if (current.size === 0) listeners.delete(key);
+        };
+      },
+    }),
+    notify(listeners, changes, afterCommit) {
+      let pending = changes.length;
+      const committed = () => {
+        pending -= 1;
+        if (pending === 0) afterCommit?.();
+      };
+      // The normal row bindings are patched synchronously. Flush the
+      // React-owned conditional boundaries in the same turn as well so React
+      // 18 cannot expose a transient row where text and branch disagree.
+      flushSync(() => {
+        for (const change of changes) {
+          const refresh = listeners.get(change.key)?.get(change.id);
+          if (refresh) refresh(change.item, change.index, committed);
+          else committed();
+        }
+      });
+    },
   };
 }
 
@@ -9196,13 +9251,11 @@ function createKeyedRowsBlockComponentCore(
       string,
       Map<number, React.EventHandler<React.SyntheticEvent>>
     >();
-    private readonly conditionalListeners = new Map<string, Map<number, RowConditionalRefresh>>();
+    private readonly conditionalListeners: RowConditionalListeners = new Map();
     private instancesByElement = new WeakMap<Element, CompilerKeyedRowInstance>();
     // False after a rebuild without delegated events left surviving rows unindexed.
     private elementIndexComplete = true;
-    private readonly conditionalOwner: RowConditionalOwner = {
-      subscribe: (key, id, refresh) => this.subscribeToRowConditional(key, id, refresh),
-    };
+    private readonly conditionalOwner = options.conditionals?.owner(this.conditionalListeners);
 
     private captureRoot = (root: Element | null) => {
       this.root = root;
@@ -9383,14 +9436,10 @@ function createKeyedRowsBlockComponentCore(
       conditionalId: number,
       render: (item: unknown, index: number) => React.ReactNode,
     ): React.ReactNode => {
-      if (this.state.fallback) return render(item, index);
-      const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
-      const Conditional = options.conditionals?.Component;
-      if (!Conditional) return render(item, index);
-      return React.createElement(Conditional, {
-        key: `${key}:${conditionalId}`,
-        owner: this.conditionalOwner,
-        rowKey: key,
+      if (this.state.fallback || !options.conditionals) return render(item, index);
+      return options.conditionals.element({
+        owner: this.conditionalOwner!,
+        rowKey: keyedRowIdentity(this.currentProps.rowKey(item, index)),
         id: conditionalId,
         renderVersion: this.renderVersion,
         item,
@@ -9398,25 +9447,6 @@ function createKeyedRowsBlockComponentCore(
         render,
       });
     };
-
-    private subscribeToRowConditional(
-      key: string,
-      id: number,
-      refresh: RowConditionalRefresh,
-    ): () => void {
-      let listeners = this.conditionalListeners.get(key);
-      if (!listeners) {
-        listeners = new Map();
-        this.conditionalListeners.set(key, listeners);
-      }
-      listeners.set(id, refresh);
-      return () => {
-        const current = this.conditionalListeners.get(key);
-        if (current?.get(id) !== refresh) return;
-        current.delete(id);
-        if (current.size === 0) this.conditionalListeners.delete(key);
-      };
-    }
 
     private hasReactOwnedRows(props: CompilerKeyedRowsBlockProps = this.currentProps): boolean {
       return Boolean(
@@ -9570,33 +9600,12 @@ function createKeyedRowsBlockComponentCore(
     }
 
     private notifyConditionalChanges(
-      changes: readonly {
-        key: string;
-        id: number;
-        item: unknown;
-        index: number;
-      }[],
+      changes: readonly RowConditionalChange[],
       afterCommit?: () => void,
     ): void {
-      if (changes.length === 0) {
-        afterCommit?.();
-        return;
-      }
-      let pending = changes.length;
-      const committed = () => {
-        pending -= 1;
-        if (pending === 0) afterCommit?.();
-      };
-      // The normal row bindings above are patched synchronously. Flush the
-      // React-owned conditional boundaries in the same turn as well so React
-      // 18 cannot expose a transient row where text and branch disagree.
-      flushSync(() => {
-        for (const change of changes) {
-          const refresh = this.conditionalListeners.get(change.key)?.get(change.id);
-          if (refresh) refresh(change.item, change.index, committed);
-          else committed();
-        }
-      });
+      // Changes are only reported when the conditional runtime is present.
+      if (changes.length === 0) afterCommit?.();
+      else options.conditionals!.notify(this.conditionalListeners, changes, afterCommit);
     }
 
     private refreshDirtyBindings(

@@ -1,6 +1,11 @@
 import type React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { keyedRowsRuntimeFeature, type CompilerKeyedRowsBlockProps } from "../compiler-runtime";
+import {
+  keyedRowsConditionalRuntimeFeature,
+  keyedRowsRuntimeFeature,
+  type CompilerKeyedRowsBlockProps,
+  type CompilerRuntimeFeature,
+} from "../compiler-runtime";
 
 // Inspect the block's owned registries, not React internals. This keeps allocation
 // assertions independent of unrelated Set allocations during React rendering.
@@ -10,11 +15,11 @@ interface KeyedCleanup {
   conditionalListeners: Map<string, Map<number, () => void>>;
   pruneEventHandlers(): void;
   pruneConditionalListeners(): void;
-  subscribeToRowConditional(key: string, id: number, refresh: () => void): () => void;
+  conditionalOwner?: { subscribe(key: string, id: number, refresh: () => void): () => void };
 }
 
-function createBlock(): KeyedCleanup {
-  const Component = keyedRowsRuntimeFeature.create({ setRoot() {}, subscribe: () => () => {} })
+function createBlock(feature: CompilerRuntimeFeature = keyedRowsRuntimeFeature): KeyedCleanup {
+  const Component = feature.create({ setRoot() {}, subscribe: () => () => {} })
     .KeyedRows as React.ComponentClass<CompilerKeyedRowsBlockProps>;
   return new Component({
     bindings: [],
@@ -138,10 +143,10 @@ it("checks each registry independently", () => {
 });
 
 it("does not let a stale conditional unsubscribe remove a replacement registration", () => {
-  const block = createBlock();
+  const block = createBlock(keyedRowsConditionalRuntimeFeature);
   block.instances.set("reused", {});
   const previous = vi.fn();
-  const stopPrevious = block.subscribeToRowConditional("reused", 0, previous);
+  const stopPrevious = block.conditionalOwner!.subscribe("reused", 0, previous);
   block.pruneConditionalListeners();
   expect(block.conditionalListeners.get("reused")?.get(0)).toBe(previous);
 
@@ -150,9 +155,9 @@ it("does not let a stale conditional unsubscribe remove a replacement registrati
   expect(block.conditionalListeners.size).toBe(0);
   block.instances.set("reused", {});
   const next = vi.fn();
-  const stopNext = block.subscribeToRowConditional("reused", 0, next);
+  const stopNext = block.conditionalOwner!.subscribe("reused", 0, next);
   const sibling = vi.fn();
-  const stopSibling = block.subscribeToRowConditional("reused", 1, sibling);
+  const stopSibling = block.conditionalOwner!.subscribe("reused", 1, sibling);
   stopPrevious();
   block.pruneConditionalListeners();
   expect([...block.conditionalListeners.get("reused")!]).toEqual([
