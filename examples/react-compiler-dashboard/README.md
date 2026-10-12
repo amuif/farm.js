@@ -1,6 +1,6 @@
 # Farm React compiler dashboard benchmark
 
-This standalone example measures the experimental Farm React compiler against the ordinary React
+This standalone example measures the opt-in Farm React compiler against the ordinary React
 update path in a realistic dashboard and a standard keyed-table workload.
 
 The table operation set is adapted from

@@ -60,6 +60,19 @@ An integration's stable surface is its Farm API: the factory, options, mounted r
 
 Framework-level behavior (routing, APIs, actions, queries, middleware, deployment) is renderer-neutral and covered by the shared renderer conformance suite. See [Renderers](/docs/renderers) for the per-renderer capability matrix.
 
+### Opt-in React compiler
+
+The compiler package remains independently versioned and beta until its first non-prerelease
+version is published. Its application API is `react({ compiler: true })`; the former
+`experimental.compiler` spelling is a deprecated compatibility alias. The compiler is disabled by
+default, and unsupported components retain the normal React path.
+
+The stable-release contract covers the documented compiler options and `@farm.js/react/list`.
+Generated compiler definitions and their runtime must use the same package version: rebuild both
+server and browser output when upgrading. The compiler's internal representation and the exact
+set of optimized components are not a cross-version API. See the
+[compiler compatibility guide](/docs/renderers/react#compatibility-and-release-status).
+
 ## Deployment targets
 
 | Target                       | Preset             | Level        | How it is verified                                                                             |
@@ -82,7 +95,6 @@ These are off by default and outside the stability promise:
 | Server Actions under RSC  | `experimental.serverActions`                                        |
 | Partial Prerendering      | `experimental.ppr`, then opt routes in                              |
 | Isolated client hydration | `experimental.isolatedClientHydration: "analyze" \| "enabled"`      |
-| React compiler            | `react({ compiler: true })` from `@farm.js/react`                   |
 | API route MCP server      | `apiMcp()` from `@farm.js/mcp`                                      |
 | WebMCP browser tools      | `@farm.js/webmcp`                                                   |
 | Module federation         | `@farm.js/federation`                                               |

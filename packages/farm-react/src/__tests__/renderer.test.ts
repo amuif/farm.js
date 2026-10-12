@@ -83,6 +83,17 @@ describe("React renderer compiler options", () => {
     );
   });
 
+  it.each([null, 0, 1, "", "true", [], () => true].map((compiler) => ({ compiler })))(
+    "rejects invalid compiler configuration $compiler instead of enabling or disabling silently",
+    ({ compiler }) => {
+      for (const options of [{ compiler }, { experimental: { compiler } }]) {
+        expect(() => react(options as Parameters<typeof react>[0])).toThrow(
+          /compiler must be a boolean or compiler options object/i,
+        );
+      }
+    },
+  );
+
   it("rejects directives outside annotation mode", () => {
     expect(() =>
       normalizeReactCompilerOptions({

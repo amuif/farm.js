@@ -1,4 +1,5 @@
 import type { FarmRenderer } from "@farm.js/core/renderer";
+import { resolveCompilerOption } from "./compiler-options";
 
 export type ReactCompilerMode = "infer" | "annotation";
 export type ReactCompilerReactivity = "static" | "hybrid";
@@ -127,30 +128,9 @@ const REACT_RENDERER: Readonly<FarmRenderer> = Object.freeze({
   },
 });
 
-let warnedExperimentalCompiler = false;
-
-function resolveCompilerOption(
-  options: ReactRendererOptions,
-): boolean | ReactCompilerOptions | undefined {
-  const legacy = options.experimental?.compiler;
-  if (legacy === undefined) return options.compiler;
-  if (options.compiler !== undefined) {
-    throw new TypeError(
-      "Configure the React compiler with `compiler` only; remove `experimental.compiler`.",
-    );
-  }
-  if (!warnedExperimentalCompiler) {
-    warnedExperimentalCompiler = true;
-    console.warn(
-      "[farm] `react({ experimental: { compiler } })` is deprecated. Use `react({ compiler })`.",
-    );
-  }
-  return legacy;
-}
-
 /** Select React and optionally enable Farm's AOT compiler. */
 export function react(options: ReactRendererOptions = {}): FarmRenderer {
-  const compiler = resolveCompilerOption(options);
+  const compiler = resolveCompilerOption(options, true);
   const normalizedCompiler = compiler ? normalizeReactCompilerOptions(compiler) : false;
 
   return {

@@ -401,7 +401,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 - **[Basic Example](./examples/basic)** - Routing, boundaries, middleware, storage, and rendering modes in one app
 - **[RSC Demo](./examples/rsc-demo)** - Server components, server actions, and server queries
-- **[React Compiler](./examples/react-compiler)** - The experimental AOT compiler side by side with baseline React
+- **[React Compiler](./examples/react-compiler)** - The opt-in AOT compiler side by side with baseline React
 - **[Stripe Integration](./examples/stripe-integration)** - Typed billing integration with provider-owned routes
 - **[Solid Renderer](./examples/solid-renderer)** - A Solid app on the same framework contracts
 - **[Preact Renderer](./examples/preact-renderer)** - A Preact app on the same framework contracts

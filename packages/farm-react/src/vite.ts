@@ -1,5 +1,6 @@
 import { normalizePath, type Plugin } from "vite";
 import { compileReactModule } from "./compiler";
+import { resolveCompilerOption } from "./compiler-options";
 import { writeReactCompilerReport, type ReactCompilerModuleObservation } from "./compiler-report";
 import { normalizeReactCompilerOptions, type NormalizedReactCompilerOptions } from "./index";
 
@@ -13,17 +14,9 @@ function readCompilerOptions(
 ): NormalizedReactCompilerOptions | false {
   // Renderer options built by an older `react()` or by hand may still carry
   // the deprecated `experimental.compiler` shape.
-  const experimental = rendererOptions?.experimental;
-  const compiler =
-    rendererOptions?.compiler ??
-    (experimental && typeof experimental === "object"
-      ? (experimental as { compiler?: unknown }).compiler
-      : undefined);
+  const compiler = resolveCompilerOption(rendererOptions);
   if (!compiler) return false;
   if (compiler === true) return normalizeReactCompilerOptions(true);
-  if (typeof compiler !== "object") {
-    throw new TypeError("React compiler must be a boolean or compiler options object.");
-  }
   const normalized = compiler as Partial<NormalizedReactCompilerOptions>;
   if (
     (normalized.mode === "infer" || normalized.mode === "annotation") &&

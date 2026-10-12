@@ -14,7 +14,29 @@ const temporaryRoot = mkdtempSync(join(tmpdir(), `farm-react-${reactVersion}-`))
 
 const testSource = String.raw`
   import assert from "node:assert/strict";
+  import { createRequire } from "node:module";
   import { JSDOM } from "jsdom";
+
+  // Exercise both published entry formats, not workspace source resolution.
+  for (const { react } of [await import("@farm.js/react"), createRequire(import.meta.url)("@farm.js/react")]) {
+    assert.deepEqual(react().options, { compiler: false });
+    assert.equal(react({ compiler: true }).options.compiler.mode, "infer");
+    assert.equal(react({ compiler: { mode: "annotation", reactivity: "static" } }).options.compiler.reactivity, "static");
+    assert.throws(() => react({ compiler: true, experimental: { compiler: false } }), /compiler.*only/);
+    for (const compiler of [null, 0, 1, "", "true", [], () => true]) {
+      assert.throws(() => react({ compiler }), /compiler must be a boolean or compiler options object/i);
+    }
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (message) => warnings.push(message);
+    try {
+      assert.deepEqual(react({ experimental: { compiler: true } }).options, react({ compiler: true }).options);
+      assert.deepEqual(react({ experimental: { compiler: false } }).options, react().options);
+      assert.equal(warnings.length, 1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  }
 
   const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
   globalThis.window = dom.window;

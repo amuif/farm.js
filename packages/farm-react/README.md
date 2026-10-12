@@ -1,9 +1,9 @@
 # @farm.js/react
 
-React renderer integration for FARMJS, including the experimental AOT compiler.
+React renderer integration for FARMJS, including the opt-in AOT compiler.
 
 React remains the default renderer and needs no package or configuration. Install this package only
-when opting into the compiler experiment:
+when opting into the compiler:
 
 ```bash
 pnpm add @farm.js/react
@@ -15,15 +15,32 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
 });
 ```
 
 `compiler: true` uses inference: every application TSX/JSX component is considered, eligible
 components are compiled with hybrid reactivity, and everything else keeps the normal React path.
+
+The compiler stays off when this option is omitted or `false`. The former
+`react({ experimental: { compiler } })` spelling remains a deprecated alias with the same options
+and a one-time warning. Do not configure both spellings, even when one is `false`.
+
+### Compatibility and upgrades
+
+`react({ compiler })`, `ReactCompilerOptions`, and `List` from `@farm.js/react/list` are the
+application-facing API. Both inference and annotation mode, static and hybrid reactivity, fallback
+diagnostics, and coverage reporting remain supported. Annotation and static mode are advanced
+options, not separate experimental APIs. The package is independently versioned; a prerelease
+version remains a beta until its stable release is published.
+
+The compiler and `@farm.js/react/compiler-runtime` ship together. Generated definitions must use
+the runtime from the same installed package version; they are not a cross-version interchange
+format. Upgrade the package and rebuild the complete app, including SSR and browser output,
+together. Do not copy generated compiler output between package versions or deploy a new server
+with an old browser build. Existing runtime exports remain available, but prefer ordinary React
+source over hand-authored compiler definitions.
 
 Hybrid reactivity starts from the compiler's proven state-to-binding dependency lists, then marks
 only multi-state short-circuit bindings for runtime read tracking. For
@@ -53,13 +70,11 @@ For selective adoption, use annotation mode:
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      mode: "annotation",
-      directive: "use compiler",
-      onUnsupported: "warn",
-      reactivity: "hybrid",
-    },
+  compiler: {
+    mode: "annotation",
+    directive: "use compiler",
+    onUnsupported: "warn",
+    reactivity: "hybrid",
   },
 }),
 ```
