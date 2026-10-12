@@ -14,6 +14,10 @@ with a `children` snippet. See [Renderers](/docs/renderers) for renderer-specifi
 
 ## Root layout
 
+Farm owns the document shell; return application UI or a fragment from a root layout.
+The compatibility path for existing full-document layouts preserves Unicode content and
+React Suspense reveal payloads in both development and production.
+
 **src/app/layout.tsx**
 
 ```tsx
@@ -109,6 +113,15 @@ export default function DocsNotFound() {
     </main>
   );
 }
+```
+
+For a URL that matches no route, the 404 document takes its title and meta tags from the root layout's metadata, so a title template and description carry over. It is titled `404 - Page Not Found` unless the root `not-found` file exports its own `metadata` (or `generateMetadata`):
+
+**src/app/not-found.tsx**
+
+```tsx
+// With a root layout title template of "%s | Acme", the tab reads "Page not found | Acme".
+export const metadata = { title: "Page not found" };
 ```
 
 ## Design guidance

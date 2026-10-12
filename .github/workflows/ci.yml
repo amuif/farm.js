@@ -621,6 +621,59 @@ jobs:
           pnpm lint
           pnpm format:check
 
+  react-compiler-browser:
+    name: React Compiler Browser (${{ matrix.builder }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        builder:
+          - rolldown
+          - rollup
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.13"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Build framework packages
+        run: |
+          pnpm --filter @farm.js/core build
+          pnpm --filter @farm.js/cli build
+          pnpm --filter @farm.js/react build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+      # Production build of the compiler example, then a real browser through
+      # every compiled component (bindings, blocks, keyed rows, ranges, islands).
+      - name: Verify compiled output in the browser
+        run: pnpm --dir examples/react-compiler experiment
+        env:
+          FARM_VITE_BUILDER: ${{ matrix.builder }}
+          FARM_EXPERIMENT_SCREENSHOT: ${{ runner.temp }}/react-compiler/aot-edge-lab.png
+      # Compiler off, static and hybrid builds of the heavy workload must agree.
+      - name: Verify compiler modes agree on the heavy workload
+        run: pnpm --dir examples/react-compiler experiment:heavy
+        env:
+          FARM_VITE_BUILDER: ${{ matrix.builder }}
+      - name: Upload failure screenshots
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: react-compiler-browser-${{ matrix.builder }}
+          path: |
+            ${{ runner.temp }}/react-compiler/
+            /tmp/farm-react-*
+          if-no-files-found: ignore
+          retention-days: 7
+
   react-compiler-compat:
     name: React Compiler (React ${{ matrix.react-version }})
     runs-on: ubuntu-latest

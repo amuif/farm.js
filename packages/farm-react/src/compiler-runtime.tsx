@@ -2863,6 +2863,10 @@ export interface CompilerHostElement {
 
 export type CompilerKeyedRowElement = CompilerHostElement;
 
+// Shared by every delegated row onChange so React sees a handler without a
+// per-row allocation; the container's delegated listener does the work.
+const delegatedRowChangePlaceholder: React.EventHandler<React.SyntheticEvent> = () => undefined;
+
 export interface CompilerKeyedRowEvent {
   name: string;
   /** Host-element path relative to the keyed row root. */
@@ -5109,6 +5113,31 @@ interface NestedReadKeyedRange {
   keys: string[];
 }
 
+// Undefined means structural reconciliation is still required. Prove the entire
+// key order before updating scopes, which may themselves contain nested blocks.
+function reconcileStableNestedKeyedRows(
+  range: CompilerKeyedRange,
+  previous: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  rows: NestedReadKeyedRange,
+): boolean | undefined {
+  if (rows.keys.length !== previous.size) return undefined;
+  let index = 0;
+  for (const key of previous.keys()) {
+    if (rows.keys[index++] !== key) return undefined;
+  }
+  index = 0;
+  for (const existing of previous.values()) {
+    const item = rows.items[index];
+    const descriptor = range.create(item, index);
+    if (!existing.scope?.update(descriptor)) return false;
+    applyKeyedRowBindings(range, existing, item, index);
+    existing.item = item;
+    existing.index = index;
+    index += 1;
+  }
+  return true;
+}
+
 class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
   private readonly instances: Array<Map<string, CompilerKeyedRowInstance>> = [];
   private readonly staticSegments: Element[][] = [];
@@ -5272,6 +5301,8 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
   private reconcileRange(rangeIndex: number, rows: NestedReadKeyedRange): boolean {
     const range = this.block.ranges[rangeIndex];
     const previous = this.instances[rangeIndex];
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
     const oldIndices = new Map<string, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);
@@ -5704,6 +5735,8 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const instance = this.instances[rangeIndex];
     if (instance.kind !== "keyed") return false;
     const previous = instance.value;
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
     const oldIndices = new Map<string, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);
@@ -6718,6 +6751,7 @@ interface KeyedUpdateRuntime {
     instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
     reactOwnedRows: boolean,
   ): Map<string, CompilerKeyedRowInstance> | undefined;
+  // Transfers a fresh runtime-owned native map after validating the full update.
   prepend?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
@@ -6725,7 +6759,7 @@ interface KeyedUpdateRuntime {
     instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<string, CompilerKeyedRowInstance> | undefined;
   rollingWindow?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
@@ -6734,14 +6768,15 @@ interface KeyedUpdateRuntime {
     root: Element,
     reactOwnedRows: boolean,
   ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  // Returns the owned input for binding-only updates, or a fresh owned native map.
   position?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: Map<string, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<string, CompilerKeyedRowInstance> | undefined;
   // Returns a runtime-owned native map containing only retained row instances:
   // reorders may remove rows, but never create or replace their root elements.
   reorder?(
@@ -7648,10 +7683,10 @@ function reconcileCompilerKeyedArrayPosition(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7766,7 +7801,7 @@ function reconcileCompilerKeyedArrayBatchInsert(
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8001,10 +8036,10 @@ function reconcileCompilerKeyedArrayWindowReplace(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8262,7 +8297,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
 
 function reconcileCompilerKeyedArrayPositionWithBatch(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPosition>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayBatchInsert(...args) || reconcileCompilerKeyedArrayPosition(...args)
   );
@@ -8270,7 +8305,7 @@ function reconcileCompilerKeyedArrayPositionWithBatch(
 
 function reconcileCompilerKeyedArrayPositionWithWindow(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPosition>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayWindowReplace(...args) ||
     reconcileCompilerKeyedArrayBatchInsert(...args) ||
@@ -8601,7 +8636,7 @@ function reconcileCompilerKeyedArrayPrepend(
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8673,7 +8708,7 @@ function reconcileCompilerKeyedArrayStructuralPrepend(
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8777,7 +8812,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8951,7 +8986,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
 
 function reconcileCompilerKeyedArrayPrependWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPrepend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralPrepend(...args) ||
     reconcileCompilerKeyedArrayPrepend(...args)
@@ -8960,7 +8995,7 @@ function reconcileCompilerKeyedArrayPrependWithStructural(
 
 function reconcileCompilerKeyedArrayPrependMapWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPrepend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<string, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralPrependMap(...args) ||
     reconcileCompilerKeyedArrayStructuralPrepend(...args) ||
@@ -9131,6 +9166,7 @@ function createKeyedRowsBlockComponentCore(
     declare private stop: (() => void) | undefined;
     declare private id: number | undefined;
     private instances = new Map<string, CompilerKeyedRowInstance>();
+    private reactElements: readonly Element[] = [];
     private keyedTargets = options.keyedTargets?.(this.props);
     private collectionToken: object | undefined;
     private renderVersion = 0;
@@ -9170,7 +9206,14 @@ function createKeyedRowsBlockComponentCore(
         return (event) => this.currentProps.events?.[eventId]?.invoke(item, index, event);
       }
       if (this.usesDelegatedEvents()) {
-        return undefined as unknown as React.EventHandler<React.SyntheticEvent>;
+        // The container's delegated listener runs the handler. React still checks
+        // that controlled value/checked fields carry onChange, so give change
+        // events one shared no-op instead of none; other events stay unset.
+        return (
+          this.currentProps.events?.[eventId]?.name === "onChange"
+            ? delegatedRowChangePlaceholder
+            : undefined
+        ) as React.EventHandler<React.SyntheticEvent>;
       }
       const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
       let handlers = this.eventHandlers.get(key);
@@ -9200,6 +9243,8 @@ function createKeyedRowsBlockComponentCore(
 
     private rebuildElementIndex(instances: ReadonlyMap<string, CompilerKeyedRowInstance>): void {
       this.instancesByElement = new WeakMap();
+      // Ordinary row callbacks resolve through this.instances, not the DOM index.
+      if (!this.usesDelegatedEvents()) return;
       for (const instance of instances.values()) {
         this.instancesByElement.set(instance.element, instance);
       }
@@ -9429,6 +9474,7 @@ function createKeyedRowsBlockComponentCore(
       }
       this.cleanupHostScopes();
       this.instances = instances;
+      this.reactElements = elements;
       this.rebuildElementIndex(instances);
       this.pruneEventHandlers();
       this.pruneConditionalListeners();
@@ -9974,7 +10020,7 @@ function createKeyedRowsBlockComponentCore(
           // Position refreshes return the original map only when row instances,
           // order, and elements are unchanged; their item/binding data is current.
           if (positionedInstances !== this.instances) {
-            this.instances = new Map(positionedInstances);
+            this.instances = positionedInstances;
             this.rebuildElementIndex(this.instances);
             this.pruneEventHandlers();
             this.pruneConditionalListeners();
@@ -10023,8 +10069,10 @@ function createKeyedRowsBlockComponentCore(
               : new Map(rollingWindowInstances);
           if (delta) {
             COMPILER_KEYED_ROLLING_WINDOW_DELTAS.delete(rollingWindowInstances);
-            for (const instance of delta.added) {
-              this.instancesByElement.set(instance.element, instance);
+            if (this.usesDelegatedEvents()) {
+              for (const instance of delta.added) {
+                this.instancesByElement.set(instance.element, instance);
+              }
             }
             for (const key of delta.removedKeys) {
               this.eventHandlers.delete(key);
@@ -10064,7 +10112,7 @@ function createKeyedRowsBlockComponentCore(
           this.hasReactOwnedRows(),
         );
         if (prependedInstances) {
-          this.instances = new Map(prependedInstances);
+          this.instances = prependedInstances;
           this.rebuildElementIndex(this.instances);
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -10109,6 +10157,17 @@ function createKeyedRowsBlockComponentCore(
       }
       if (nextState.fallback || this.state.fallback) return true;
       if (definitionChanged || wasReactOwned || willBeReactOwned) {
+        const elements = this.root?.children;
+        if (
+          elements &&
+          (elements.length !== this.reactElements.length ||
+            this.reactElements.some((element, index) => element !== elements[index]))
+        ) {
+          // React still owns the child fibers from its last render, not rows
+          // inserted, removed, or reordered by the compiler since adoption.
+          // Reset only that stale host container before handing it back to React.
+          this.fallbackVersion += 1;
+        }
         // Parent prop updates and Fast Refresh definitions must pass through
         // React so event locations, static row markup, and proxy identities
         // cannot remain tied to an older render definition.
@@ -10152,6 +10211,7 @@ function createKeyedRowsBlockComponentCore(
       // captureRoot clears the element on a real unmount; retain it for replay adoption.
       this.cleanupHostScopes();
       this.instances.clear();
+      this.reactElements = [];
       this.keyedTargets?.clear();
       this.instancesByElement = new WeakMap();
       this.eventHandlers.clear();
@@ -10168,7 +10228,7 @@ function createKeyedRowsBlockComponentCore(
       }
       return React.cloneElement(container, {
         ...this.delegatedContainerProps(container),
-        key: this.state.fallback ? `react-${this.fallbackVersion}` : "compiled",
+        key: `${this.state.fallback ? "react" : "compiled"}-${this.fallbackVersion}`,
         ref: this.captureRoot,
       } as React.Attributes);
     }

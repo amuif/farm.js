@@ -265,6 +265,7 @@ mount, and shortcut together.
 | md            | Restricting or disabling automatic markdown mirrors like /pricing.md.                  |
 | mdx           | Rendering `page.md` and `page.mdx` app routes, plus MDX components.                    |
 | telemetry     | Controlling automatic production-site reporting to Farm's usage dashboard.             |
+| analytics     | Turning off request and MCP analytics for an app linked to a Farm Infra project.       |
 | deploy        | Selecting a target, preset, and output directory.                                      |
 | deploymentId  | Detecting stale browser requests during rolling deployments.                           |
 | trailingSlash | Choosing the canonical URL shape for application page routes and links.                |
@@ -752,6 +753,7 @@ For dynamic HTML, Farm generates a fresh nonce for every response, adds it to th
 governs script elements (`script-src-elem`, then `script-src`, then `default-src`), and stamps every
 script element in the streamed document. Any existing script `nonce` attribute is normalized to the
 fresh response nonce so application-authored inline scripts follow the same policy.
+Script contents, including Unicode text, are preserved across streamed response chunks.
 
 For fully prerendered HTML, the same option keeps the page static. Farm removes the build-time nonce,
 hashes the exact contents of every inline script with SHA-256, and emits a route-specific policy with
@@ -1031,6 +1033,12 @@ Farm schedules a small check-in after the first non-health production request an
 before returning the application response. Only the detected origin, Farm version, renderer, and
 deployment target are sent. See [Product telemetry](/docs/telemetry) for validation, privacy,
 retention, preview-environment, opt-out, and static-export details.
+
+## Farm Infra analytics
+
+An app whose server environment sets `FARMJS_API_KEY` and `FARMJS_PROJECT_ID` reports request and MCP
+tool analytics to that Farm Infra project. Set `analytics: false` to never send them. See
+[Farm Infra analytics](/docs/infra-analytics) for what is sent and how.
 
 ## Deployment config
 

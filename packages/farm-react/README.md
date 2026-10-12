@@ -925,6 +925,12 @@ components, fragments, refs, SVG, spreads, dangerous HTML, and index keys keep t
 row on React's fallback. Additional keyed levels that satisfy the same host-only contract are
 analyzed recursively instead of using a fixed nesting limit.
 
+When every inner key stays in the same order, the nested scope reuses its row table and skips
+position-map construction and LIS planning. It still validates all keys and updates every child
+scope and binding. Insertions, removals, and reorders keep the existing structural reconciliation;
+duplicate keys or an invalid child scope keep the existing React fallback. This also applies to
+keyed ranges next to host-only conditions inside a nested mixed range.
+
 For example, `boards → columns → cards → tags` becomes a tree of keyed scopes. Each stable parent
 key owns its child key table and LIS pass. Moving a board carries its column, card, and tag scopes;
 reordering cards reconciles only the selected column. Block IDs stay globally unique while runtime

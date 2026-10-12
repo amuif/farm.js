@@ -328,6 +328,7 @@ const sidebar = [
       { label: "Route Runtime", slug: "route-runtime", icon: "server" },
       { label: "After Responses", slug: "after", icon: "timer" },
       { label: "Observability", slug: "observability", icon: "activity" },
+      { label: "Farm Infra Analytics", slug: "infra-analytics", icon: "activity" },
       { label: "Built-in DevTools", slug: "devtools", icon: "monitor" },
       { label: "Doctor", slug: "doctor", icon: "wrench" },
       { label: "Cron", slug: "cron", icon: "timer" },

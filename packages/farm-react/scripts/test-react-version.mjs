@@ -74,6 +74,80 @@ const testSource = String.raw`
   );
   const { List } = await import("@farm.js/react/list");
 
+  // Compiler mutations leave React's previous child fibers stale until the
+  // keyed container is safely re-adopted at a props/Fast Refresh handoff.
+  for (const reactivity of ["static", "hybrid"]) {
+    for (const hydrate of [false, true]) {
+      for (const handoff of ["props", "refresh"]) {
+        const hmrId = "ownership-" + reactivity + hydrate + handoff;
+        let setRows;
+        const calls = [];
+        const definition = (delegated) => ({
+          displayName: "CompatibilityOwnershipRows", hmrId, stateSignature: "1", reactivity,
+          initialize: () => [["a", "b", "c"]],
+          render(props, state, blocks) {
+            const items = () => state[0].get();
+            setRows = (next) => state[0].set(next);
+            return React.createElement("section", null, React.createElement(blocks.KeyedRows, {
+              id: 0, items, rowKey: (item) => item,
+              delegateEvents: props.delegated ?? delegated,
+              events: [{ name: "onClick", path: [1], invoke: (item, index, event) => calls.push(item + ":" + index + ":" + event.currentTarget.tagName) }],
+              bindings: [{ kind: "text", path: [1], read: (item) => [item] }],
+              create: (item) => ({ kind: "element", tag: "li", attributes: [], styles: [], children: [
+                { kind: "element", tag: "input", attributes: [{ name: "value", value: "draft" }], styles: [], children: [] },
+                { kind: "element", tag: "button", attributes: [], styles: [], children: [item] },
+              ] }),
+              render: (event) => React.createElement("ul", null, items().map((item, index) =>
+                React.createElement("li", { key: item },
+                  React.createElement("input", { defaultValue: "draft" }),
+                  React.createElement("button", { onClick: event(item, index, 0) }, item),
+                ),
+              )),
+            }));
+          },
+          bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+        });
+        const Table = createCompiledComponent(definition(true));
+        const container = document.createElement("div");
+        document.body.append(container);
+        const element = (delegated) => React.createElement(React.StrictMode, null, React.createElement(Table, { delegated }));
+        let root;
+        if (hydrate) {
+          container.innerHTML = renderToString(element());
+          flushSync(() => { root = hydrateRoot(container, element()); });
+        } else {
+          root = createRoot(container);
+          flushSync(() => root.render(element()));
+        }
+        const original = container.querySelector("ul");
+        setRows(["b", "c"]);
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(container.querySelector("ul"), original);
+        if (handoff === "props") flushSync(() => root.render(element(false)));
+        else flushSync(() => assert.equal(createCompiledComponent(definition(false)), Table));
+        assert.notEqual(container.querySelector("ul"), original);
+        assert.deepEqual([...container.querySelectorAll("button")].map((button) => button.textContent), ["b", "c"]);
+        const adopted = container.querySelector("ul");
+        const input = container.querySelector("input");
+        input.value = "user draft"; input.focus(); input.setSelectionRange(2, 6);
+        setRows(["b"]);
+        await Promise.resolve(); await Promise.resolve();
+        assert.equal(container.querySelector("ul"), adopted);
+        assert.equal(container.querySelector("input"), input);
+        assert.equal(input.value, "user draft");
+        assert.equal(document.activeElement, input);
+        assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 6]);
+        container.querySelector("button").click();
+        assert.equal(calls.at(-1), "b:0:BUTTON");
+        if (handoff === "props") flushSync(() => root.render(element(true)));
+        else flushSync(() => createCompiledComponent(definition(true)));
+        assert.equal(container.querySelector("ul"), adopted);
+        flushSync(() => root.unmount());
+        container.remove();
+      }
+    }
+  }
+
   // Exercise the compiler-selected single-kind paths from the packed package
   // under both supported React majors, including Strict Mode's mount replay.
   for (const [feature, kind] of [
@@ -2503,6 +2577,16 @@ const testSource = String.raw`
             ];
           }),
         }, "Update nested keyed rows"),
+        React.createElement("button", {
+          "data-nested-keyed-stable": true,
+          onClick: () => state[0].set((current) => current.map((project) => ({
+            ...project,
+            tasks: project.tasks.map((task) => ({
+              ...task, title: task.title + "!",
+              tags: task.tags.map((tag) => ({ ...tag, label: tag.label + "!" })),
+            })),
+          }))),
+        }, "Update stable nested rows"),
         React.createElement(blocks.KeyedRows, {
           id: 0,
           hostBlocks: true,
@@ -2557,6 +2641,17 @@ const testSource = String.raw`
   assert.equal(originalProjectB.querySelector("ul > i"), originalNestedStatic);
   assert.equal(originalTaskB2.querySelector(":scope > span").textContent, "Ship now");
   assert.equal(originalTagB2Y.textContent, "Now updated");
+  // Stable-order reuse must still update deeper child scopes from the packed runtime.
+  const stableNestedNodes = [...nestedKeyedContainer.querySelectorAll("[data-project], [data-task], [data-tag]")];
+  for (let round = 1; round <= 2; round += 1) {
+    nestedKeyedContainer.querySelector("[data-nested-keyed-stable]").click();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual([...nestedKeyedContainer.querySelectorAll("[data-project], [data-task], [data-tag]")], stableNestedNodes);
+    assert.equal(originalTaskB2.querySelector(":scope > span").textContent, "Ship now" + "!".repeat(round));
+    assert.equal(originalTagB2Y.textContent, "Now updated" + "!".repeat(round));
+    assert.equal(originalProjectB.querySelector("ul > i"), originalNestedStatic);
+  }
   assert.equal(nestedKeyedExecutions, initialNestedKeyedExecutions);
   flushSync(() => nestedKeyedRoot.unmount());
 

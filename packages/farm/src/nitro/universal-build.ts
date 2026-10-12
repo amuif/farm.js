@@ -106,6 +106,7 @@ import { resolveFarmInstrumentationFile } from "../instrumentation";
 import { getFarmPresetRuntime } from "../deployment";
 import { isFarmPreviewDeploymentEnvironment } from "../deployment-environment";
 import { resolveFarmInstrumentationRuntime } from "../instrumentation-runtime";
+import { FARM_PRERENDER_ENV } from "../plugins/infra-analytics";
 import {
   getFarmRendererCapabilities,
   getFarmRendererStreamingCapabilitiesForRuntime,
@@ -4966,6 +4967,9 @@ function generateVirtualEntryCode(
       (metadata) => metadata.kind === "robots" && metadata.pattern === "/",
     );
   const hasPluginRuntime = hasRuntimeIntegrationConfig || hasServerRuntimePlugins;
+  // Decided when the server starts, from its environment; see createFarmInfraAnalyticsPlugin.
+  const hasInfraAnalyticsRuntime =
+    config.analytics !== false && resolveFarmInstrumentationRuntime(preset) === "nodejs";
   const hasPrecompiledDocs = Boolean(farmDocsPrecompiledManifest);
   const adapterOwnsDocsRuntime = Boolean(
     isReactRenderer(config.renderer) &&
@@ -5373,6 +5377,7 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   reportFarmPreloadWarnings,
   renderFarmLocaleAlternateLinks,
   renderMetadataHead,
+  resolveFarmNotFoundMetadata,
   resolveFarmRouteContext,
   resolveFarmTrailingSlashRedirect,
   resolveDefaultErrorStatus,
@@ -5398,6 +5403,11 @@ function isolateFarmRouteServerPage(element) { return element; }`;
     : "";
   const pluginRuntimeImport = hasPluginRuntime
     ? `import { PluginManager } from "@farm.js/core/plugin";`
+    : "";
+  // A server with a plugin runtime gets the plugin (it also correlates MCP tool calls).
+  // Without one, a direct recorder avoids importing the plugin runtime.
+  const infraAnalyticsImport = hasInfraAnalyticsRuntime
+    ? `import { ${hasPluginRuntime ? "createFarmInfraAnalyticsPlugin" : "createFarmInfraAnalyticsRecorder"} } from "@farm.js/core/internal/infra-analytics-runtime";`
     : "";
   const compressionRuntimeImport = hasCompressionRuntime
     ? `import { compressFarmResponse${hasPluginRuntime ? ", createCompressionPlugin" : ""} } from "@farm.js/core/internal/compression-runtime";`
@@ -5609,6 +5619,7 @@ ${productionRuntimeImport}
 ${productionSiteTelemetryImport}
 ${metadataImageRuntimeImport}
 ${pluginRuntimeImport}
+${infraAnalyticsImport}
 ${compressionRuntimeImport}
 ${i18nServerImport}
 ${docsHandlerImport}
@@ -5673,6 +5684,7 @@ const farmProductionSiteTelemetry = ${
 // Custom 404 page component (if provided)
 const hasCustomNotFound = ${notFoundPath ? "true" : "false"};
 const CustomNotFoundComponent = ${notFoundPath ? "CustomNotFound.default || CustomNotFound" : "null"};
+const CustomNotFoundModule = ${notFoundPath ? "CustomNotFound" : "null"};
 const farmUserConfig = ${
     configModulePath ? "(FarmUserConfigModule.default || FarmUserConfigModule)" : "null"
   };
@@ -5775,6 +5787,13 @@ const serverRuntimeIntegrations = Object.fromEntries(
 const integrationRuntimeConfig = Object.assign({}, ...farmRuntimeConfigs, {
   integrations: configuredIntegrations,
 });
+const farmInfraAnalytics = ${
+    hasInfraAnalyticsRuntime
+      ? hasPluginRuntime
+        ? "createFarmInfraAnalyticsPlugin()"
+        : "createFarmInfraAnalyticsRecorder()"
+      : "null"
+  };
 const configuredPlugins = [
   ${hasCompressionRuntime && hasPluginRuntime ? "createCompressionPlugin()," : ""}
   ${hasRuntimeIntegrationConfig ? "...resolveIntegrationPlugins(serverRuntimeIntegrations)," : ""}
@@ -5786,6 +5805,7 @@ const configuredPlugins = [
   ),`
       : ""
   }
+  ${hasInfraAnalyticsRuntime && hasPluginRuntime ? "...(farmInfraAnalytics ? [farmInfraAnalytics] : [])," : ""}
 ];
 const farmPluginRuntime = ${
     hasPluginRuntime
@@ -5876,7 +5896,11 @@ export const farmProductionLifecycle = createFarmProductionLifecycle({
   },
   close: async (reason) => {
     try {
-      await farmPluginRuntime?.closeRuntime(reason);
+      await farmPluginRuntime?.closeRuntime(reason);${
+        hasInfraAnalyticsRuntime && !hasPluginRuntime
+          ? "\n      await farmInfraAnalytics?.close();"
+          : ""
+      }
     } finally {
       await farmInstrumentationLifecycle.shutdown();
     }
@@ -6375,7 +6399,16 @@ function opensFarmFullDocument(markup) {
 function extractFarmFullDocument(markup) {
   if (!opensFarmFullDocument(markup)) return null;
   const start = markup.search(/<!doctype|<html[\\s>]/i);
-  const closeIndex = markup.toLowerCase().lastIndexOf("</html>");
+  const lower = markup.toLowerCase();
+  let closeIndex = lower.lastIndexOf("</html>");
+  // Case conversion can expand Unicode. Recover original offsets only then;
+  // ordinary documents retain the existing closing-tag search.
+  if (lower.length !== markup.length) {
+    closeIndex = -1;
+    const closing = /<\\/html>/gi;
+    let match;
+    while ((match = closing.exec(markup))) closeIndex = match.index;
+  }
   if (start < 0 || closeIndex < 0) return null;
   const closeEnd = closeIndex + "</html>".length;
   let document = markup.slice(start, closeEnd);
@@ -8672,6 +8705,14 @@ async function handleFarmRequestInContext(
     notFoundElement = wrapWithFarmIntegrationProviders(notFoundElement);
     
     const html = await ReactDOMServer.renderToString(notFoundElement);
+    // The layouts' and the not-found page's metadata, as the development renderer uses it.
+    const notFoundMetadata = renderMetadataHead(
+      await resolveFarmNotFoundMetadata(
+        applicableLayouts.map((layout) => layout.module),
+        hasCustomNotFound ? CustomNotFoundModule : null,
+      ),
+      { pathname },
+    );
     
     // Check if layout provides full HTML document
     const fullDocument = extractFarmFullDocument(html);
@@ -8680,6 +8721,11 @@ async function handleFarmRequestInContext(
     let fullHtml;
     if (hasFullDocument) {
       fullHtml = ensureFarmDocumentHead(fullDocument)
+        // The not-found title replaces any title the layout rendered, as metadata does on pages.
+        .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
+          "<head" + attrs + ">" +
+          headContent.replace(/<title\\b[^>]*>[\\s\\S]*?<\\/title>\\s*/gi, "") +
+          "\\n  <title>" + notFoundMetadata.title + "</title>" + notFoundMetadata.tags + "\\n</head>")
         .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
         .replace(/<\\/head>/i, () => renderFarmRendererHydrationScript() + '\\n</head>')
         .replace(
@@ -8696,9 +8742,9 @@ async function handleFarmRequestInContext(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="data:,">
+  \${notFoundMetadata.hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   <link rel="stylesheet" href="/__farm_client_css_href__">
-  <title>404 - Page Not Found</title>
+  <title>\${notFoundMetadata.title}</title>\${notFoundMetadata.tags}
   \${renderFarmRendererHydrationScript()}
 </head>
 <body>
@@ -8879,7 +8925,18 @@ async function handleFarmFetch(request, context) {
                   : undefined,
               },
             )
-          : prepareResponse(request, handleFarmRequest(request, context));
+          : ${
+            hasInfraAnalyticsRuntime && !hasPluginRuntime
+              ? `farmInfraAnalytics
+            ? farmInfraAnalytics.record(
+                request,
+                getFarmPluginRequestOptions(request),
+                typeof context?.waitUntil === "function" ? context.waitUntil.bind(context) : undefined,
+                () => prepareResponse(request, handleFarmRequest(request, context)),
+              )
+            : `
+              : ""
+          }prepareResponse(request, handleFarmRequest(request, context));
 
         const response = await _runWithCurrentRequest(request, () =>
           _runWithAfterRequest(request, runRequest, context),
@@ -9689,7 +9746,16 @@ export default async function farmNitroEventHandler(event) {
   }
   if (prerenderRoutes.length > 0) {
     logger.info(`📄 Pre-rendering ${prerenderRoutes.length} SSG page(s)`);
-    await nitroBuilder.prerender(nitroInstance);
+    // Nitro's prerender worker copies this environment, so built-in analytics
+    // doesn't report the build's own page requests as traffic.
+    const previousPrerender = process.env[FARM_PRERENDER_ENV];
+    process.env[FARM_PRERENDER_ENV] = "1";
+    try {
+      await nitroBuilder.prerender(nitroInstance);
+    } finally {
+      if (previousPrerender === undefined) delete process.env[FARM_PRERENDER_ENV];
+      else process.env[FARM_PRERENDER_ENV] = previousPrerender;
+    }
   }
   const sharpRuntimeStagePromise =
     imageRuntime === "node"

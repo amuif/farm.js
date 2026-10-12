@@ -68,8 +68,13 @@ function rowDescriptor(item: Item): CompilerKeyedRowElement {
   };
 }
 
-function createWindowHarness(initialItems: Item[], reactivity?: "static" | "hybrid") {
+function createWindowHarness(
+  initialItems: Item[],
+  reactivity?: "static" | "hybrid",
+  delegateEvents = false,
+) {
   const counters = { executions: 0, renders: 0, keys: 0, descriptors: 0, bindings: 0 };
+  const calls: string[] = [];
   let bindingFailure: string | undefined;
   let descriptorFailure: string | undefined;
   let bindingTrace: string[] | undefined;
@@ -146,17 +151,33 @@ function createWindowHarness(initialItems: Item[], reactivity?: "static" | "hybr
           <section>
             <blocks.KeyedRows
               collectionDependency={0}
+              delegateEvents={delegateEvents}
               dependencies={[0]}
+              events={
+                delegateEvents
+                  ? [
+                      {
+                        name: "onClick",
+                        path: [],
+                        invoke: (item, index) => calls.push(`${(item as Item).label}:${index}`),
+                      },
+                    ]
+                  : undefined
+              }
               id={0}
               items={items}
               positionIndexIndependent
               structureDependencies={[0]}
-              render={() => {
+              render={(event) => {
                 counters.renders += 1;
                 return (
                   <ul>
-                    {items().map((item) => (
-                      <li data-key={item.id} key={item.id}>
+                    {items().map((item, index) => (
+                      <li
+                        data-key={item.id}
+                        key={item.id}
+                        onClick={delegateEvents ? event(item, index, 0) : undefined}
+                      >
                         {item.label}
                       </li>
                     ))}
@@ -203,6 +224,7 @@ function createWindowHarness(initialItems: Item[], reactivity?: "static" | "hybr
   );
   return {
     Table,
+    calls,
     counters,
     customReplace: (items: readonly Item[]) => customReplace(items),
     failNextBindingFor: (key: string) => {
@@ -607,7 +629,7 @@ describe("compiled keyed-array window replacement hints", () => {
           { length: 256 },
           (_, index): Item => ({ id: `row-${index}`, label: `Row ${index}` }),
         );
-        const harness = createWindowHarness(initialItems, reactivity);
+        const harness = createWindowHarness(initialItems, reactivity, true);
         const container = document.createElement("div");
         document.body.append(container);
         const root = createRoot(container);
@@ -711,6 +733,8 @@ describe("compiled keyed-array window replacement hints", () => {
         expect(harness.counters.keys).toBe(1);
         expect(container.querySelector('[data-key="fresh"]')).toBe(freshRow);
         expect(freshRow?.textContent).toBe("Fresh row updated");
+        await act(async () => (freshRow as HTMLElement).click());
+        expect(harness.calls.at(-1)).toBe("Fresh row updated:32");
       },
     );
 

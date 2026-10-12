@@ -1999,6 +1999,12 @@ projects applies LIS to the outer list. Reordering one project's tasks applies a
 only inside that project. A surviving project, task, and every static sibling keep their DOM
 identity; updating the inner task does not rerun the component or either map callback.
 
+When the complete inner key order is unchanged, the nested scope reuses its row table and skips
+position-map construction and LIS planning. Every key is still validated and every child scope
+and binding is still updated. Insertions, removals, and reorders use the existing structural path.
+The same rule applies to keyed ranges beside host-only conditions in nested mixed ranges; it does
+not expand which row shapes the compiler accepts.
+
 The inner scope moves with its outer key and is cleaned when that project is removed. React still
 renders or hydrates the original nested lists, after which the compiler adopts the existing DOM.
 An outer and inner update queued together are read from the same latest collection. Duplicate keys
@@ -2219,11 +2225,25 @@ The optimized host-row contract is deliberately narrow:
 - Unsupported or mutating collection methods, spread children, Hooks in callbacks, and other
   unproven shapes fall back to normal React.
 
+Keyed rows build their DOM-element lookup only when delegated row events need it. Rows without
+events and rows using ordinary React callbacks skip that lookup; ordinary callbacks still resolve
+the current item and index through the keyed row table. The lookup is rebuilt when a delegated event
+definition is adopted, including after compatible Fast Refresh.
+
 Stable keys must be unique among siblings and come from the item's identity, such as a database ID.
 If duplicate keys appear at runtime, Farm remounts that list container through its original React
 render instead of guessing which row owns the identity. Later updates remain on the React fallback
 for that mounted list. Interactive fallback handlers use ordinary per-render item/index closures,
 not ambiguous keyed lookup. Unsupported source shapes also keep React ownership from the beginning.
+
+When a parent-prop change or compatible Fast Refresh hands a compiled keyed-row container back to
+React, Farm checks its direct row elements against the last React adoption. If compiler updates
+have inserted, removed, replaced, or reordered those elements, Farm remounts that container once
+before React reconciles it, then adopts the new tree. This preserves the compiled component's
+local state, but the stale container's DOM identity, focus, selection, and uncontrolled form values
+reset at that handoff. A current row structure is not remounted; same-key binding updates and later
+React-owned updates retain their existing controls and user state. Ordinary compiler updates do
+not perform this handoff check.
 
 Once a keyed list or keyed-range container is on React fallback, updates with unique keys reconcile
 in place. Unchanged form controls, user-entered values, focus, selection, local component state, and
@@ -2483,7 +2503,8 @@ definition assigns that mounted boundary a different internal block ID. Later lo
 remain routed to the previous definition. Compiler-owned host conditionals, keyed rows, and
 conditional, keyed, and mixed ranges also pass through React once when their definition changes,
 then Farm re-adopts them. This refreshes their static markup even when binding values are unchanged
-while preserving matching branch, range, and keyed DOM identity. React-owned conditional
+while preserving matching branch, range, and keyed DOM identity, except for the stale keyed-row
+container handoff described above. React-owned conditional
 boundaries move their retained root registration with the same ID change, so neighboring path-based
 bindings continue to skip the branch React preserved. Interactive keyed rows validate the complete
 refreshed row set before Farm reapplies bindings; a later invalid row therefore returns the

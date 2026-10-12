@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
   <title id="title">Farming Labs avatar on a dark surface</title>
   <desc id="desc">The centered three-tone Farming Labs logo on a square neutral field.</desc>
-  <rect width="512" height="512" fill="#0A0A0A"/>
+  <rect width="512" height="512" rx="64" fill="#0A0A0A"/>
   <svg x="135.25" y="142" width="241.5" height="228" viewBox="125 68 161 152">
       <path d="M157 68H133C128.582 68 125 71.5817 125 76V100C125 104.418 128.582 108 133 108H157C161.418 108 165 104.418 165 100V76C165 71.5817 161.418 68 157 68Z" fill="#F5F5F4"/>
       <path fill-rule="evenodd" clip-rule="evenodd" d="M182.383 68H280.617C282.045 68 283.414 68.8429 284.423 70.3431C285.433 71.8434 286 73.8783 286 76V100C286 102.122 285.433 104.157 284.423 105.657C283.414 107.157 282.045 108 280.617 108H182.383C180.955 108 179.586 107.157 178.577 105.657C177.567 104.157 177 102.122 177 100V76C177 73.8783 177.567 71.8434 178.577 70.3431C179.586 68.8429 180.955 68 182.383 68ZM271.852 81C270.747 81 269.852 81.8954 269.852 83V93C269.852 94.1046 270.747 95 271.852 95H277.272C278.376 95 279.272 94.1046 279.272 93V83C279.272 81.8954 278.376 81 277.272 81H271.852Z" fill="#F5F5F4"/>

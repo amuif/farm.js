@@ -29,6 +29,42 @@ export const FARM_METADATA_ATTRIBUTE = "data-farm-metadata";
 
 type MetadataRecord = Metadata & Record<string, any>;
 
+/** The 404 page's title when its module doesn't name one; a layout title template still wraps it. */
+export const FARM_NOT_FOUND_TITLE = "404 - Page Not Found";
+
+/**
+ * Metadata for the not-found page, shared by the development renderer and the production
+ * server: the layouts' metadata (so a title template, description or icons carry over),
+ * then the not-found module's own `metadata` and `generateMetadata()`, titled
+ * FARM_NOT_FOUND_TITLE when the module doesn't name itself.
+ */
+export async function resolveFarmNotFoundMetadata(
+  layoutModules: ReadonlyArray<Record<string, any> | null | undefined>,
+  notFoundModule: Record<string, any> | null | undefined,
+): Promise<MetadataRecord> {
+  let metadata: MetadataRecord = {};
+  for (const layout of layoutModules) {
+    if (!layout) continue;
+    metadata = mergeMetadata(metadata, layout.metadata);
+    if (typeof layout.generateMetadata === "function") {
+      metadata = mergeMetadata(metadata, await layout.generateMetadata({ params: {} }));
+    }
+  }
+  // The page's own metadata is merged onto the layouts in one step, so a layout title
+  // template wraps whichever title applies: the page's, or the 404 default.
+  let own: MetadataRecord = {};
+  if (notFoundModule) {
+    own = mergeMetadata(own, notFoundModule.metadata);
+    if (typeof notFoundModule.generateMetadata === "function") {
+      own = mergeMetadata(
+        own,
+        await notFoundModule.generateMetadata({ params: {}, searchParams: {} }),
+      );
+    }
+  }
+  return mergeMetadata(metadata, { ...own, title: own.title ?? FARM_NOT_FOUND_TITLE });
+}
+
 export function mergeMetadata(
   base: MetadataRecord | undefined,
   next: MetadataRecord | undefined,
