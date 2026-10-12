@@ -46,6 +46,8 @@ interface LocalBinding {
   kind: "derived" | "handler";
   name: string;
   value: t.Expression;
+  /** useState declarations that precede this binding in the component body. */
+  statesBefore: number;
 }
 
 interface PropsPlan {
@@ -8920,6 +8922,7 @@ function compileCandidate(
         kind: "handler",
         name: statement.id.name,
         value: t.toExpression(t.cloneNode(statement, true)) as t.FunctionExpression,
+        statesBefore: states.length,
       });
       continue;
     }
@@ -8942,9 +8945,6 @@ function compileCandidate(
       ) {
         return "only const [value, setValue] = useState(initial) state declarations are supported";
       }
-      if (locals.length > 0) {
-        return "useState declarations must appear before derived local values and event handlers";
-      }
       states.push({
         valueName: declaration.id.elements[0].name,
         setterName: declaration.id.elements[1].name,
@@ -8964,12 +8964,14 @@ function compileCandidate(
         kind: "handler",
         name: declaration.id.name,
         value: declaration.init,
+        statesBefore: states.length,
       });
     } else {
       locals.push({
         kind: "derived",
         name: declaration.id.name,
         value: declaration.init,
+        statesBefore: states.length,
       });
     }
   }
@@ -8993,6 +8995,21 @@ function compileCandidate(
         ))
     ) {
       return "useState initializers cannot reference another local binding";
+    }
+  }
+  for (const binding of locals) {
+    // Handlers run after render, but a derived value is read where it is
+    // declared: React would throw for a state declared after it.
+    if (
+      binding.kind === "derived" &&
+      states.some(
+        (state) =>
+          state.index >= binding.statesBefore &&
+          (referencesIdentifier(binding.value, state.valueName) ||
+            referencesIdentifier(binding.value, state.setterName)),
+      )
+    ) {
+      return `derived local ${binding.name} reads a useState declared after it`;
     }
   }
   const derivedByName = new Map<string, t.Expression>();

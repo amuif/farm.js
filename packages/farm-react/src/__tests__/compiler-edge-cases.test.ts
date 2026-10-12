@@ -140,6 +140,31 @@ describe("React AOT compiler safety boundaries", () => {
     expect(result.diagnostics[0]?.reason).toMatch(/dynamic child structures/i);
   });
 
+  it("compiles useState declared after unrelated derived values and handlers", async () => {
+    const result = await compile(`
+      import { useState } from "react";
+      export function LateState() {
+        const [count, setCount] = useState(0);
+        const doubled = count * 2;
+        const reset = () => {
+          setCount(0);
+          setOpen(false);
+        };
+        const [open, setOpen] = useState(false);
+        return (
+          <section className={open ? "open" : "closed"}>
+            <output>{doubled}</output>
+            <button onClick={() => setOpen(!open)}>Toggle</button>
+            <button onClick={reset}>Reset</button>
+          </section>
+        );
+      }
+    `);
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.compiled).toEqual(["LateState"]);
+  });
+
   it.each([
     {
       name: "an impure derived call",
@@ -159,13 +184,23 @@ describe("React AOT compiler safety boundaries", () => {
       reason: /can only reference earlier derived local values/i,
     },
     {
-      name: "state declared after a derived value",
+      name: "state initialized from an earlier derived value",
       body: `
         const seed = 0;
         const [next, setNext] = useState(seed);
         return <button onClick={() => setNext(next + 1)}>{count + next}</button>;
       `,
-      reason: /useState declarations must appear before derived local values/i,
+      reason: /useState initializers cannot reference another local binding/i,
+    },
+    {
+      // React would throw a ReferenceError reading next before its declaration.
+      name: "a derived value reading state declared after it",
+      body: `
+        const label = next + 1;
+        const [next, setNext] = useState(0);
+        return <button onClick={() => setNext(next + 1)}>{count + label}</button>;
+      `,
+      reason: /derived local label reads a useState declared after it/i,
     },
   ])("falls back for $name", async ({ body, reason }) => {
     const result = await compile(`
