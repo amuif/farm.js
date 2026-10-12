@@ -13,6 +13,7 @@ if (process.argv[2] === "--function") {
     ["/", "Farm"],
     ["/docs", 'id="nd-docs-layout"'],
     ["/docs/upgrading", "Upgrading"],
+    ["/docs/renderers/react", 'id="aot-compiler"'],
     ["/blog", "Farm"],
     ["/blog/0.1.0", "0.1"],
     ["/agents", "waitlist"],
@@ -20,7 +21,14 @@ if (process.argv[2] === "--function") {
   ]) {
     const response = await handler.fetch(new Request(`https://farmjs.dev${pathname}`));
     assert.equal(response.status, 200, `${pathname} must render`);
-    assert.ok((await response.text()).includes(content), `${pathname} must include ${content}`);
+    const html = await response.text();
+    assert.ok(html.includes(content), `${pathname} must include ${content}`);
+    if (pathname === "/docs/renderers/react") {
+      assert.ok(
+        html.includes('id="experimental-aot-compiler"'),
+        "existing compiler guide fragment links must keep working",
+      );
+    }
     console.log(`PASS ${pathname}`);
   }
   // No real signup or database write is needed to check the API boundary.

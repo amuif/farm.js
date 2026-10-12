@@ -97,8 +97,6 @@ The example creates one store per mounted component; share that instance through
 needed. Do not put request-specific server data in a process-global store. This store does not
 persist data or serialize symbol keys across server/client boundaries.
 
-<a id="experimental-aot-compiler"></a>
-
 ## AOT compiler
 
 Farm's opt-in React compiler moves a narrow class of local state-update work from React's
@@ -172,9 +170,13 @@ compiler: {
 
 Omitting `compiler` or setting it to `false` disables the transform.
 
-The option used to live at `react({ experimental: { compiler } })`. That form still works as a
+### Experimental AOT compiler
+
+Upgrading from the experimental compiler? The option used to live at
+`react({ experimental: { compiler } })`. That form still works as a
 deprecated alias: it logs a one-time deprecation warning and behaves exactly like the top-level
-option. Setting both keys is an error.
+option. Setting both keys is an error. This migration heading preserves existing links to the
+experimental compiler guide; use the [AOT compiler](#aot-compiler) section for new links.
 
 ### Compatibility and release status
 
