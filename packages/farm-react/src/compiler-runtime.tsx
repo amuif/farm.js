@@ -4447,9 +4447,11 @@ function readKeyedRowBindingValues(
   item: unknown,
   index: number,
 ): unknown[] {
-  return props.bindings.map((binding) =>
-    normalizedKeyedRowBindingValue(binding, binding.read(item, index)),
-  );
+  const values: unknown[] = [];
+  for (const binding of props.bindings) {
+    values.push(normalizedKeyedRowBindingValue(binding, binding.read(item, index)));
+  }
+  return values;
 }
 
 type CompilerKeyedRowSource = Pick<CompilerKeyedRowsBlockProps, "bindings" | "create"> &
@@ -4481,18 +4483,24 @@ function createKeyedRowInstance(
     conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
   };
   if (props.cloneRows) {
-    const targets = props.bindings.map((binding) => findCompilerHostTarget(element, binding.path));
-    if (targets.every(Boolean)) instance.targets = targets as Element[];
+    const targets: (Element | null)[] = [];
+    let found = true;
+    for (const binding of props.bindings) {
+      const target = findCompilerHostTarget(element, binding.path);
+      found &&= target !== null;
+      targets.push(target);
+    }
+    if (found) instance.targets = targets as Element[];
     if (template) {
-      props.bindings.forEach((binding, bindingIndex) =>
+      for (let bindingIndex = 0; bindingIndex < targets.length; bindingIndex += 1) {
         commitKeyedRowBinding(
-          binding,
+          props.bindings[bindingIndex],
           instance,
           bindingIndex,
           instance.values[bindingIndex],
           targets[bindingIndex],
-        ),
-      );
+        );
+      }
     } else {
       const skeleton = keyedRowTemplate(props, element, targets);
       if (skeleton) KEYED_ROW_TEMPLATES.set(props, skeleton);
@@ -6752,11 +6760,10 @@ function reorderCompilerKeyedRows(
     if (sequence[index] < 0) {
       let start = index;
       while (start > 0 && sequence[start - 1] < 0) start -= 1;
-      const fragment = root.ownerDocument.createDocumentFragment();
+      // Insert the new run directly, in order, ahead of the anchor.
       for (let itemIndex = start; itemIndex <= index; itemIndex += 1) {
-        fragment.append(instances[itemIndex].element);
+        root.insertBefore(instances[itemIndex].element, anchor);
       }
-      root.insertBefore(fragment, anchor);
       anchor = instances[start].element;
       index = start;
     } else {
@@ -9914,9 +9921,8 @@ function createKeyedRowsBlockComponentCore(
         }
       }
 
-      const sequence = hasSurvivingRows
-        ? rows.keys.map((key) => oldIndices.get(key) ?? -1)
-        : rows.keys.map(() => -1);
+      // Only a reorder of surviving rows reads old positions.
+      const sequence = hasSurvivingRows ? rows.keys.map((key) => oldIndices.get(key) ?? -1) : [];
       const nextInstances: CompilerKeyedRowInstance[] = [];
       const conditionalChanges: Array<{
         key: string;
@@ -10007,9 +10013,9 @@ function createKeyedRowsBlockComponentCore(
       }
 
       if (!hasSurvivingRows) {
-        const fragment = this.root.ownerDocument.createDocumentFragment();
-        for (const instance of nextInstances) fragment.append(instance.element);
-        this.root.replaceChildren(fragment);
+        // Like React's own commit: insert each new row directly.
+        this.root.replaceChildren();
+        for (const instance of nextInstances) this.root.appendChild(instance.element);
       } else {
         reorderCompilerKeyedRows(this.root, nextInstances, sequence, null);
       }

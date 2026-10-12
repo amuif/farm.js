@@ -266,6 +266,22 @@ function createWindowHarness(
   };
 }
 
+// Retained rows should move the minimum number of times; each fresh row is
+// inserted once.
+function rowInsertions(
+  spy: { mock: { calls: unknown[][] } },
+  existing: Iterable<Element>,
+): { moves: number; created: number } {
+  const before = new Set<unknown>(existing);
+  let moves = 0;
+  let created = 0;
+  for (const [node] of spy.mock.calls) {
+    if (before.has(node)) moves += 1;
+    else created += 1;
+  }
+  return { moves, created };
+}
+
 describe("compiled keyed-array window replacement hints", () => {
   for (const reactivity of ["static", "hybrid"] as const) {
     it.each([false, true])(
@@ -1170,7 +1186,7 @@ describe("compiled keyed-array window replacement hints", () => {
       expect(rows[position + offset]?.isConnected).toBe(false);
       expect(nextRows[position + offset]?.getAttribute("data-key")).toBe(`fresh-${offset - 48}`);
     }
-    expect(insertBefore).toHaveBeenCalledTimes(48);
+    expect(rowInsertions(insertBefore, rows)).toEqual({ moves: 47, created: fresh.length });
     expect(harness.counters).toEqual({
       executions: 1,
       renders: 1,
@@ -1224,7 +1240,10 @@ describe("compiled keyed-array window replacement hints", () => {
     initialRows.slice(position + 48, position + 64).forEach((row) => {
       expect(row.isConnected).toBe(false);
     });
-    expect(insertBefore).toHaveBeenCalledTimes(48);
+    expect(rowInsertions(insertBefore, initialRows)).toEqual({
+      moves: 47,
+      created: freshForGrowth.length,
+    });
     expect(harness.counters).toEqual({
       executions: 1,
       renders: 1,
@@ -1265,7 +1284,10 @@ describe("compiled keyed-array window replacement hints", () => {
     rowsBeforeShrink.slice(position + 32, position + 80).forEach((row) => {
       expect(row.isConnected).toBe(false);
     });
-    expect(insertBefore).toHaveBeenCalledTimes(32);
+    expect(rowInsertions(insertBefore, rowsBeforeShrink)).toEqual({
+      moves: 31,
+      created: freshForShrink.length,
+    });
     expect(harness.counters).toEqual({
       executions: 1,
       renders: 1,
@@ -1304,6 +1326,7 @@ describe("compiled keyed-array window replacement hints", () => {
       (_, offset): Item => ({ id: `second-${offset}`, label: `Second ${offset}` }),
     );
     const list = container.querySelector("ul")!;
+    const rowsBeforeQueue = [...container.querySelectorAll("li")];
     const insertBefore = vi.spyOn(list, "insertBefore");
     harness.counters.keys = 0;
     harness.counters.descriptors = 0;
@@ -1349,7 +1372,10 @@ describe("compiled keyed-array window replacement hints", () => {
     initialRows
       .slice(secondSourcePosition + 16, secondSourcePosition + 32)
       .forEach((row) => expect(row.isConnected).toBe(false));
-    expect(insertBefore).toHaveBeenCalledTimes(40);
+    expect(rowInsertions(insertBefore, rowsBeforeQueue)).toEqual({
+      moves: 38,
+      created: firstFresh.length + secondFresh.length,
+    });
     expect(harness.counters).toEqual({
       executions: 1,
       renders: 1,
