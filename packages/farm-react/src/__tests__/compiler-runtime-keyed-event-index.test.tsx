@@ -358,3 +358,35 @@ describe("keyed-row delegated element index", () => {
     });
   }
 });
+
+describe("keyed-row delegated element index through the general reconcile", () => {
+  for (const reactivity of ["static", "hybrid"] as const) {
+    it(`${reactivity}: keeps surviving rows' entries across an unhinted swap`, async () => {
+      const h = harness(reactivity);
+      const Table = createCompiledComponent(h.definition("delegated"));
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<Table />));
+      const writes = trackRowIndexWrites();
+
+      await change(() =>
+        h.update((items) => {
+          const next = items.slice();
+          [next[1], next[62]] = [next[62], next[1]];
+          return next;
+        }),
+      );
+      expect(writes.count).toBe(0);
+      const rows = [...container.querySelectorAll<HTMLButtonElement>("button")];
+      expect(rows[1].dataset.key).toBe("62");
+      await change(() => {
+        rows[1].click();
+        rows[62].click();
+        rows[5].click();
+      });
+      expect(h.calls).toEqual(["Row 62:1:62", "Row 1:62:1", "Row 5:5:5"]);
+    });
+  }
+});

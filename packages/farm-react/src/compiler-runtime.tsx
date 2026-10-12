@@ -4668,10 +4668,12 @@ function prepareKeyedRowBindingSetUpdates(
   props: CompilerKeyedRowBindingSource,
   instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
   rows: { items: unknown[]; keys: string[] },
+  /** Instances already in row order, which skips the keyed lookups. */
+  ordered?: readonly CompilerKeyedRowInstance[],
 ): CompilerPreparedKeyedRowBindingSet | undefined {
   const preparedUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
   for (let index = 0; index < rows.items.length; index += 1) {
-    const instance = instances.get(rows.keys[index]);
+    const instance = ordered ? ordered[index] : instances.get(rows.keys[index]);
     if (!instance) return undefined;
     const updates = prepareKeyedRowBindingUpdates(props, instance, rows.items[index], index);
     if (!updates) return undefined;
@@ -5456,7 +5458,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
       const instance = nextInstances[index];
       if (
         sequence[index] < 0 ||
-        (!stablePositions.has(index) && instance.element.nextSibling !== anchor)
+        (!stablePositions[index] && instance.element.nextSibling !== anchor)
       ) {
         this.root.insertBefore(instance.element, anchor);
       }
@@ -5895,10 +5897,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     let anchor = this.anchorAfter(rangeIndex);
     for (let index = nextInstances.length - 1; index >= 0; index -= 1) {
       const row = nextInstances[index];
-      if (
-        sequence[index] < 0 ||
-        (!stablePositions.has(index) && row.element.nextSibling !== anchor)
-      ) {
+      if (sequence[index] < 0 || (!stablePositions[index] && row.element.nextSibling !== anchor)) {
         this.root.insertBefore(row.element, anchor);
       }
       anchor = row.element;
@@ -6713,9 +6712,9 @@ function createConditionalRangesBlockComponent(
 }
 
 /** Returns positions forming the LIS while ignoring newly inserted (-1) entries. */
-function longestIncreasingSubsequencePositions(sequence: readonly number[]): Set<number> {
+function longestIncreasingSubsequencePositions(sequence: readonly number[]): Uint8Array {
   const tails: number[] = [];
-  const previous = Array.from({ length: sequence.length }, () => -1);
+  const previous = new Int32Array(sequence.length).fill(-1);
 
   for (let index = 0; index < sequence.length; index += 1) {
     if (sequence[index] < 0) continue;
@@ -6730,10 +6729,11 @@ function longestIncreasingSubsequencePositions(sequence: readonly number[]): Set
     tails[low] = index;
   }
 
-  const positions = new Set<number>();
+  // positions[index] is 1 when that row is part of the stable subsequence.
+  const positions = new Uint8Array(sequence.length);
   let cursor = tails.at(-1) ?? -1;
   while (cursor >= 0) {
-    positions.add(cursor);
+    positions[cursor] = 1;
     cursor = previous[cursor];
   }
   return positions;
@@ -6760,7 +6760,7 @@ function reorderCompilerKeyedRows(
       anchor = instances[start].element;
       index = start;
     } else {
-      if (!stablePositions.has(index) && instance.element.nextSibling !== anchor) {
+      if (!stablePositions[index] && instance.element.nextSibling !== anchor) {
         root.insertBefore(instance.element, anchor);
       }
       anchor = instance.element;
@@ -9187,6 +9187,8 @@ function createKeyedRowsBlockComponentCore(
     >();
     private readonly conditionalListeners = new Map<string, Map<number, RowConditionalRefresh>>();
     private instancesByElement = new WeakMap<Element, CompilerKeyedRowInstance>();
+    // False after a rebuild without delegated events left surviving rows unindexed.
+    private elementIndexComplete = true;
     private readonly conditionalOwner: RowConditionalOwner = {
       subscribe: (key, id, refresh) => this.subscribeToRowConditional(key, id, refresh),
     };
@@ -9201,11 +9203,20 @@ function createKeyedRowsBlockComponentCore(
 
     private readRows(
       props: CompilerKeyedRowsBlockProps,
-    ): { items: unknown[]; keys: string[] } | null {
+    ): { items: unknown[]; keys: string[]; keySet?: Set<string> } | null {
       const items = materializeIterable(props.items());
-      const keys = items.map((item, index) => keyedRowIdentity(props.rowKey(item, index)));
-      if (new Set(keys).size !== keys.length) return null;
-      return { items, keys };
+      const keys: string[] = [];
+      let committedOrder = items.length === this.instances.size;
+      const committed = this.instances.keys();
+      for (let index = 0; index < items.length; index += 1) {
+        const key = keyedRowIdentity(props.rowKey(items[index], index));
+        keys.push(key);
+        if (committedOrder) committedOrder = committed.next().value === key;
+      }
+      // The committed keys are unique, so the same sequence needs no recheck.
+      if (committedOrder) return { items, keys };
+      const keySet = new Set(keys);
+      return keySet.size === keys.length ? { items, keys, keySet } : null;
     }
 
     private rowEvent = (
@@ -9254,8 +9265,9 @@ function createKeyedRowsBlockComponentCore(
 
     private rebuildElementIndex(instances: ReadonlyMap<string, CompilerKeyedRowInstance>): void {
       this.instancesByElement = new WeakMap();
+      this.elementIndexComplete = this.usesDelegatedEvents();
       // Ordinary row callbacks resolve through this.instances, not the DOM index.
-      if (!this.usesDelegatedEvents()) return;
+      if (!this.elementIndexComplete) return;
       for (const instance of instances.values()) {
         this.instancesByElement.set(instance.element, instance);
       }
@@ -9670,8 +9682,10 @@ function createKeyedRowsBlockComponentCore(
         rows.items.length > 1 &&
         this.currentProps.bindings.length > 0 &&
         !this.currentProps.hostBlocks;
+      // Keys match the committed order, so instances line up with rows.
+      const ordered = [...this.instances.values()];
       const preparedBindings = shouldPrepareBindings
-        ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows)
+        ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows, ordered)
         : undefined;
       if (shouldPrepareBindings && !preparedBindings) {
         this.activateFallback(afterCommit);
@@ -9686,8 +9700,7 @@ function createKeyedRowsBlockComponentCore(
       }> = [];
       for (index = 0; index < rows.items.length; index += 1) {
         const key = rows.keys[index];
-        const existing = this.instances.get(key);
-        if (!existing) return false;
+        const existing = ordered[index];
         if (this.currentProps.hostBlocks) {
           const descriptor = this.currentProps.create(rows.items[index], index);
           if (!existing.scope?.update(descriptor)) {
@@ -9861,6 +9874,7 @@ function createKeyedRowsBlockComponentCore(
         this.root.replaceChildren();
         this.instances = new Map();
         this.instancesByElement = new WeakMap();
+        this.elementIndexComplete = true;
         this.eventHandlers.clear();
         this.conditionalListeners.clear();
         this.commitCurrentCollection(dirtyState);
@@ -9871,7 +9885,7 @@ function createKeyedRowsBlockComponentCore(
       if (this.reconcileStableRows(rows, afterCommit, dirtyState)) return;
       if (this.reconcileRemovals(rows, afterCommit, dirtyState)) return;
 
-      const nextKeys = new Set(rows.keys);
+      const nextKeys = rows.keySet ?? new Set(rows.keys);
       const hasSurvivingRows = rows.keys.some((key) => this.instances.has(key));
       const preparedBindings =
         nextKeys.size < this.instances.size &&
@@ -9886,7 +9900,8 @@ function createKeyedRowsBlockComponentCore(
       }
       const oldIndices = new Map<string, number>();
       if (hasSurvivingRows) {
-        [...this.instances].forEach(([key], index) => oldIndices.set(key, index));
+        let oldIndex = 0;
+        for (const key of this.instances.keys()) oldIndices.set(key, oldIndex++);
       }
       for (const [key, instance] of this.instances) {
         if (!nextKeys.has(key)) {
@@ -9995,7 +10010,17 @@ function createKeyedRowsBlockComponentCore(
         reorderCompilerKeyedRows(this.root, nextInstances, sequence, null);
       }
       this.instances = keyedRowInstancesByKey(nextInstances);
-      this.rebuildElementIndex(this.instances);
+      if (hasSurvivingRows && this.elementIndexComplete && this.usesDelegatedEvents()) {
+        // Surviving rows keep their elements and index entries; removed rows
+        // are no longer under the root, so only new rows need entries.
+        for (let index = 0; index < nextInstances.length; index += 1) {
+          if (sequence[index] < 0) {
+            this.instancesByElement.set(nextInstances[index].element, nextInstances[index]);
+          }
+        }
+      } else {
+        this.rebuildElementIndex(this.instances);
+      }
       this.pruneEventHandlers();
       this.pruneConditionalListeners();
       this.commitCurrentCollection(dirtyState);
@@ -10241,6 +10266,7 @@ function createKeyedRowsBlockComponentCore(
       this.reactElements = [];
       this.keyedTargets?.clear();
       this.instancesByElement = new WeakMap();
+      this.elementIndexComplete = true;
       this.eventHandlers.clear();
       this.conditionalListeners.clear();
     }
@@ -10428,7 +10454,7 @@ function createKeyedRangesBlockComponent(
         const instance = nextInstances[index];
         if (sequence[index] < 0) {
           this.root.insertBefore(instance.element, anchor);
-        } else if (!stablePositions.has(index) && instance.element.nextSibling !== anchor) {
+        } else if (!stablePositions[index] && instance.element.nextSibling !== anchor) {
           this.root.insertBefore(instance.element, anchor);
         }
         anchor = instance.element;

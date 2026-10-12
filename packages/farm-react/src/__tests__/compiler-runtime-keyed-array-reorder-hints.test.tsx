@@ -337,7 +337,8 @@ describe("compiled keyed-array reorder hints", () => {
           harness.removeAndReverse();
           await flushCompilerUpdates();
         });
-        expect(writes.count).toBe(expectedRows.length);
+        // Surviving rows keep their element entries; removed rows leave the root.
+        expect(writes.count).toBe(0);
         expect([...container.querySelectorAll("li")]).toEqual(expectedRows);
         expect(itemLabels(container)).toEqual(expectedItems.map((item) => item.label));
         harness.calls.length = 0;

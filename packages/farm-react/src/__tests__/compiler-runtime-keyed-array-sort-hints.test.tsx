@@ -749,7 +749,8 @@ describe("compiled keyed-array sort hints", () => {
           harness[action]();
           await flushCompilerUpdates();
         });
-        expect(writes.count).toBe(initialItems.length);
+        // The general reconcile indexes only the rows it creates.
+        expect(writes.count).toBe(action === "mismatchedSort" ? 1 : 0);
         expect(harness.counters.keys).toBeGreaterThan(0);
         if (action === "mismatchedSort") {
           expectedItems[0] = { ...expectedItems[0], id: `${expectedItems[0].id}-replacement` };
