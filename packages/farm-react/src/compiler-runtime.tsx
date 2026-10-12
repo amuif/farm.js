@@ -6852,12 +6852,13 @@ interface KeyedUpdateRuntime {
     root: Element,
     reactOwnedRows: boolean,
   ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
-  // Returns a fresh runtime-owned native map after validating all retained rows.
+  // Validates every retained row, then deletes the removed rows from the owned
+  // input map in place and returns it.
   filter?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: Map<string, CompilerKeyedRowInstance>,
     reactOwnedRows: boolean,
   ): Map<string, CompilerKeyedRowInstance> | undefined;
   // Transfers a fresh runtime-owned native map after validating the full update.
@@ -9018,7 +9019,7 @@ function reconcileCompilerKeyedArrayFilter(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<string, CompilerKeyedRowInstance>,
   reactOwnedRows: boolean,
 ): Map<string, CompilerKeyedRowInstance> | undefined {
   if (
@@ -9048,37 +9049,40 @@ function reconcileCompilerKeyedArrayFilter(
   );
   if (!survivorResult || !Array.isArray(finalValue)) return undefined;
   const { indices: survivorIndices, keysStable } = survivorResult;
-  const previousInstances = [...instances.values()];
-  const survivors: CompilerKeyedRowInstance[] = [];
+  // Filter keeps source order, so survivors are walked alongside the rows.
+  const removed: CompilerKeyedRowInstance[] = [];
+  let cursor = 0;
+  let sourceIndex = 0;
   try {
-    for (let index = 0; index < survivorIndices.length; index += 1) {
-      const sourceIndex = survivorIndices[index];
-      const instance = previousInstances[sourceIndex];
-      const item = finalValue[index];
-      if (
-        !instance ||
-        instance.index !== sourceIndex ||
-        !Object.is(instance.item, item) ||
-        (!keysStable && keyedRowIdentity(props.rowKey(item, index)) !== instance.key)
-      ) {
-        return undefined;
+    for (const instance of instances.values()) {
+      if (survivorIndices[cursor] !== sourceIndex) {
+        removed.push(instance);
+      } else {
+        const item = finalValue[cursor];
+        if (
+          instance.index !== sourceIndex ||
+          !Object.is(instance.item, item) ||
+          (!keysStable && keyedRowIdentity(props.rowKey(item, cursor)) !== instance.key)
+        ) {
+          return undefined;
+        }
+        cursor += 1;
       }
-      survivors.push(instance);
+      sourceIndex += 1;
     }
   } catch {
     return undefined;
   }
+  if (cursor !== survivorIndices.length) return undefined;
 
-  const survivorSet = new Set(survivorIndices);
-  for (let index = 0; index < previousInstances.length; index += 1) {
-    if (survivorSet.has(index)) continue;
-    previousInstances[index].scope?.cleanup();
-    previousInstances[index].element.remove();
+  for (const instance of removed) {
+    instance.scope?.cleanup();
+    instance.element.remove();
+    instances.delete(instance.key);
   }
-  for (let index = 0; index < survivors.length; index += 1) {
-    survivors[index].index = index;
-  }
-  return keyedRowInstancesByKey(survivors);
+  let index = 0;
+  for (const instance of instances.values()) instance.index = index++;
+  return instances;
 }
 
 function createKeyedRowConditionalRuntime(): KeyedRowConditionalRuntime {
@@ -10148,7 +10152,8 @@ function createKeyedRowsBlockComponentCore(
         );
         if (filteredInstances) {
           this.instances = filteredInstances;
-          this.rebuildElementIndex(this.instances);
+          // Removed rows leave the root; survivors keep their elements and entries.
+          if (!this.elementIndexComplete) this.rebuildElementIndex(this.instances);
           this.pruneEventHandlers();
           this.pruneConditionalListeners();
           this.commitCurrentCollection(dirtyState);

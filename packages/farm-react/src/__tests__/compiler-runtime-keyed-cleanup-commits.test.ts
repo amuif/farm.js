@@ -90,7 +90,10 @@ const updates = {
   },
 };
 
-describe.each(Object.entries(updates))("cleanup after %s", (_name, update) => {
+describe.each(Object.entries(updates))("cleanup after %s", (name, update) => {
+  // Filter deletes removed rows from the owned map in place; the others commit
+  // a new map.
+  const inPlace = name === "filter";
   it.each([false, true])(
     "uses the committed Map without snapshotting its keys (registries: %s)",
     (populated) => {
@@ -113,7 +116,9 @@ describe.each(Object.entries(updates))("cleanup after %s", (_name, update) => {
         .mockImplementation(function (this: Map<unknown, unknown>) {
           // Rolling-window validation may inspect the previous map; only the
           // newly committed map's redundant cleanup snapshot is in scope here.
-          if (this !== before && this === block.instances) snapshots.push(this.size);
+          if ((inPlace || this !== before) && this === block.instances) {
+            snapshots.push(this.size);
+          }
           return nativeKeys.call(this);
         });
       const committed = vi.fn();
@@ -129,7 +134,8 @@ describe.each(Object.entries(updates))("cleanup after %s", (_name, update) => {
       expect(pruneConditionals).toHaveBeenCalledTimes(1);
       expect(snapshots).toEqual([]);
       expect(committed).toHaveBeenCalledTimes(1);
-      expect(block.instances).not.toBe(before);
+      if (inPlace) expect(block.instances).toBe(before);
+      else expect(block.instances).not.toBe(before);
       expect(block.instances.has("row-0")).toBe(false);
       expect(block.instances.get("row-1")).toBe(survivor);
       expect([...block.instances.keys()]).toEqual(expected.map((item) => item.id));
@@ -191,4 +197,34 @@ it("does not prune or replace committed state when adoption fails", () => {
   expect(pruneConditionals).not.toHaveBeenCalled();
   expect(block.eventHandlers.get("row-0")).toBe(callback);
   expect(block.conditionalListeners.get("row-0")).toBe(callback);
+});
+
+describe("filter validation", () => {
+  it("removes nothing until every survivor validates", () => {
+    const { block, items, setItems } = harness(10);
+    const before = block.instances;
+    const removedRow = before.get("row-0")!.element;
+    const filtered = createCompilerKeyedArrayFilter(
+      items,
+      items.filter,
+      (item: Item) => item.id !== "row-0",
+    ) as Item[];
+    // Same key, different object: the hinted survivor no longer matches its row,
+    // so the hinted path bails after row-0 was already seen as removed.
+    filtered[6] = { ...filtered[6] };
+    const deletes = vi.spyOn(Map.prototype, "delete");
+    try {
+      setItems(filtered);
+      block.refresh(undefined, new Set([0]));
+      // Only the complete fallback deletes, once, for the one removed row.
+      expect(deletes.mock.contexts.filter((context) => context === before).length).toBeLessThan(2);
+    } finally {
+      deletes.mockRestore();
+    }
+    expect(removedRow.isConnected).toBe(false);
+    expect([...block.root.children].map((row) => row.textContent)).toEqual(
+      filtered.map((item) => item.id),
+    );
+    expect([...block.instances.keys()]).toEqual(filtered.map((item) => item.id));
+  });
 });
