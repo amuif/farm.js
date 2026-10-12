@@ -3036,6 +3036,11 @@ export interface CompilerKeyedRowsBlockProps {
   conditionals?: readonly CompilerKeyedRowConditional[];
   /** Row descriptors contain compiler-owned nested host scopes. */
   hostBlocks?: boolean;
+  /**
+   * Compiler proof that every value differing between rows is a binding, so a
+   * row can be cloned from one already built with its bindings reapplied.
+   */
+  cloneRows?: boolean;
 }
 
 export interface CompilerKeyedRange {
@@ -3299,8 +3304,12 @@ function updateSelectValue(element: HTMLSelectElement, value: unknown): void {
   if (fallback) fallback.selected = true;
 }
 
+function compilerAttributeName(name: string): string {
+  return name === "className" ? "class" : name === "htmlFor" ? "for" : name;
+}
+
 function updateAttribute(element: Element, name: string, value: unknown): void {
-  const attributeName = name === "className" ? "class" : name === "htmlFor" ? "for" : name;
+  const attributeName = compilerAttributeName(name);
   const stringifiesBoolean = attributeName.startsWith("data-") || attributeName.startsWith("aria-");
 
   if (name === "value" && (isInputElement(element) || isTextAreaElement(element))) {
@@ -4433,6 +4442,72 @@ function readKeyedRowBindingValues(
   return props.bindings.map((binding) =>
     normalizedKeyedRowBindingValue(binding, binding.read(item, index)),
   );
+}
+
+type CompilerKeyedRowSource = Pick<CompilerKeyedRowsBlockProps, "bindings" | "create"> &
+  Partial<Pick<CompilerKeyedRowsBlockProps, "cloneRows">>;
+
+// With cloneRows, everything outside the bindings is identical for every row.
+// Once one row is built from its descriptor, the rest clone it and reapply
+// their bindings. Keyed by the props object: a new render, which can close
+// over new values, derives a new skeleton.
+const KEYED_ROW_TEMPLATES = /* @__PURE__ */ new WeakMap<object, Element>();
+
+function createKeyedRowInstance(
+  props: CompilerKeyedRowSource,
+  document: Document,
+  key: string,
+  item: unknown,
+  index: number,
+): CompilerKeyedRowInstance {
+  const template = props.cloneRows && KEYED_ROW_TEMPLATES.get(props);
+  const element = template
+    ? (template.cloneNode(true) as Element)
+    : createCompilerHostElement(document, props.create(item, index));
+  const instance: CompilerKeyedRowInstance = {
+    key,
+    element,
+    values: readKeyedRowBindingValues(props, item, index),
+    item,
+    index,
+    conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
+  };
+  if (template) {
+    props.bindings.forEach((binding, bindingIndex) =>
+      commitKeyedRowBinding(
+        binding,
+        instance,
+        bindingIndex,
+        instance.values[bindingIndex],
+        findCompilerHostTarget(element, binding.path),
+      ),
+    );
+  } else if (props.cloneRows) {
+    const skeleton = keyedRowTemplate(props, element);
+    if (skeleton) KEYED_ROW_TEMPLATES.set(props, skeleton);
+  }
+  return instance;
+}
+
+function keyedRowTemplate(props: CompilerKeyedRowSource, element: Element): Element | undefined {
+  // A clone updates bound attributes in place, which keeps a built row's
+  // attribute order only if this row has every one of them. Otherwise wait for
+  // a row that does.
+  for (const binding of props.bindings) {
+    const target = findCompilerHostTarget(element, binding.path);
+    if (!target || binding.kind === "style") return undefined;
+    if (
+      binding.kind === "attribute" &&
+      !target.hasAttribute(compilerAttributeName(binding.name!))
+    ) {
+      return undefined;
+    }
+  }
+  const template = element.cloneNode(true) as Element;
+  for (const binding of props.bindings) {
+    if (binding.kind === "text") findCompilerHostTarget(template, binding.path)!.textContent = "";
+  }
+  return template;
 }
 
 function applyKeyedRowBindings(
@@ -7148,15 +7223,13 @@ function reconcileCompilerKeyedArrayAppend(
       const item = finalValue[index];
       const key = keyedRowIdentity(props.rowKey(item, index));
       if (nextInstances.has(key)) return undefined;
-      const descriptor = props.create(item, index);
-      const instance: CompilerKeyedRowInstance = {
+      const instance: CompilerKeyedRowInstance = createKeyedRowInstance(
+        props,
+        root.ownerDocument,
         key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
         item,
         index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      };
+      );
       appended.push(instance);
       nextInstances.set(key, instance);
     }
@@ -7243,15 +7316,7 @@ function reconcileCompilerKeyedArrayStructuralAppend(
       // reconciliation so React can preserve that row's existing identity.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      appended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      appended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7393,15 +7458,7 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
       const key = keyedRowIdentity(props.rowKey(item, index));
       if (instances.has(key) || appendedKeys.has(key)) return undefined;
       appendedKeys.add(key);
-      const descriptor = props.create(item, index);
-      appended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      appended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7535,15 +7592,7 @@ function reconcileCompilerKeyedArrayRollingWindow(
       // reconciliation path so React-owned row identity is never recreated.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7636,15 +7685,7 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
       // reconciliation path so React-owned row identity is never recreated.
       if (instances.has(key) || incomingKeys.has(key)) return undefined;
       incomingKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7742,15 +7783,7 @@ function reconcileCompilerKeyedArrayPosition(
     if (instances.has(key)) return undefined;
     let inserted: CompilerKeyedRowInstance;
     try {
-      const descriptor = props.create(item, update.position);
-      inserted = {
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, update.position),
-        item,
-        index: update.position,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      };
+      inserted = createKeyedRowInstance(props, root.ownerDocument, key, item, update.position);
     } catch {
       return undefined;
     }
@@ -7776,15 +7809,7 @@ function reconcileCompilerKeyedArrayPosition(
 
   let replacement: CompilerKeyedRowInstance;
   try {
-    const descriptor = props.create(item, update.position);
-    replacement = {
-      key,
-      element: createCompilerHostElement(root.ownerDocument, descriptor),
-      values: readKeyedRowBindingValues(props, item, update.position),
-      item,
-      index: update.position,
-      conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-    };
+    replacement = createKeyedRowInstance(props, root.ownerDocument, key, item, update.position);
   } catch {
     return undefined;
   }
@@ -7848,15 +7873,7 @@ function reconcileCompilerKeyedArrayBatchInsert(
       const key = keyedRowIdentity(props.rowKey(item, index));
       if (instances.has(key) || incomingKeys.has(key)) return undefined;
       incomingKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7993,15 +8010,7 @@ function prepareCompilerKeyedArrayWindow(
       // A key owned outside this exact source window would move a row across
       // a compiler-proven boundary. Complete reconciliation owns that case.
       if (instances.has(key)) return undefined;
-      const descriptor = props.create(item, index);
-      nextWindow.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      nextWindow.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
       sequence.push(-1);
       preparedBindings.push(undefined);
     }
@@ -8181,20 +8190,12 @@ function reconcileCompilerKeyedArrayWindowReplace(
           if (instances.has(key) || incomingKeys.has(key)) return undefined;
           incomingKeys.add(key);
           replacesRows = true;
-          const descriptor = props.create(item, index);
           prepared.push([
             index,
             instance,
             item,
             undefined,
-            {
-              key,
-              element: createCompilerHostElement(root.ownerDocument, descriptor),
-              values: readKeyedRowBindingValues(props, item, index),
-              item,
-              index,
-              conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-            },
+            createKeyedRowInstance(props, root.ownerDocument, key, item, index),
           ]);
           continue;
         }
@@ -8676,15 +8677,7 @@ function reconcileCompilerKeyedArrayPrepend(
       const key = keyedRowIdentity(props.rowKey(item, index));
       if (instances.has(key) || incomingKeys.has(key)) return undefined;
       incomingKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -8774,15 +8767,7 @@ function reconcileCompilerKeyedArrayStructuralPrepend(
       // reconciliation so React can preserve that row's existing identity.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -8935,15 +8920,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
       // Reusing a committed key may require React to move an existing row.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -9935,10 +9912,26 @@ function createKeyedRowsBlockComponentCore(
           nextInstances.push(existing);
           continue;
         }
+        if (!this.currentProps.hostBlocks) {
+          const instance = createKeyedRowInstance(
+            this.currentProps,
+            this.root.ownerDocument,
+            key,
+            rows.items[index],
+            index,
+          );
+          instance.conditionalValues = this.readConditionalValues(
+            this.currentProps,
+            rows.items[index],
+            index,
+          );
+          nextInstances.push(instance);
+          continue;
+        }
         const descriptor = this.currentProps.create(rows.items[index], index);
         const element = createCompilerHostElement(this.root.ownerDocument, descriptor);
         const scope = this.mountRowHostScope(element, descriptor);
-        if (this.currentProps.hostBlocks && !scope) {
+        if (!scope) {
           for (const instance of nextInstances) {
             if (!this.instances.has(instance.key)) instance.scope?.cleanup();
           }
@@ -10391,18 +10384,9 @@ function createKeyedRangesBlockComponent(
           nextInstances.push(existing);
           continue;
         }
-        const element = createCompilerHostElement(
-          this.root.ownerDocument,
-          range.create(rows.items[index], index),
+        nextInstances.push(
+          createKeyedRowInstance(range, this.root.ownerDocument, key, rows.items[index], index),
         );
-        nextInstances.push({
-          key,
-          element,
-          values: readKeyedRowBindingValues(range, rows.items[index], index),
-          item: rows.items[index],
-          index,
-          conditionalValues: new Map(),
-        });
       }
 
       let anchor = this.anchorAfter(rangeIndex);

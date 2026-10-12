@@ -97,6 +97,7 @@ describe("React AOT keyed-row conditional compiler", () => {
     expect(result.code).toContain("_farmRowConditional(item, 0, 0");
     expect(result.code).toContain('name: "onClick"');
     expect(result.code).toContain("conditionals={[");
+    expect(result.code).not.toContain("cloneRows");
   });
 
   it.each([

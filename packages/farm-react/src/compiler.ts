@@ -7186,6 +7186,29 @@ function keyedRowConditionalObject(
   return t.objectExpression(properties);
 }
 
+// Form controls keep their live state in properties that cloneNode does not
+// copy, and custom elements would see a clone's attributes before construction.
+const UNCLONEABLE_KEYED_ROW_TAGS = new Set(["input", "option", "select", "textarea"]);
+
+function canCloneKeyedRows(plan: KeyedRowsPlan): boolean {
+  // analyzeKeyedRowTree turns every expression in the row into a binding, so
+  // the rest of the row is the same literal markup for every item.
+  if (plan.descriptorBlocks?.size || plan.conditionals.length > 0) return false;
+  if (plan.bindings.some((binding) => binding.kind === "style")) return false;
+  const cloneable = (element: t.JSXElement): boolean => {
+    const tag = element.openingElement.name;
+    if (
+      !t.isJSXIdentifier(tag) ||
+      tag.name.includes("-") ||
+      UNCLONEABLE_KEYED_ROW_TAGS.has(tag.name)
+    ) {
+      return false;
+    }
+    return element.children.every((child) => !t.isJSXElement(child) || cloneable(child));
+  };
+  return cloneable(plan.row);
+}
+
 function keyedRowsBoundary(
   blockRuntime: t.Identifier,
   plan: KeyedRowsPlan,
@@ -7356,6 +7379,14 @@ function keyedRowsBoundary(
           ? [
               t.jsxAttribute(
                 t.jsxIdentifier("hostBlocks"),
+                t.jsxExpressionContainer(t.booleanLiteral(true)),
+              ),
+            ]
+          : []),
+        ...(canCloneKeyedRows(plan)
+          ? [
+              t.jsxAttribute(
+                t.jsxIdentifier("cloneRows"),
                 t.jsxExpressionContainer(t.booleanLiteral(true)),
               ),
             ]

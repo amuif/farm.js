@@ -93,6 +93,7 @@ describe("React AOT compiler-owned keyed-row host blocks", () => {
     expect(result.code).toContain("keyedRowsHostRuntimeFeature");
     expect(result.code).not.toContain("keyedRowsCompleteRuntimeFeature");
     expect(result.code).toContain("hostBlocks={true}");
+    expect(result.code).not.toContain("cloneRows");
     expect(result.code.match(/kind: "conditional-ranges"/g)).toHaveLength(4);
     expect(result.code).toContain("parent: 0");
     expect(result.code).toContain("parent: 2");
