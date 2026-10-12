@@ -493,22 +493,22 @@ policy.
 The current compiler deliberately supports a smaller subset than general React. A component must
 satisfy all of these rules:
 
-| Area                | Current supported shape                                                                                                                         |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                         |
-| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or flat object props destructuring.              |
-| Props               | Flat object destructuring supports shorthand names, aliases, and defaults. Referenced primitive values join the dependency graph after mount.   |
-| Body                | Top-level `useState` declarations, optional compiler-safe derived values and synchronous named handlers, then one unconditional JSX return.     |
-| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                      |
-| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                          |
-| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                      |
-| Text bindings       | State-driven text in a leaf host element.                                                                                                       |
-| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                           |
-| Events              | Inline handlers and synchronous `const` or function-declaration handlers, including inline synchronous events in eligible host-only keyed rows. |
-| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                |
-| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions. |
-| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                        |
-| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.           |
+| Area                | Current supported shape                                                                                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                                                                     |
+| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or flat object props destructuring.                                                          |
+| Props               | Flat object destructuring supports shorthand names, aliases, and defaults. Referenced primitive values join the dependency graph after mount.                                               |
+| Body                | Top-level `useState` declarations, compiler-safe derived values and synchronous named handlers in any order (a derived value cannot read a later state), then one unconditional JSX return. |
+| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                                                                  |
+| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                                                                      |
+| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                                                                  |
+| Text bindings       | State-driven text in a leaf host element.                                                                                                                                                   |
+| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                                                                       |
+| Events              | Inline handlers and synchronous `const` or function-declaration handlers, including inline synchronous events in eligible host-only keyed rows.                                             |
+| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                                                            |
+| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions.                                             |
+| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                                                                    |
+| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.                                                       |
 
 This component is eligible:
 
