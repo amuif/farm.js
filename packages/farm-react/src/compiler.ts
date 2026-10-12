@@ -4519,6 +4519,63 @@ function rewriteKeyedCollectionUpdateHints(
   };
 }
 
+// React handlers read state and props from the render that created them, even
+// after an await or inside a deferred callback. Compiled reads are live, so a
+// handler that can run code later reads each of them once, on entry.
+function snapshotDeferredHandlerReads(
+  root: t.JSXElement,
+  reactiveNames: ReadonlySet<string>,
+): t.JSXElement {
+  if (reactiveNames.size === 0) return root;
+  const file = expressionFile(t.cloneNode(root, true));
+  traverse(file, {
+    JSXAttribute(path) {
+      if (!t.isJSXIdentifier(path.node.name) || !/^on[A-Z]/.test(path.node.name.name)) return;
+      const value = path.get("value");
+      if (!value.isJSXExpressionContainer()) return;
+      const handler = value.get("expression");
+      if (!handler.isArrowFunctionExpression() && !handler.isFunctionExpression()) return;
+      let defers = false;
+      handler.traverse({
+        AwaitExpression(inner) {
+          defers = true;
+          inner.stop();
+        },
+        Function(inner) {
+          defers = true;
+          inner.stop();
+        },
+      });
+      if (!defers) return;
+      const snapshots = new Map<string, t.Identifier>();
+      handler.traverse({
+        ReferencedIdentifier(reference) {
+          const name = reference.node.name;
+          if (!reactiveNames.has(name) || reference.scope.hasBinding(name)) return;
+          let snapshot = snapshots.get(name);
+          if (!snapshot) {
+            snapshot = handler.scope.generateUidIdentifier(name);
+            snapshots.set(name, snapshot);
+          }
+          reference.replaceWith(t.cloneNode(snapshot));
+        },
+      });
+      if (snapshots.size === 0) return;
+      const declaration = t.variableDeclaration(
+        "const",
+        [...snapshots].map(([name, snapshot]) =>
+          t.variableDeclarator(snapshot, t.identifier(name)),
+        ),
+      );
+      const body = handler.node.body;
+      handler.node.body = t.isBlockStatement(body)
+        ? t.blockStatement([declaration, ...body.body], body.directives)
+        : t.blockStatement([declaration, t.returnStatement(body)]);
+    },
+  });
+  return (file.program.body[0] as t.ExpressionStatement).expression as t.JSXElement;
+}
+
 function rewriteStateAccess(
   expression: t.Expression,
   stateParameter: t.Identifier,
@@ -8930,8 +8987,8 @@ function compileCandidate(
     }
     if (t.isFunctionDeclaration(statement)) {
       if (!statement.id) return "named event handler declarations must have a name";
-      if (statement.async || statement.generator || statement.typeParameters) {
-        return `event handler ${statement.id.name} must be synchronous and non-generic`;
+      if (statement.generator || statement.typeParameters) {
+        return `event handler ${statement.id.name} must be a non-generator, non-generic function`;
       }
       locals.push({
         kind: "handler",
@@ -8972,8 +9029,8 @@ function compileCandidate(
       return "derived const values and event handlers must use one identifier and one expression";
     }
     if (t.isArrowFunctionExpression(declaration.init) || t.isFunctionExpression(declaration.init)) {
-      if (declaration.init.async || declaration.init.generator) {
-        return `event handler ${declaration.id.name} must be synchronous`;
+      if (declaration.init.generator) {
+        return `event handler ${declaration.id.name} cannot be a generator`;
       }
       locals.push({
         kind: "handler",
@@ -9056,8 +9113,12 @@ function compileCandidate(
   const handlerRewrite = rewriteHandlerAccess(rootWithDerived, handlersByName);
   if (handlerRewrite.reason) return handlerRewrite.reason;
   if (!handlerRewrite.root) return "event handlers could not be prepared safely";
-  const expandedRootWithDeferredEvents = rewriteDestructuredPropAccess(
+  const snapshotRoot = snapshotDeferredHandlerReads(
     handlerRewrite.root,
+    new Set([...states.map((state) => state.valueName), ...propsPlan.destructuredNames]),
+  );
+  const expandedRootWithDeferredEvents = rewriteDestructuredPropAccess(
+    snapshotRoot,
     propsPlan.destructuredNames,
     propsPlan.definitionParameter,
   );

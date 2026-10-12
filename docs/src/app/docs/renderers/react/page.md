@@ -497,22 +497,22 @@ policy.
 The current compiler deliberately supports a smaller subset than general React. A component must
 satisfy all of these rules:
 
-| Area                | Current supported shape                                                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                                                                     |
-| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or object props destructuring without computed keys.                                         |
-| Props               | Object destructuring supports shorthand names, aliases, defaults, nested object and array patterns, and rest. Referenced primitive values join the dependency graph after mount.            |
-| Body                | Top-level `useState` declarations, compiler-safe derived values and synchronous named handlers in any order (a derived value cannot read a later state), then one unconditional JSX return. |
-| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                                                                  |
-| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                                                                      |
-| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                                                                  |
-| Text bindings       | State-driven text in a leaf host element.                                                                                                                                                   |
-| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                                                                       |
-| Events              | Inline handlers and synchronous `const` or function-declaration handlers, including inline synchronous events in eligible host-only keyed rows.                                             |
-| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                                                            |
-| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions.                                             |
-| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                                                                    |
-| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.                                                       |
+| Area                | Current supported shape                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                                                          |
+| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or object props destructuring without computed keys.                              |
+| Props               | Object destructuring supports shorthand names, aliases, defaults, nested object and array patterns, and rest. Referenced primitive values join the dependency graph after mount. |
+| Body                | Top-level `useState` declarations, compiler-safe derived values and named handlers in any order (a derived value cannot read a later state), then one unconditional JSX return.  |
+| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                                                       |
+| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                                                           |
+| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                                                       |
+| Text bindings       | State-driven text in a leaf host element.                                                                                                                                        |
+| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                                                            |
+| Events              | Inline handlers and `const` or function-declaration handlers, including async ones, plus inline synchronous events in eligible host-only keyed rows.                             |
+| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                                                 |
+| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions.                                  |
+| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                                                         |
+| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.                                            |
 
 This component is eligible:
 
@@ -568,10 +568,14 @@ React.
 For destructured props, the original component wrapper still performs JavaScript destructuring on
 every parent render. Defaults therefore apply only to `undefined`, aliases keep their normal local
 names, and the resolved values are passed to the compiled definition. A named handler can be a
-synchronous `const` function or function declaration. It is expanded when passed directly to a JSX
+`const` function or function declaration, synchronous or async. It is expanded when passed directly to a JSX
 event or called from that event's inline function, including arguments such as
 `onClick={() => select(productId)}`. Calling it while producing the event prop, exposing it as a
-child, using it outside an event, or making it async/generic still falls back to React.
+child, using it outside an event, or making it a generator or generic still falls back to React.
+
+A handler that can run code later, because it awaits or contains a nested function such as a
+`setTimeout` callback, reads each state value and prop it uses once, when it starts. Code after an
+`await` therefore sees the values from the render that created the handler, as it does in React.
 
 #### Primitive prop cells
 

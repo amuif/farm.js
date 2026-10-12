@@ -140,6 +140,27 @@ describe("React AOT compiler safety boundaries", () => {
     expect(result.diagnostics[0]?.reason).toMatch(/dynamic child structures/i);
   });
 
+  it("snapshots state read by an async handler when it starts", async () => {
+    const result = await compile(`
+      import { useState } from "react";
+      export function AsyncHandler() {
+        const [count, setCount] = useState(0);
+        const increment = async () => {
+          await Promise.resolve();
+          setCount(count + 1);
+        };
+        return <button onClick={increment}>{count}</button>;
+      }
+    `);
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.compiled).toEqual(["AsyncHandler"]);
+    // The read happens before the await, as it does in React's render closure.
+    expect(result.code).toMatch(
+      /const _count = _farmState\[0\]\.get\(\);\s*await Promise\.resolve\(\);\s*_farmState\[0\]\.set\(_count \+ 1\)/,
+    );
+  });
+
   it("compiles useState declared after unrelated derived values and handlers", async () => {
     const result = await compile(`
       import { useState } from "react";
@@ -247,16 +268,16 @@ describe("React AOT compiler safety boundaries", () => {
 
   it.each([
     {
-      name: "an async handler",
-      declaration: "const increment = async () => setCount(count + 1);",
-      event: "increment",
-      reason: /event handler increment must be synchronous/i,
-    },
-    {
       name: "a generator handler",
       declaration: "const increment = function* () { setCount(count + 1); };",
       event: "increment",
-      reason: /event handler increment must be synchronous/i,
+      reason: /event handler increment cannot be a generator/i,
+    },
+    {
+      name: "a generator handler declaration",
+      declaration: "function* increment() { setCount(count + 1); }",
+      event: "increment",
+      reason: /event handler increment must be a non-generator, non-generic function/i,
     },
     {
       name: "a handler exposed as a child",

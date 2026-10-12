@@ -5,9 +5,24 @@ import { loadCompiledAndOriginal, removeCompiledModules } from "./compiled-modul
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
+  var farmTestGate: () => Promise<void>;
 }
 
 const roots: Root[] = [];
+
+// Async handlers in the sources below wait on this gate instead of a timer, so
+// each continuation runs in its own act() step, after the previous one committed.
+let gateOwner: HTMLElement | undefined;
+const gated: Array<{ owner: HTMLElement | undefined; resolve: () => void }> = [];
+globalThis.farmTestGate = () =>
+  new Promise<void>((resolve) => gated.push({ owner: gateOwner, resolve }));
+const releaseOne = async (container: HTMLElement) => {
+  const index = gated.findIndex((gate) => gate.owner === container);
+  expect(index).toBeGreaterThanOrEqual(0);
+  gated.splice(index, 1)[0].resolve();
+  // The continuation and anything it chains are microtasks, so they finish before this macrotask.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -55,8 +70,12 @@ async function expectSameAsReact(
   return compiledContainer;
 }
 
-const click = (selector: string) => (container: HTMLElement) =>
-  container.querySelector<HTMLElement>(selector)!.click();
+const click =
+  (...selectors: string[]) =>
+  (container: HTMLElement) => {
+    gateOwner = container;
+    for (const selector of selectors) container.querySelector<HTMLElement>(selector)!.click();
+  };
 
 describe("compiled components match React", () => {
   it("with useState declared after derived values and handlers", async () => {
@@ -128,5 +147,78 @@ describe("compiled components match React", () => {
     expect(farm.container.innerHTML).toBe(react.container.innerHTML);
     expect(farm.container.querySelector("h2")!.textContent).toBe("Grace");
     expect(farm.container.querySelector("small")!.textContent).toBe("admiral");
+  });
+
+  it("with async handlers that read state after an await", async () => {
+    await expectSameAsReact(
+      `
+        import { useState } from "react";
+        export function Loader() {
+          const [count, setCount] = useState(0);
+          const [status, setStatus] = useState("idle");
+          return (
+            <section data-status={status}>
+              <output>{count}</output>
+              <button
+                id="inline"
+                onClick={async () => {
+                  setStatus("loading");
+                  await globalThis.farmTestGate();
+                  // React reads the count this handler was rendered with.
+                  setCount(count + 1);
+                  setStatus("done");
+                }}
+              >
+                Load
+              </button>
+            </section>
+          );
+        }
+      `,
+      "Loader",
+      [click("#inline", "#inline"), releaseOne, releaseOne],
+    );
+  });
+
+  it("with named async handlers and deferred callbacks", async () => {
+    await expectSameAsReact(
+      `
+        import { useState } from "react";
+        export function Saver({ step = 1 }) {
+          const [count, setCount] = useState(0);
+          const [log, setLog] = useState("");
+          const save = async () => {
+            await globalThis.farmTestGate();
+            setCount(count + step);
+          };
+          async function record() {
+            await globalThis.farmTestGate();
+            setLog(log + "|" + count);
+          }
+          return (
+            <section>
+              <output>{count}</output>
+              <p>{log}</p>
+              <button id="save" onClick={save}>Save</button>
+              <button id="record" onClick={record}>Record</button>
+              <button id="later" onClick={() => globalThis.farmTestGate().then(() => setCount(count + 10))}>
+                Later
+              </button>
+            </section>
+          );
+        }
+      `,
+      "Saver",
+      [
+        click("#save", "#save"),
+        releaseOne,
+        releaseOne,
+        click("#record", "#later", "#later"),
+        releaseOne,
+        releaseOne,
+        releaseOne,
+      ],
+      { step: 2 },
+    );
   });
 });
