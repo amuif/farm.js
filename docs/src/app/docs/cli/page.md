@@ -43,6 +43,9 @@ React is the default renderer. `--renderer preact`, `--renderer solid`, `--rende
 | farm doctor --fix                | Apply safe, additive project corrections.                            |
 | farm explain /products/42        | Explain the files and runtime behavior for one URL.                  |
 | farm preview                     | Create a public URL for a running local app.                         |
+| farm login                       | Sign in to Farm Preview without starting a preview.                  |
+| farm whoami                      | Show which credential farm preview would use.                        |
+| farm logout                      | Sign out of Farm Preview on this machine.                            |
 | farm generate                    | Generate route/API types and integration schema artifacts.           |
 | farm generate --check            | Fail when committed generated types are stale.                       |
 | farm deploy --plan               | Resolve the deployment plan without executing it.                    |
@@ -188,6 +191,8 @@ POST /api/auth/login -> 200 580ms
 ```
 
 The local `farm dev` terminal logs the matched page, API route, and middleware work. Client components hydrate through the same public URL; early button clicks are queued and replayed after hydration so slow dev-mode module loading does not lose the click.
+
+`farm login`, `farm whoami` and `farm logout` manage the saved Farm Preview sign-in without starting a preview.
 
 See [Instant Preview](/docs/preview) for webhook setup, custom gateway configuration, troubleshooting, and security notes.
 
