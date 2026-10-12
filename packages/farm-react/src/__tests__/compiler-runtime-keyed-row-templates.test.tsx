@@ -310,3 +310,51 @@ describe("cloned keyed rows", () => {
     expect(cloned.creates).toBe(built.creates);
   });
 });
+
+describe("unhinted appends", () => {
+  it("patches existing rows and appends only the new rows", async () => {
+    const view = mountRows("table", true);
+    await view.render();
+    await view.rows(() => rows(1, 5));
+    const before = [...view.container.querySelectorAll("tbody tr")];
+
+    await view.rows((current) =>
+      [...current.slice(0, 2), { ...current[2], label: "changed" }, ...current.slice(3)].concat(
+        rows(10, 3),
+      ),
+    );
+
+    const after = [...view.container.querySelectorAll("tbody tr")];
+    expect(after.slice(0, 5)).toEqual(before);
+    expect(after.map((row) => row.getAttribute("data-id"))).toEqual([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "10",
+      "11",
+      "12",
+    ]);
+    expect(after[2].querySelector("a")!.textContent).toBe("#3 changed");
+    await act(async () => after[6].querySelector<HTMLElement>("a")!.click());
+    expect(view.clicks).toEqual(["row 11@6"]);
+  });
+
+  it.each([
+    ["repeats a new key", (current: Row[]) => current.concat(rows(10, 2), rows(10, 1))],
+    ["reuses a committed key", (current: Row[]) => current.concat(rows(3, 1))],
+  ])("falls back when the tail %s", async (_name, update) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const view = mountRows("table", true);
+    await view.render();
+    await view.rows(() => rows(1, 5));
+    let expected: Row[] = [];
+
+    await view.rows((current) => (expected = update(current)));
+
+    expect(
+      [...view.container.querySelectorAll("tbody tr")].map((row) => row.firstChild!.textContent),
+    ).toEqual(expected.map((row) => String(row.id)));
+  });
+});

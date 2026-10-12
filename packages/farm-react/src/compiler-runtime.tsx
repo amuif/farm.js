@@ -9212,20 +9212,37 @@ function createKeyedRowsBlockComponentCore(
       this.activateFallback();
     };
 
-    private readRows(
-      props: CompilerKeyedRowsBlockProps,
-    ): { items: unknown[]; keys: string[]; keySet?: Set<string> } | null {
+    private readRows(props: CompilerKeyedRowsBlockProps): {
+      items: unknown[];
+      keys: string[];
+      keySet?: Set<string>;
+      /** Set when the keys are the committed keys followed by new ones. */
+      appended?: boolean;
+    } | null {
       const items = materializeIterable(props.items());
       const keys: string[] = [];
-      let committedOrder = items.length === this.instances.size;
+      const committedSize = this.instances.size;
+      let prefix = 0;
       const committed = this.instances.keys();
       for (let index = 0; index < items.length; index += 1) {
         const key = keyedRowIdentity(props.rowKey(items[index], index));
         keys.push(key);
-        if (committedOrder) committedOrder = committed.next().value === key;
+        if (prefix === index && index < committedSize && committed.next().value === key) {
+          prefix += 1;
+        }
       }
       // The committed keys are unique, so the same sequence needs no recheck.
-      if (committedOrder) return { items, keys };
+      if (prefix === committedSize && keys.length === committedSize) return { items, keys };
+      if (prefix === committedSize && committedSize > 0) {
+        // Only the new tail needs checking, against itself and the committed rows.
+        const tail = new Set<string>();
+        for (let index = committedSize; index < keys.length; index += 1) {
+          const key = keys[index];
+          if (this.instances.has(key) || tail.has(key)) return null;
+          tail.add(key);
+        }
+        return { items, keys, appended: true };
+      }
       const keySet = new Set(keys);
       return keySet.size === keys.length ? { items, keys, keySet } : null;
     }
@@ -9749,6 +9766,45 @@ function createKeyedRowsBlockComponentCore(
       return true;
     }
 
+    // Keys are the committed keys plus new ones: patch every existing row like
+    // the complete path does, then create and append only the new rows.
+    private reconcileAppendedRows(
+      rows: { items: unknown[]; keys: string[] },
+      afterCommit?: () => void,
+      dirtyState?: ReadonlySet<number>,
+    ): void {
+      const root = this.root!;
+      let index = 0;
+      for (const existing of this.instances.values()) {
+        applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        existing.item = rows.items[index];
+        existing.index = index;
+        index += 1;
+      }
+      // Build every new row before touching the DOM or the committed map.
+      const appended: CompilerKeyedRowInstance[] = [];
+      for (; index < rows.items.length; index += 1) {
+        appended.push(
+          createKeyedRowInstance(
+            this.currentProps,
+            root.ownerDocument,
+            rows.keys[index],
+            rows.items[index],
+            index,
+          ),
+        );
+      }
+      const indexElements = this.elementIndexComplete && this.usesDelegatedEvents();
+      for (const instance of appended) {
+        root.appendChild(instance.element);
+        this.instances.set(instance.key, instance);
+        if (indexElements) this.instancesByElement.set(instance.element, instance);
+      }
+      if (!indexElements) this.rebuildElementIndex(this.instances);
+      this.commitCurrentCollection(dirtyState);
+      afterCommit?.();
+    }
+
     private reconcileRemovals(
       rows: { items: unknown[]; keys: string[] },
       afterCommit?: () => void,
@@ -9895,6 +9951,10 @@ function createKeyedRowsBlockComponentCore(
 
       if (this.reconcileStableRows(rows, afterCommit, dirtyState)) return;
       if (this.reconcileRemovals(rows, afterCommit, dirtyState)) return;
+      if (rows.appended && !this.currentProps.hostBlocks) {
+        this.reconcileAppendedRows(rows, afterCommit, dirtyState);
+        return;
+      }
 
       const nextKeys = rows.keySet ?? new Set(rows.keys);
       const hasSurvivingRows = rows.keys.some((key) => this.instances.has(key));
