@@ -81,9 +81,9 @@ FARM_PREVIEW_GATEWAY_URL=https://preview.farmjs.dev
 
 ### Managed developer login
 
-#### Farm Infra mode
+#### Farm.js Infrastructure mode
 
-To use Farm Infra API keys and first-party browser device approval, configure:
+To use Farm.js Infrastructure API keys and first-party browser device approval, configure:
 
 ```txt
 FARM_INFRA_URL=https://your-infra.example.com

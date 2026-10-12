@@ -46,14 +46,14 @@ test("account verification uses the private backchannel and fails closed", async
     calls.push({ url: String(url), init });
     return Response.json(
       status === 200
-        ? { subject: "owner", login: "Farm Infra" }
+        ? { subject: "owner", login: "Farm.js Infrastructure" }
         : { error: "private provider detail" },
       { status },
     );
   }) as typeof fetch)!;
   assert.deepEqual(await integration.deviceAuth.authorizeAccount("farmjs_fixture"), {
     subject: "owner",
-    login: "Farm Infra",
+    login: "Farm.js Infrastructure",
   });
   assert.equal(calls[0].url, "https://infra.example.com/api/previews/identity");
   assert.equal(new Headers(calls[0].init?.headers).get("authorization"), "Bearer farmjs_fixture");
@@ -67,7 +67,7 @@ test("account verification uses the private backchannel and fails closed", async
   status = 503;
   await assert.rejects(
     integration.deviceAuth.authorizeAccount("credential"),
-    /Farm Infra authentication unavailable/,
+    /Farm.js Infrastructure authentication unavailable/,
   );
 });
 

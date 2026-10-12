@@ -348,7 +348,7 @@ export async function authorizePreviewAccount(
     (account.expiresAt !== undefined &&
       (!Number.isSafeInteger(account.expiresAt) || account.expiresAt <= now))
   ) {
-    throw new PreviewAuthError(401, "The Farm Infra credential is invalid or expired.");
+    throw new PreviewAuthError(401, "The Farm.js Infrastructure credential is invalid or expired.");
   }
   return {
     kind: "account",

@@ -61,14 +61,14 @@ developer to sign in again. Pass `--login` to replace that saved login. In an in
 omitting `--expires` prompts for a duration and defaults to one hour. In CI and other
 non-interactive terminals, the hosted default is used.
 
-### Farm Infra authentication and dashboard
+### Farm.js Infrastructure authentication and dashboard
 
-Gateways configured with `FARM_INFRA_URL` use your Farm Infra account instead of the
+Gateways configured with `FARM_INFRA_URL` use your Farm.js Infrastructure account instead of the
 legacy GitHub device flow. You do not need to link GitHub in the dashboard.
 
 1. With an existing dashboard API key, supply it through `FARM_PREVIEW_TOKEN` (use your
    CI secret store, not a command-line argument). The CLI requests a tunnel grant directly.
-2. Without a key or saved login, the CLI opens Farm Infra, displays a code, and waits
+2. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
    for you to confirm the matching code and explicitly authorize your terminal.
 3. Return to the CLI. Choose the preview duration when prompted, or pass `--expires`.
 4. Once the tunnel is ready, the CLI prints its public URL and a dashboard link.
@@ -360,7 +360,7 @@ not the GitHub client secret and must never be placed on developer machines. Set
 or neither; a partial setup fails during gateway startup. `FARM_PREVIEW_DEFAULT_TTL_MS` and
 `FARM_PREVIEW_MAX_TTL_MS` optionally control the default and maximum hosted durations.
 
-Alternatively, connect a Farm Infra installation with `FARM_INFRA_URL` and
+Alternatively, connect a Farm.js Infrastructure installation with `FARM_INFRA_URL` and
 `FARM_PREVIEW_GATEWAY_SECRET` on the gateway. Set the same backchannel secret on Infra,
 and keep `FARM_PREVIEW_AUTH_SECRET` only on the gateway. Infra must have its auth,
 API-key, and preview-activity migrations applied before switching the gateway's provider.
@@ -392,17 +392,17 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 
 ## Environment Variables
 
-| Variable                        | Purpose                                                                                              |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `FARM_PREVIEW_GATEWAY_URL`      | Override the hosted gateway URL.                                                                     |
-| `FARM_PREVIEW_RELAY_URL`        | Override the persistent WebSocket relay URL.                                                         |
-| `FARM_PREVIEW_DOMAIN`           | Override the preview domain used for generated hostnames.                                            |
-| `FARM_PREVIEW_NAME`             | Provide a default readable preview name.                                                             |
-| `FARM_PREVIEW_PROJECT`          | Stable dashboard project slug; overridden by `--project`.                                            |
-| `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                            |
-| `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                 |
-| `FARM_PREVIEW_TOKEN`            | Farm Infra API key or saved account credential for CI; accepted format depends on gateway auth mode. |
-| `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                  |
+| Variable                        | Purpose                                                                                                          |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `FARM_PREVIEW_GATEWAY_URL`      | Override the hosted gateway URL.                                                                                 |
+| `FARM_PREVIEW_RELAY_URL`        | Override the persistent WebSocket relay URL.                                                                     |
+| `FARM_PREVIEW_DOMAIN`           | Override the preview domain used for generated hostnames.                                                        |
+| `FARM_PREVIEW_NAME`             | Provide a default readable preview name.                                                                         |
+| `FARM_PREVIEW_PROJECT`          | Stable dashboard project slug; overridden by `--project`.                                                        |
+| `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                        |
+| `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                             |
+| `FARM_PREVIEW_TOKEN`            | Farm.js Infrastructure API key or saved account credential for CI; accepted format depends on gateway auth mode. |
+| `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                              |
 
 ## Troubleshooting
 

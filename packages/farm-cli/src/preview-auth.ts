@@ -197,7 +197,7 @@ async function loginWithPreviewDeviceFlow(
 ): Promise<PreviewAccountExchange> {
   if (runtime.interactive === false)
     throw new Error(
-      "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARM_PREVIEW_TOKEN to a Farm Infra API key, or sign in once from an interactive terminal.",
+      "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARM_PREVIEW_TOKEN to a Farm.js Infrastructure API key, or sign in once from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);
   const issuer = safeAuthUrl(config.issuer || "");
@@ -212,7 +212,8 @@ async function loginWithPreviewDeviceFlow(
       redirect: "error",
     });
   const response = await post("/device/code", { client_id: config.clientId });
-  if (!response.ok) throw new Error(`Farm Infra could not start sign-in (${response.status}).`);
+  if (!response.ok)
+    throw new Error(`Farm.js Infrastructure could not start sign-in (${response.status}).`);
   const device = (await response.json()) as GitHubDeviceAuthorization;
   if (
     typeof device.device_code !== "string" ||
@@ -225,12 +226,12 @@ async function loginWithPreviewDeviceFlow(
     (device.interval !== undefined &&
       (!Number.isSafeInteger(device.interval) || device.interval < 1 || device.interval > 60))
   )
-    throw new Error("Farm Infra returned an invalid device authorization.");
+    throw new Error("Farm.js Infrastructure returned an invalid device authorization.");
   const browserUrl = safeAuthUrl(
     device.verification_uri_complete || device.verification_uri,
     issuer.origin,
   ).href;
-  logger.info(`Confirm this code in Farm Infra: ${device.user_code}`);
+  logger.info(`Confirm this code in Farm.js Infrastructure: ${device.user_code}`);
   logger.info(`Open: ${browserUrl}`);
   if (!(await runtime.openBrowser(browserUrl)))
     logger.warn("Open the URL above in your browser to continue.");
@@ -260,7 +261,7 @@ async function loginWithPreviewDeviceFlow(
       return {
         token: result.access_token,
         expiresAt: Date.now() + result.expires_in! * 1000,
-        user: { login: "your Farm Infra account" },
+        user: { login: "your Farm.js Infrastructure account" },
       };
     if (poll.status === 400 && result.error === "authorization_pending") continue;
     if (poll.status === 400 && result.error === "slow_down") {
@@ -268,11 +269,15 @@ async function loginWithPreviewDeviceFlow(
       continue;
     }
     if (result.error === "access_denied")
-      throw new Error("Farm Infra sign-in was declined. Run farm preview again when ready.");
+      throw new Error(
+        "Farm.js Infrastructure sign-in was declined. Run farm preview again when ready.",
+      );
     if (result.error === "expired_token") break;
-    throw new Error(`Farm Infra sign-in failed (${poll.status}). Try again.`);
+    throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
   }
-  throw new Error("Farm Infra sign-in expired. Run farm preview again to get a new code.");
+  throw new Error(
+    "Farm.js Infrastructure sign-in expired. Run farm preview again to get a new code.",
+  );
 }
 
 export function parsePreviewDuration(value: string | number | undefined): number | undefined {

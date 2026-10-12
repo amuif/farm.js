@@ -76,7 +76,7 @@ function fixture(options = {}) {
   };
   return { runtime, calls, waits, opened, saved };
 }
-test("Farm Infra device sign-in handles pending/slow-down and returns dashboard after approval", async () => {
+test("Farm.js Infrastructure device sign-in handles pending/slow-down and returns dashboard after approval", async () => {
   const f = fixture();
   const result = await authorizePreviewGatewayPlan(plan, { runtime: f.runtime, forceLogin: true });
   assert.deepEqual(f.waits, [5000, 5000, 10000]);
@@ -87,7 +87,7 @@ test("Farm Infra device sign-in handles pending/slow-down and returns dashboard 
   assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer device-session");
   assert.ok(!JSON.stringify(result).includes("device-session"));
 });
-test("Farm Infra API keys skip browser approval in CI and do not get persisted", async () => {
+test("Farm.js Infrastructure API keys skip browser approval in CI and do not get persisted", async () => {
   const previous = process.env.FARM_PREVIEW_TOKEN;
   process.env.FARM_PREVIEW_TOKEN = "farmjs_fixture_key";
   try {

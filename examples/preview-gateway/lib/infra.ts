@@ -25,7 +25,7 @@ export function createInfraPreviewIntegration(
   const secret = env.FARM_PREVIEW_GATEWAY_SECRET;
   if (!secret || Buffer.byteLength(secret) < 32)
     throw new Error(
-      "FARM_PREVIEW_GATEWAY_SECRET must contain at least 32 bytes and match Farm Infra.",
+      "FARM_PREVIEW_GATEWAY_SECRET must contain at least 32 bytes and match Farm.js Infrastructure.",
     );
   const headers = { "content-type": "application/json", "x-farm-gateway-token": secret };
   const deviceAuth: NonNullable<PreviewManagedAuthOptions["deviceAuth"]> = {
@@ -41,7 +41,7 @@ export function createInfraPreviewIntegration(
       if (!response.ok) {
         await response.body?.cancel();
         if (response.status === 401) return null;
-        throw new Error("Farm Infra authentication unavailable.");
+        throw new Error("Farm.js Infrastructure authentication unavailable.");
       }
       return response.json();
     },
@@ -73,7 +73,7 @@ export function createInfraPreviewIntegration(
       })
       .catch(() => {
         // Do not log the payload, URLs, headers or credential-bearing request.
-        console.warn("Farm Infra preview activity could not be delivered.");
+        console.warn("Farm.js Infrastructure preview activity could not be delivered.");
       })
       .finally(() => {
         pending--;
