@@ -293,6 +293,28 @@ test("resolves a running local preview target", async () => {
   }
 });
 
+test("never swaps an explicit port for another running app", async () => {
+  const other = await createTestServer();
+  const stopped = await createTestServer();
+  await stopped.close();
+  const previous = process.env.PORT;
+  // PORT is a detection candidate; it must not stand in for the port that was asked for.
+  process.env.PORT = String(other.port);
+  try {
+    await assert.rejects(
+      resolvePreviewTarget({ port: stopped.port, timeoutMs: 500 }),
+      new RegExp(`No running Farm app was found \\(http://localhost:${stopped.port}\\)`),
+    );
+    const detected = await resolvePreviewTarget({ timeoutMs: 500 });
+    assert.equal(detected.port, other.port);
+    assert.equal(detected.source, "detected");
+  } finally {
+    if (previous === undefined) delete process.env.PORT;
+    else process.env.PORT = previous;
+    await other.close();
+  }
+});
+
 test("formats a bare IPv6 preview host as a valid local URL", async () => {
   const target = await resolvePreviewTarget({ host: "::1", port: 4321, noProbe: true });
 

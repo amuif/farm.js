@@ -57,7 +57,7 @@ Forwarding requests through the native tunnel until Ctrl+C.
 ```
 
 Later previews reuse the opaque Farm account credential saved by the CLI and do not ask the
-developer to sign in again. Pass `--login` to replace that saved login. In an interactive terminal,
+developer to sign in again. Pass `--login`, or run `farm login`, to replace that saved login. In an interactive terminal,
 omitting `--expires` prompts for a duration and defaults to one hour. In CI and other
 non-interactive terminals, the hosted default is used.
 
@@ -69,7 +69,7 @@ legacy GitHub device flow. You do not need to link GitHub in the dashboard.
 1. With a Farm.js Infrastructure API key in `FARMJS_API_KEY`, the same key analytics uses,
    the CLI signs in with it and never opens a browser. It reads the key from your shell or
    your CI secrets, and from the app's `.env` files the way `farm dev` does. Set
-   `FARMJS_API_URL` too if Infrastructure isn't at `https://infra.farmjs.dev`: the key is
+   `FARMJS_API_URL` too if Infrastructure isn't at `https://app.farmjs.dev`: the key is
    only sent to a gateway that signs in through that Infrastructure.
 2. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
    for you to confirm the matching code and explicitly authorize your terminal.
@@ -179,6 +179,30 @@ farm preview --expires 2h
 farm preview --login
 farm preview --dry-run
 ```
+
+### Account commands
+
+```bash
+farm login
+farm whoami
+farm logout
+```
+
+`farm login` signs in and saves the credential without starting a preview. `farm whoami` prints
+the gateway, how it signs people in, and which credential `farm preview` would send:
+`FARMJS_API_KEY` (shown by its first characters, never the whole key), the deprecated
+`FARM_PREVIEW_TOKEN`, or the saved sign-in. It also says when `FARMJS_API_KEY` is set but not
+used, and exits with code 1 when `farm preview` would need a browser sign-in, so scripts can
+check first.
+
+`farm logout` deletes the saved sign-in from this machine. A Farm.js Infrastructure sign-in is
+also ended on the server, so the token stops working even if it was copied elsewhere. Previews
+that are already running keep their grant; stop them separately. A GitHub sign-in is a token the
+gateway signed, with no server session to end, so it stays valid until it expires. `farm logout`
+never revokes `FARMJS_API_KEY`: revoke API keys in the Farm.js Infrastructure dashboard.
+
+All three read the app's `.env` files the way `farm preview` does, and accept `--gateway` and
+`--root`.
 
 When no target is passed, Farm tries to detect a running app from the current project config and common development ports. Pass `--port` or `--url` when the app is running somewhere specific.
 
@@ -408,7 +432,7 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 | `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                       |
 | `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                            |
 | `FARMJS_API_KEY`                | Farm.js Infrastructure API key. Signs previews in without a browser on a gateway that uses that Infrastructure. |
-| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://infra.farmjs.dev`.                                       |
+| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://app.farmjs.dev`.                                         |
 | `FARM_PREVIEW_TOKEN`            | Deprecated. Use `FARMJS_API_KEY`. Still accepted, with a warning.                                               |
 | `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                             |
 
@@ -430,7 +454,8 @@ The preview URL forwards public internet traffic to your local app. Treat it lik
 
 - Stop the command when testing is finished.
 - The CLI caches only the opaque Farm account credential, never the GitHub provider token. The
-  credential file is created with user-only permissions. Use `--login` to replace it.
+  credential file is created with user-only permissions. Use `--login` or `farm login` to replace
+  it, and `farm logout` to remove it.
 - Tunnel grants are bound to one normalized preview name and one absolute expiry. Current polling
   control requests send session credentials in the `Authorization` header. The native agent is
   configured with one relay URL, so its name-bound grant is carried only on the outbound `/agent`

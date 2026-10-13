@@ -68,7 +68,7 @@ const PREVIEW_URL_PATTERN = /https:\/\/[^\s"')\]}]+/g;
 export async function previewFarm(options: PreviewFarmOptions = {}): Promise<PreviewFarmResult> {
   // Loading the config reads the app's .env files the way farm dev does, so a
   // FARMJS_API_KEY kept there signs the preview in. A broken config doesn't stop it.
-  await loadAppConfig(options.root || process.cwd(), options.configPath).catch(() => undefined);
+  await loadPreviewEnvironment(options.root, options.configPath);
   const target = await resolvePreviewTarget(options);
 
   logger.info("Creating public preview for the running app...");
@@ -197,13 +197,16 @@ export async function resolvePreviewTarget(
     throw new Error("Preview port must be an integer between 1 and 65535.");
   }
   const configPort = explicitPort ? undefined : await readConfigPort(root, options.configPath);
-  const candidates = uniqueNumbers([
-    explicitPort,
-    normalizePort(process.env.FARM_PORT),
-    normalizePort(process.env.PORT),
-    configPort,
-    ...DEFAULT_PREVIEW_PORTS,
-  ]);
+  // A port that was asked for is the only one probed: falling back to whatever
+  // else answers would publish a different local app.
+  const candidates = explicitPort
+    ? [explicitPort]
+    : uniqueNumbers([
+        normalizePort(process.env.FARM_PORT),
+        normalizePort(process.env.PORT),
+        configPort,
+        ...DEFAULT_PREVIEW_PORTS,
+      ]);
 
   if (!candidates.length) {
     throw new Error("No preview port candidates were available.");
@@ -458,6 +461,11 @@ async function isReachable(url: string, timeoutMs: number) {
     clearTimeout(timer);
     await delay(0);
   }
+}
+
+/** The app's .env files, loaded the way farm dev loads them. A broken config is ignored. */
+export async function loadPreviewEnvironment(root = process.cwd(), configPath?: string) {
+  await loadAppConfig(root, configPath).catch(() => undefined);
 }
 
 const appConfigs = new Map<string, ReturnType<typeof loadConfig>>();

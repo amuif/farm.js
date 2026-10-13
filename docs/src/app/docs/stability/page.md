@@ -60,10 +60,10 @@ An integration's stable surface is its Farm API: the factory, options, mounted r
 
 Framework-level behavior (routing, APIs, actions, queries, middleware, deployment) is renderer-neutral and covered by the shared renderer conformance suite. See [Renderers](/docs/renderers) for the per-renderer capability matrix.
 
-### Opt-in React compiler
+### Experimental React compiler
 
-The compiler package remains independently versioned and beta until its first non-prerelease
-version is published. Its application API is `react({ compiler: true })`; the former
+The compiler is experimental. Its package is independently versioned and stays beta until its first
+non-prerelease version is published. Its application API is `react({ compiler: true })`; the former
 `experimental.compiler` spelling is a deprecated compatibility alias. The compiler is disabled by
 default, and unsupported components retain the normal React path.
 

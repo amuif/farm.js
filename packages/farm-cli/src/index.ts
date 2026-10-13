@@ -62,12 +62,23 @@ export {
   loadPreviewAuthConfig,
   parsePreviewDuration,
   previewCredentialFromEnvironment,
+  previewSignInStatus,
+  signInToPreviewGateway,
+  signOutOfPreviewGateway,
   type AuthorizePreviewPlanOptions,
+  type PreviewSignInMode,
+  type PreviewSignInStatus,
   type PreviewEnvironmentCredential,
   type PreviewAuthPublicConfig,
   type PreviewAuthRuntime,
   type PreviewCredentialStore,
 } from "./preview-auth";
+export {
+  loginToFarmPreview,
+  logoutOfFarmPreview,
+  whoamiFarmPreview,
+  type PreviewAccountOptions,
+} from "./preview-account";
 export {
   escapeDoubleQuoted,
   escapeSqlString,

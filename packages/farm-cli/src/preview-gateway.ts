@@ -112,9 +112,7 @@ export function createPreviewGatewayPlan(
 ): PreviewGatewayPlan {
   const requestedName =
     sanitizePreviewName(options.name || process.env.FARM_PREVIEW_NAME) || randomPreviewName();
-  const gatewayUrl = normalizeGatewayUrl(
-    options.gatewayUrl || process.env.FARM_PREVIEW_GATEWAY_URL || DEFAULT_GATEWAY_URL,
-  );
+  const gatewayUrl = resolvePreviewGatewayUrl(options.gatewayUrl);
   const relayUrl = normalizeRelayUrl(process.env.FARM_PREVIEW_RELAY_URL || gatewayUrl);
   const domain = normalizePreviewDomain(process.env.FARM_PREVIEW_DOMAIN || DEFAULT_PREVIEW_DOMAIN);
   const requestedHostname = `${requestedName}.${domain}`;
@@ -576,6 +574,13 @@ function createGatewayErrorResponse(error: unknown): PreviewGatewayResponse {
     body: Buffer.from(message).toString("base64"),
     encoding: "base64",
   };
+}
+
+/** The gateway farm preview uses: --gateway, then FARM_PREVIEW_GATEWAY_URL, then the hosted one. */
+export function resolvePreviewGatewayUrl(gatewayUrl?: string) {
+  return normalizeGatewayUrl(
+    gatewayUrl || process.env.FARM_PREVIEW_GATEWAY_URL || DEFAULT_GATEWAY_URL,
+  );
 }
 
 function normalizeGatewayUrl(value: string) {

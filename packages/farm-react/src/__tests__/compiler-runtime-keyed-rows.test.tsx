@@ -364,6 +364,128 @@ describe("compiled keyed-row runtime", () => {
     expect(container.querySelector("li")?.textContent).toBe("Safe again");
   });
 
+  it("matches React's string comparison of number and string row keys", async () => {
+    interface KeyedItem {
+      key: number | string;
+      label: string;
+    }
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    let listRenders = 0;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const Inventory = createCompiledComponent({
+      displayName: "MixedKeyRows",
+      initialize: () => [
+        [
+          { key: 1, label: "One" },
+          { key: 2, label: "Two" },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as KeyedItem[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <main>
+            <KeyedRows
+              id={0}
+              render={() => {
+                listRenders += 1;
+                return (
+                  <ul>
+                    {items().map((item) => (
+                      <li key={item.key}>{item.label}</li>
+                    ))}
+                  </ul>
+                );
+              }}
+              items={items}
+              rowKey={(item) => (item as KeyedItem).key}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [],
+                styles: [],
+                children: [(item as KeyedItem).label],
+              })}
+              bindings={[{ kind: "text", path: [], read: (item) => [(item as KeyedItem).label] }]}
+            />
+          </main>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const rendersAfterMount = listRenders;
+    const [one, two] = container.querySelectorAll("li");
+
+    // React keys "1" and 1 are the same key, so the rows move instead of remounting.
+    await act(async () => {
+      setItems([
+        { key: "2", label: "Two!" },
+        { key: "1", label: "One!" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")]).toEqual([two, one]);
+    expect(two.textContent).toBe("Two!");
+    expect(one.textContent).toBe("One!");
+
+    // "01" is not 1's spelling, so it is a different key.
+    await act(async () => {
+      setItems([
+        { key: 2, label: "Two" },
+        { key: "01", label: "Zero one" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    const rows = [...container.querySelectorAll("li")];
+    expect(rows[0]).toBe(two);
+    expect(rows[1]).not.toBe(one);
+    expect(rows[1].textContent).toBe("Zero one");
+    expect(listRenders).toBe(rendersAfterMount);
+
+    // 1 and "1" in one list are duplicates, which React owns.
+    await act(async () => {
+      setItems([
+        { key: 1, label: "Number" },
+        { key: "1", label: "String" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
+      "Number",
+      "String",
+    ]);
+    expect(listRenders).toBeGreaterThan(rendersAfterMount);
+
+    // Non-finite and signed spellings follow the same rule once the list is safe again.
+    await act(async () => {
+      setItems([
+        { key: "NaN", label: "NaN" },
+        { key: "Infinity", label: "Infinity" },
+        { key: "-1", label: "Minus one" },
+        { key: "1e+21", label: "Big" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    const special = [...container.querySelectorAll("li")];
+    await act(async () => {
+      setItems([
+        { key: 1e21, label: "Big" },
+        { key: -1, label: "Minus one" },
+        { key: Infinity, label: "Infinity" },
+        { key: Number.NaN, label: "NaN" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")]).toEqual([...special].reverse());
+  });
+
   it.each(
     (["static", "hybrid"] as const).flatMap((reactivity) =>
       (["mount", "hydrate"] as const).map((lifecycle) => ({ lifecycle, reactivity })),

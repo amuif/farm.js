@@ -12,7 +12,7 @@ export default function HomePage() {
           <div className="eyebrow-row">
             <span>00</span>
             <span>FARMJS / React Compiler starter</span>
-            <span className="experimental-label">Opt-in</span>
+            <span className="experimental-label">Experimental</span>
           </div>
 
           <h1>
