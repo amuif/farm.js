@@ -176,9 +176,10 @@ test("logout forgets a sign-in the server can't end", async () => {
 });
 
 test("farm whoami and farm logout run end to end against a gateway", async () => {
+  let config = github;
   const server = createServer((request, response) => {
     if (request.url !== "/api/auth/config") return response.writeHead(404).end();
-    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(github));
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(config));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const gateway = `http://127.0.0.1:${server.address().port}`;
@@ -213,6 +214,22 @@ test("farm whoami and farm logout run end to end against a gateway", async () =>
     assert.match(stdout, /Signed in as sam, until /);
     assert.match((await farm("logout")).stdout, /Signed out of .* on this machine\./);
     assert.deepEqual(JSON.parse(await fs.readFile(credentials, "utf8")), {});
+
+    // On an Infrastructure gateway, the hint names whichever variable is missing.
+    config = infra;
+    await assert.rejects(farm("whoami"), (error) => {
+      assert.match(error.stdout, /Not signed in\. Run farm login, or set FARMJS_API_KEY\./);
+      return true;
+    });
+    env.FARMJS_API_KEY = key;
+    await assert.rejects(farm("whoami"), (error) => {
+      assert.match(error.stdout, /Not signed in\. Run farm login\.\n/);
+      assert.match(
+        error.stdout,
+        /signs in through https:\/\/infra\.example\.com\. If the key is from there, set FARMJS_API_URL=https:\/\/infra\.example\.com\./,
+      );
+      return true;
+    });
   } finally {
     server.close();
     await fs.rm(root, { recursive: true, force: true });

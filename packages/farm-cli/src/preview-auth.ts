@@ -284,7 +284,7 @@ export async function previewSignInStatus(
           ignoredKey:
             mode === "github"
               ? "this gateway uses GitHub sign-in, which doesn't accept API keys"
-              : `it's for ${originOf(env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)}, but this gateway signs in through ${originOf(config.issuer)}`,
+              : `it's for ${originOf(env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)}, but this gateway signs in through ${originOf(config.issuer)}. If the key is from there, set FARMJS_API_URL=${originOf(config.issuer)}`,
         }
       : {}),
   };
@@ -394,7 +394,7 @@ async function loginWithPreviewDeviceFlow(
     throw new Error(
       config.provider === "device"
         ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://infra.farmjs.dev), or sign in once from an interactive terminal."
-        : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
+        : "This preview gateway only supports browser sign-in, so it can't sign in from CI or a non-interactive terminal. Run the command from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);
   const issuer = deviceIssuer(config);
@@ -431,7 +431,7 @@ async function loginWithPreviewDeviceFlow(
   logger.info(`Open: ${browserUrl}`);
   if (!(await runtime.openBrowser(browserUrl)))
     logger.warn("Open the URL above in your browser to continue.");
-  logger.info("After approving this device, return here to choose the preview duration.");
+  logger.info("After approving this device, return here.");
   const deadline = Date.now() + device.expires_in * 1000;
   let interval = (device.interval ?? 5) * 1000;
   while (Date.now() < deadline) {
@@ -465,15 +465,11 @@ async function loginWithPreviewDeviceFlow(
       continue;
     }
     if (result.error === "access_denied")
-      throw new Error(
-        "Farm.js Infrastructure sign-in was declined. Run farm preview again when ready.",
-      );
+      throw new Error("Farm.js Infrastructure sign-in was declined. Try again when ready.");
     if (result.error === "expired_token") break;
     throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
   }
-  throw new Error(
-    "Farm.js Infrastructure sign-in expired. Run farm preview again to get a new code.",
-  );
+  throw new Error("Farm.js Infrastructure sign-in expired. Try again to get a new code.");
 }
 
 export function parsePreviewDuration(value: string | number | undefined): number | undefined {
@@ -607,7 +603,7 @@ async function loginWithGitHubDeviceFlow(
     if (tokenResult.error === "expired_token") break;
     throw new Error(tokenResult.error_description || "GitHub sign-in was denied.");
   }
-  throw new Error("GitHub sign-in expired before it was completed. Run farm preview again.");
+  throw new Error("GitHub sign-in expired before it was completed. Try again.");
 }
 
 async function exchangePreviewAccount(
