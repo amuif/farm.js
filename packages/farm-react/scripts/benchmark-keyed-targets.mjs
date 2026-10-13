@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { build } from "vite";
 import { createFarmRendererPlugin } from "../dist/vite.mjs";
 
@@ -23,7 +23,7 @@ async function bundle(kind, controlFeature) {
         transform(code, id) {
           if (!controlFeature || !id.endsWith(`keyed-${kind}.tsx`)) return;
           const control = code.replace(
-            /keyedRows(?:AppendOnly|IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
+            /keyedRows(?:FilterOnly|AppendOnly|IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
             () => {
               replaced = true;
               return controlFeature;
@@ -46,26 +46,40 @@ async function bundle(kind, controlFeature) {
     .filter((output) => output.type === "chunk")
     .map((output) => output.code)
     .join("\n");
-  return { code, raw: Buffer.byteLength(code), gzip: gzipSync(code, { level: 9 }).length };
+  return {
+    code,
+    raw: Buffer.byteLength(code),
+    gzip: gzipSync(code, { level: 9 }).length,
+    brotli: brotliCompressSync(code).length,
+  };
 }
 
 const results = [];
-for (const kind of ["identity", "membership", "map-lookup", "identity-filter", "append"]) {
+for (const kind of [
+  "identity",
+  "membership",
+  "map-lookup",
+  "identity-filter",
+  "append",
+  "filter",
+  "slice",
+]) {
+  const removalOnly = kind === "filter" || kind === "slice";
   const full = await bundle(
     kind,
     kind === "append"
       ? "keyedRowsHintedRuntimeFeature"
-      : kind === "identity-filter"
+      : kind === "identity-filter" || removalOnly
         ? "keyedRowsFilterHintedRuntimeFeature"
         : "keyedRowsRuntimeFeature",
   );
   const specialized = await bundle(kind);
   assert.ok(
     specialized.code.includes(
-      `keyed-rows:${kind === "append" ? "append-only" : kind === "identity-filter" ? "identity-filter-only" : kind}`,
+      `keyed-rows:${kind === "append" ? "append-only" : removalOnly ? "filter-only" : kind === "identity-filter" ? "identity-filter-only" : kind}`,
     ),
   );
-  if (kind === "identity" || kind === "append") {
+  if (kind === "identity" || kind === "append" || removalOnly) {
     for (const marker of ["Set.prototype.has", "Map.prototype.get"]) {
       assert.ok(full.code.includes(marker), `control must retain ${marker}`);
       assert.ok(!specialized.code.includes(marker), `${kind} runtime must not retain ${marker}`);
@@ -78,6 +92,14 @@ for (const kind of ["identity", "membership", "map-lookup", "identity-filter", "
       full.gzip - specialized.gzip >= 1024,
       "append-only runtime must save at least 1 KiB gzip",
     );
+  }
+  if (removalOnly) {
+    assert.ok(full.code.includes("keyed-rows:filter-hinted"));
+    assert.ok(
+      full.gzip - specialized.gzip >= 1024,
+      `${kind}-only runtime must save at least 1 KiB gzip`,
+    );
+    assert.ok(specialized.brotli < full.brotli, `${kind}-only runtime must reduce Brotli payload`);
   }
   if (kind === "identity-filter") {
     assert.ok(full.code.includes("keyed-rows:filter-hinted"), "control must keep filter hints");
@@ -100,8 +122,8 @@ for (const kind of ["identity", "membership", "map-lookup", "identity-filter", "
   }
   results.push({
     kind,
-    full: { raw: full.raw, gzip: full.gzip },
-    specialized: { raw: specialized.raw, gzip: specialized.gzip },
+    full: { raw: full.raw, gzip: full.gzip, brotli: full.brotli },
+    specialized: { raw: specialized.raw, gzip: specialized.gzip, brotli: specialized.brotli },
     savedGzip: full.gzip - specialized.gzip,
   });
 }

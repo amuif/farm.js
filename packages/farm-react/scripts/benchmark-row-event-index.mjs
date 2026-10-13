@@ -1,6 +1,7 @@
 // Focused production-browser diagnostic, not a cross-framework benchmark.
 // Build @farm.js/react first, then pass the commit immediately before this change.
 // Example: node scripts/benchmark-row-event-index.mjs --baseline-ref <sha>
+// Use --operations filter,slice for removals and --reactivity static for static scheduling.
 // Use --executable-path for an existing Chrome; otherwise use Playwright Chromium.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -23,12 +24,20 @@ const { values } = parseArgs({
     samples: { type: "string", default: "35" },
     warmups: { type: "string", default: "5" },
     rows: { type: "string", default: "10000" },
+    operations: { type: "string", default: "append,prepend" },
+    reactivity: { type: "string", default: "hybrid" },
   },
 });
 assert.ok(values["baseline-ref"], "--baseline-ref must name the pre-change commit");
 const sampleCount = Number(values.samples);
 const warmupCount = Number(values.warmups);
 const rowCount = Number(values.rows);
+const operations = values.operations.split(",");
+assert.ok(operations.length > 0);
+assert.ok(
+  operations.every((operation) => ["append", "prepend", "filter", "slice"].includes(operation)),
+);
+assert.ok(["static", "hybrid"].includes(values.reactivity));
 assert.ok(Number.isSafeInteger(sampleCount) && sampleCount > 0);
 assert.ok(Number.isSafeInteger(warmupCount) && warmupCount >= 0);
 assert.ok(Number.isSafeInteger(rowCount) && rowCount > 1);
@@ -42,20 +51,31 @@ const baseline = git("show", `${baselineCommit}:packages/farm-react/src/compiler
 const candidate = readFileSync(runtime, "utf8");
 assert.notEqual(candidate.trim(), baseline, "baseline and candidate runtime must differ");
 // Both variants use the current compiler. Older baselines need the equivalent
-// broad runtime export for append hints, before append-only selection existed.
+// broad runtime exports before append-only or filter-only selection existed.
 const legacyAppendControl = !baseline.includes("export const keyedRowsAppendOnlyRuntimeFeature");
+const legacyFilterControl = !baseline.includes("export const keyedRowsFilterOnlyRuntimeFeature");
 const bundles = new Map();
 const sizes = {};
 
-for (const operation of ["append", "prepend"]) {
+for (const operation of operations) {
   for (const delegated of [false, true]) {
     for (const variant of ["base", "candidate", "react"]) {
       const key = `${operation}-${delegated}-${variant}`;
       const entry = `${packageRoot}/fixtures/runtime-size/keyed-${operation}.tsx`;
       const original = readFileSync(entry, "utf8");
-      let replacedAppendFeature = false;
+      const legacyFeature =
+        operation === "append" && legacyAppendControl
+          ? ["keyedRowsAppendOnlyRuntimeFeature", "keyedRowsHintedRuntimeFeature"]
+          : ["filter", "slice"].includes(operation) && legacyFilterControl
+            ? ["keyedRowsFilterOnlyRuntimeFeature", "keyedRowsFilterHintedRuntimeFeature"]
+            : undefined;
+      let replacedFeature = false;
       assert.ok(original.includes("length: 1_000"));
       let fixture = original.replace("length: 1_000", `length: ${rowCount}`);
+      if (operation === "filter") {
+        assert.ok(fixture.includes("row.id !== 500"));
+        fixture = fixture.replace("row.id !== 500", `row.id !== ${Math.floor(rowCount / 2)}`);
+      }
       if (delegated) {
         assert.ok(fixture.includes("<li data-id="));
         fixture = fixture.replace(
@@ -80,23 +100,22 @@ for (const operation of ["append", "prepend"]) {
           },
           ...createFarmRendererPlugin({
             rendererOptions: {
-              experimental: { compiler: variant === "react" ? false : { onUnsupported: "error" } },
+              experimental: {
+                compiler:
+                  variant === "react"
+                    ? false
+                    : { onUnsupported: "error", reactivity: values.reactivity },
+              },
             },
           }),
           {
-            name: "legacy-append-runtime-control",
+            name: "legacy-runtime-control",
             enforce: "post",
             transform(code, id) {
-              if (
-                variant !== "base" ||
-                !legacyAppendControl ||
-                operation !== "append" ||
-                id !== entry
-              )
-                return;
-              const control = code.replace(/keyedRowsAppendOnlyRuntimeFeature/g, () => {
-                replacedAppendFeature = true;
-                return "keyedRowsHintedRuntimeFeature";
+              if (variant !== "base" || !legacyFeature || id !== entry) return;
+              const control = code.replaceAll(legacyFeature[0], () => {
+                replacedFeature = true;
+                return legacyFeature[1];
               });
               return { code: control, map: null };
             },
@@ -110,8 +129,8 @@ for (const operation of ["append", "prepend"]) {
         .filter((part) => part.type === "chunk");
       assert.equal(chunks.length, 1);
       const code = chunks[0].code;
-      if (variant === "base" && legacyAppendControl && operation === "append") {
-        assert.ok(replacedAppendFeature, "legacy control must replace the append-only feature");
+      if (variant === "base" && legacyFeature) {
+        assert.ok(replacedFeature, "legacy control must replace the unavailable feature");
       }
       if (variant !== "react") {
         assert.ok(code.includes("FarmCompiledKeyedRows"));
@@ -121,7 +140,11 @@ for (const operation of ["append", "prepend"]) {
               ? variant === "base" && legacyAppendControl
                 ? "keyed-rows:hinted"
                 : "keyed-rows:append-only"
-              : "keyed-rows:prepend-hinted",
+              : operation === "prepend"
+                ? "keyed-rows:prepend-hinted"
+                : variant === "base" && legacyFilterControl
+                  ? "keyed-rows:filter-hinted"
+                  : "keyed-rows:filter-only",
           ),
         );
         if (delegated) assert.match(code, /delegateEvents:!0/);
@@ -171,14 +194,15 @@ try {
     const result = await page.evaluate(
       async ({ operation, rowCount, delegated }) => {
         const list = document.querySelector("ul");
-        const retainedPosition = Math.floor(rowCount / 2);
-        const retained = list.children[retainedPosition];
+        const before = new Map([...list.children].map((row) => [row.dataset.id, row]));
+        const removal = operation === "filter" || operation === "slice";
+        const expectedCount = rowCount + (removal ? -1 : 1);
         const button = document.querySelector("button");
         button.focus();
         let started;
         const elapsed = await new Promise((resolveElapsed, reject) => {
           const observer = new MutationObserver(() => {
-            if (list.children.length !== rowCount + 1) return;
+            if (list.children.length !== expectedCount) return;
             observer.disconnect();
             clearTimeout(deadline);
             resolveElapsed(performance.now() - started);
@@ -195,9 +219,14 @@ try {
         const expected =
           operation === "append"
             ? [...Array(rowCount + 1).keys()]
-            : [rowCount, ...Array(rowCount).keys()];
+            : operation === "prepend"
+              ? [rowCount, ...Array(rowCount).keys()]
+              : [...Array(rowCount).keys()].filter(
+                  (id) => id !== (operation === "filter" ? Math.floor(rowCount / 2) : 0),
+                );
+        const eventIndexes = [0, Math.floor(rows.length / 2), rows.length - 1];
         if (delegated) {
-          for (const index of [0, retainedPosition, rowCount]) rows[index].click();
+          for (const index of eventIndexes) rows[index].click();
         }
         return {
           elapsed,
@@ -206,13 +235,12 @@ try {
               row.dataset.id === String(expected[index]) &&
               row.textContent === `Row ${expected[index]}`,
           ),
-          retained:
-            rows[operation === "append" ? retainedPosition : retainedPosition + 1] === retained,
+          retained: rows.every(
+            (row) => !before.has(row.dataset.id) || before.get(row.dataset.id) === row,
+          ),
           focus: document.activeElement === button,
           calls: window.__rowClicks,
-          expectedCalls: delegated
-            ? [expected[0], expected[retainedPosition], expected[rowCount]]
-            : [],
+          expectedCalls: delegated ? eventIndexes.map((index) => expected[index]) : [],
         };
       },
       { operation, rowCount, delegated },
@@ -226,7 +254,7 @@ try {
   }
   const loadBefore = loadavg();
   const results = {};
-  for (const operation of ["append", "prepend"]) {
+  for (const operation of operations) {
     for (const delegated of [false, true]) {
       await sample(`${operation}-${delegated}-react`, operation, delegated);
       const timings = { base: [], candidate: [] };
@@ -251,8 +279,11 @@ try {
         candidateHeadCommit: git("rev-parse", "HEAD"),
         candidateRuntimeSource: "working tree",
         compilerControl:
-          "current compiler for both; legacy append feature substituted only when absent from baseline",
+          "current compiler for both; equivalent broad feature substituted only when absent from baseline",
         legacyAppendControl,
+        legacyFilterControl,
+        operations,
+        reactivity: values.reactivity,
         baselineRuntimeSha256: createHash("sha256").update(baseline).digest("hex"),
         candidateRuntimeSha256: createHash("sha256").update(candidate).digest("hex"),
         node: process.version,

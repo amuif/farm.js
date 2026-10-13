@@ -386,6 +386,7 @@ type CompilerRuntimeFeatureName =
   | "keyed-rows-batch-every-hinted"
   | "keyed-rows-window-every-hinted"
   | "keyed-rows-filter-hinted"
+  | "keyed-rows-filter-only"
   | "keyed-rows-identity-filter-hinted"
   | "keyed-rows-identity-filter-only"
   | "keyed-rows-structural-append-hinted"
@@ -475,6 +476,7 @@ const COMPILER_RUNTIME_FEATURE_EXPORTS: Record<CompilerRuntimeFeatureName, strin
   "keyed-rows-batch-every-hinted": "keyedRowsBatchEveryHintedRuntimeFeature",
   "keyed-rows-window-every-hinted": "keyedRowsWindowEveryHintedRuntimeFeature",
   "keyed-rows-filter-hinted": "keyedRowsFilterHintedRuntimeFeature",
+  "keyed-rows-filter-only": "keyedRowsFilterOnlyRuntimeFeature",
   "keyed-rows-identity-filter-hinted": "keyedRowsIdentityFilterHintedRuntimeFeature",
   "keyed-rows-identity-filter-only": "keyedRowsIdentityFilterOnlyRuntimeFeature",
   "keyed-rows-structural-append-hinted": "keyedRowsStructuralAppendHintedRuntimeFeature",
@@ -665,6 +667,15 @@ function runtimeFeaturesForPlans(
       // Select from accepted rewrites and all keyed plans, not just one list.
       // The suffix excludes structural hints; opaque updates still reconcile.
       features.add("keyed-rows-append-only");
+    } else if (
+      keyedRowsFeature === "keyed-rows" &&
+      hintSuffix === "-filter-hinted" &&
+      keyedTargetKinds.size === 0 &&
+      !keyedMapOrAppendHints
+    ) {
+      // Filter and slice share removal hints. Every keyed plan must be plain
+      // and target-free; opaque updates still use complete reconciliation.
+      features.add("keyed-rows-filter-only");
     } else if (
       keyedRowsFeature === "keyed-rows" &&
       hintSuffix === "-filter-hinted" &&

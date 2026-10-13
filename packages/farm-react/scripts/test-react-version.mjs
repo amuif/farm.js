@@ -86,6 +86,8 @@ const testSource = String.raw`
     finalizeCompilerKeyedArrayMappedStructuralUpdate,
     keyedRowsMappedRollingWindowHintedRuntimeFeature,
     keyedRowsAppendOnlyRuntimeFeature,
+    keyedRowsFilterHintedRuntimeFeature,
+    keyedRowsFilterOnlyRuntimeFeature,
     keyedRowsHintedRuntimeFeature,
     keyedRowsStructuralAppendMapHintedRuntimeFeature,
     keyedRowsIdentityRuntimeFeature,
@@ -3080,10 +3082,15 @@ const testSource = String.raw`
   flushSync(() => appendRoot.unmount());
   }
 
+  assert.equal(createRequire(import.meta.url)("@farm.js/react/compiler-runtime").keyedRowsFilterOnlyRuntimeFeature.name, "keyed-rows:filter-only");
+  for (const filterFeature of [undefined, keyedRowsFilterHintedRuntimeFeature, keyedRowsFilterOnlyRuntimeFeature]) {
+  const createFilterComponent = filterFeature
+    ? (definition) => createCompiledComponentWithFeatures(definition, [filterFeature])
+    : createCompiledComponent;
   let filterRows = () => undefined;
   let filterKeyReads = 0;
   let filterBindingReads = 0;
-  const FilterRows = createCompiledComponent({
+  const FilterRows = createFilterComponent({
     displayName: "CompatibilityFilterRows",
     initialize: () => [[
       { id: "a", label: "Alpha" },
@@ -3166,7 +3173,7 @@ const testSource = String.raw`
   let sliceRows = () => undefined;
   let sliceKeyReads = 0;
   let sliceBindingReads = 0;
-  const SliceRows = createCompiledComponent({
+  const SliceRows = createFilterComponent({
     displayName: "CompatibilitySliceRows",
     initialize: () => [[
       { id: "a", label: "Alpha" },
@@ -3241,6 +3248,7 @@ const testSource = String.raw`
   assert.equal(sliceKeyReads, 0);
   assert.equal(sliceBindingReads, 0);
   flushSync(() => sliceRoot.unmount());
+  }
 
   let prependRows = () => undefined;
   let refreshPrependRows = () => undefined;

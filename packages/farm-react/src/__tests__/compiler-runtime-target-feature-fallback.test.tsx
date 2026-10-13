@@ -10,6 +10,7 @@ import {
   keyedRowsIdentityFilterHintedRuntimeFeature,
   keyedRowsIdentityFilterOnlyRuntimeFeature,
   keyedRowsFilterHintedRuntimeFeature,
+  keyedRowsFilterOnlyRuntimeFeature,
   keyedRowsMapLookupRuntimeFeature,
   keyedRowsMembershipRuntimeFeature,
   type CompilerStateUpdater,
@@ -17,6 +18,8 @@ import {
 
 it.each([
   [keyedRowsAppendOnlyRuntimeFeature, keyedRowsHintedRuntimeFeature],
+  [keyedRowsFilterOnlyRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
+  [keyedRowsFilterOnlyRuntimeFeature, keyedRowsIdentityFilterOnlyRuntimeFeature],
   [keyedRowsIdentityFilterHintedRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
   [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
   [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsIdentityFilterHintedRuntimeFeature],
@@ -120,6 +123,86 @@ it.each([
       "true",
     ]);
     expect(read).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it("uses full binding reads when a target-free runtime receives valid target metadata", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let update!: (value: CompilerStateUpdater) => void;
+  const read = vi.fn();
+  const Rows = createCompiledComponentWithFeatures(
+    {
+      displayName: "UntargetedBindingReads",
+      initialize: () => ["a"],
+      render(_props: Record<string, never>, state, blocks) {
+        const selected = () => state[0].get();
+        update = (next) => state[0].set(next);
+        const value = (item: unknown) => {
+          read(item);
+          return selected() === item;
+        };
+        return (
+          <section>
+            <blocks.KeyedRows
+              id={0}
+              dependencies={[0]}
+              items={() => ["a", "b"]}
+              rowKey={(item) => String(item)}
+              bindings={[
+                {
+                  kind: "attribute",
+                  name: "data-selected",
+                  path: [],
+                  dependencies: [0],
+                  identityTarget: { dependency: 0, read: selected },
+                  read: value,
+                },
+              ]}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [{ name: "data-selected", value: selected() === item }],
+                styles: [],
+                children: [String(item)],
+              })}
+              render={() => (
+                <ul>
+                  {["a", "b"].map((item) => (
+                    <li key={item} data-selected={selected() === item}>
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    },
+    [keyedRowsFilterOnlyRuntimeFeature],
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Rows />));
+    read.mockClear();
+    await act(async () => {
+      update("b");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect([...container.querySelectorAll("li")].map((row) => row.dataset.selected)).toEqual([
+      "false",
+      "true",
+    ]);
+    // Unlike a target-specialized feature, the target-free core performs
+    // ordinary binding reads. The compiler forbids this selection for targets.
+    expect(read.mock.calls.map(([item]) => item)).toEqual(["a", "b"]);
   } finally {
     await act(async () => root.unmount());
     container.remove();

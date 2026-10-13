@@ -10,6 +10,8 @@ import {
   createCompilerKeyedArrayFilter,
   createCompilerKeyedArraySlice,
   createCompilerKeyedMapUpdate,
+  keyedRowsFilterHintedRuntimeFeature,
+  keyedRowsFilterOnlyRuntimeFeature,
   keyedRowsIdentityFilterHintedRuntimeFeature,
   keyedRowsIdentityFilterOnlyRuntimeFeature,
   type CompilerKeyedRowElement,
@@ -186,15 +188,22 @@ function createFilterHarness(initialItems: Item[], readsCollection = false) {
   };
 }
 
-describe.each([
-  undefined,
-  keyedRowsIdentityFilterHintedRuntimeFeature,
-  keyedRowsIdentityFilterOnlyRuntimeFeature,
-])("filter hints (feature: %s)", (feature) => {
+describe.each(
+  [
+    undefined,
+    keyedRowsFilterHintedRuntimeFeature,
+    keyedRowsFilterOnlyRuntimeFeature,
+    keyedRowsIdentityFilterHintedRuntimeFeature,
+    keyedRowsIdentityFilterOnlyRuntimeFeature,
+  ].flatMap((feature) =>
+    (["static", "hybrid"] as const).map((reactivity) => ({ feature, reactivity })),
+  ),
+)("$reactivity filter hints (feature: $feature.name)", ({ feature, reactivity }) => {
   beforeEach(() => {
     createCompiledComponent = feature
-      ? (definition) => createCompiledComponentWithFeatures(definition, [feature])
-      : createCompleteCompiledComponent;
+      ? (definition) =>
+          createCompiledComponentWithFeatures({ ...definition, reactivity }, [feature])
+      : (definition) => createCompleteCompiledComponent({ ...definition, reactivity });
   });
 
   it.each(["remove", "keep-all", "queued", "slice", "clear"] as const)(
@@ -421,6 +430,186 @@ describe.each([
       );
     },
   );
+
+  it.each(["append", "map", "reverse"] as const)(
+    "reconciles an opaque %s after a removal, including a queued removal",
+    async (operation) => {
+      const harness = createFilterHarness([
+        { id: "a", label: "Alpha" },
+        { id: "b", label: "Beta" },
+        { id: "c", label: "Gamma" },
+        { id: "d", label: "Delta" },
+      ]);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<harness.Inventory />));
+      const before = new Map(
+        [...container.querySelectorAll("li")].map((row) => [row.dataset.key, row]),
+      );
+      await act(async () => {
+        harness.remove(["a"]);
+        await flushCompilerUpdates();
+      });
+      await act(async () => {
+        harness.update((items) =>
+          operation === "append"
+            ? [...items, { id: "e", label: "Extra" }]
+            : operation === "map"
+              ? items.map((item) => ({ ...item, label: item.label + "!" }))
+              : [...items].reverse(),
+        );
+        harness.remove(["b"]);
+        await flushCompilerUpdates();
+      });
+      const rows = [...container.querySelectorAll("li")];
+      expect(rows.map((row) => row.textContent)).toEqual(
+        operation === "append"
+          ? ["Gamma", "Delta", "Extra"]
+          : operation === "map"
+            ? ["Gamma!", "Delta!"]
+            : ["Delta", "Gamma"],
+      );
+      for (const row of rows) {
+        if (before.has(row.dataset.key)) expect(row).toBe(before.get(row.dataset.key));
+      }
+    },
+  );
+
+  it.each(["sparse", "subclass", "proxy", "custom"] as const)(
+    "preserves native %s collection behavior",
+    async (kind) => {
+      const source: Item[] = [
+        { id: "a", label: "Alpha" },
+        { id: "b", label: "Beta" },
+        { id: "c", label: "Gamma" },
+      ];
+      class Items extends Array<Item> {}
+      let items = source;
+      if (kind === "subclass") items = new Items(...items);
+      if (kind === "proxy") items = new Proxy(items, {});
+      const custom = vi.fn(function (this: Item[]) {
+        return [this[2], this[0]];
+      });
+      if (kind === "custom") Object.defineProperty(items, "filter", { value: custom });
+      const harness = createFilterHarness(items);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<harness.Inventory />));
+      await act(async () => {
+        if (kind === "sparse") {
+          // Pass a sparse intermediate to the native helper; do not ask the
+          // hand-authored keyed descriptor to render an undefined initial row.
+          harness.update((current) => {
+            const sparse = current.slice();
+            delete sparse[1];
+            return hintedFilter(sparse, new Set(["b"]));
+          });
+        } else {
+          harness.remove(["b"]);
+        }
+        await flushCompilerUpdates();
+      });
+      expect([...container.querySelectorAll("li")].map((row) => row.textContent)).toEqual(
+        kind === "custom" ? ["Gamma", "Alpha"] : ["Alpha", "Gamma"],
+      );
+      if (kind === "custom") {
+        expect(custom).toHaveBeenCalledTimes(1);
+        expect(custom.mock.contexts[0]).toBe(items);
+      }
+    },
+  );
+
+  it("does not remove an earlier row before a later key accessor fails validation", async () => {
+    let reject = false;
+    let inspected = false;
+    let validationRows: Element[] | undefined;
+    const container = document.createElement("div");
+    const later = {
+      get id() {
+        if (reject) {
+          reject = false;
+          inspected = true;
+          validationRows = [...container.querySelectorAll("li")];
+          throw new Error("late key validation");
+        }
+        return "c";
+      },
+      label: "Gamma",
+    };
+    const harness = createFilterHarness([
+      { id: "a", label: "Alpha" },
+      { id: "b", label: "Beta" },
+      later,
+    ]);
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<harness.Inventory />));
+    const before = [...container.querySelectorAll("li")];
+    reject = true;
+    await act(async () => {
+      harness.update((items) =>
+        createCompilerKeyedArrayFilter(items, items.filter, (item: Item) => item.label !== "Alpha"),
+      );
+      await flushCompilerUpdates();
+    });
+    expect(inspected).toBe(true);
+    expect(validationRows).toEqual(before);
+    expect([...container.querySelectorAll("li")]).toEqual(before.slice(1));
+    expect(container.textContent).toBe("BetaGamma");
+  });
+
+  it("falls back to React for duplicate survivor keys without partially removing rows", async () => {
+    const container = document.createElement("div");
+    let duplicate = false;
+    let validationRows: Element[] | undefined;
+    let inspected = false;
+    const later = {
+      get id() {
+        if (duplicate && !inspected) {
+          inspected = true;
+          validationRows = [...container.querySelectorAll("li")];
+        }
+        return duplicate ? "b" : "c";
+      },
+      label: "Gamma",
+    };
+    const harness = createFilterHarness([
+      { id: "a", label: "Alpha" },
+      { id: "b", label: "Beta" },
+      later,
+    ]);
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<harness.Inventory />));
+    const before = [...container.querySelectorAll("li")];
+    duplicate = true;
+    const warnings = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await act(async () => {
+        harness.update((items) =>
+          createCompilerKeyedArrayFilter(
+            items,
+            items.filter,
+            (item: Item) => item.label !== "Alpha",
+          ),
+        );
+        await flushCompilerUpdates();
+      });
+      expect(inspected).toBe(true);
+      expect(validationRows).toEqual(before);
+      expect(container.textContent).toBe("BetaGamma");
+      expect(harness.counters.listRenders).toBeGreaterThan(1);
+      expect(warnings.mock.calls.some((args) => args.join(" ").includes("same key"))).toBe(true);
+    } finally {
+      warnings.mockRestore();
+    }
+  });
 
   it("keeps collection-reading rows on complete reconciliation", async () => {
     const harness = createFilterHarness(

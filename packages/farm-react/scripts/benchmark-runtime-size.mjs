@@ -201,7 +201,7 @@ for (const marker of ["Set.prototype.has", "Map.prototype.get", "keyed-rows:hint
 }
 if (
   !keyedFilterOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedFilterOn.code.includes("keyed-rows:filter-hinted") ||
+  !keyedFilterOn.code.includes("keyed-rows:filter-only") ||
   !keyedFilterOn.code.includes("filterIndexIndependent")
 ) {
   throw new Error("Keyed filter fixture did not retain its optional filter-hint runtime.");
@@ -246,10 +246,17 @@ if (
 }
 if (
   !keyedSliceOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedSliceOn.code.includes("keyed-rows:filter-hinted") ||
+  !keyedSliceOn.code.includes("keyed-rows:filter-only") ||
   !keyedSliceOn.code.includes("filterIndexIndependent")
 ) {
   throw new Error("Keyed slice fixture did not retain its optional removal-hint runtime.");
+}
+for (const fixture of [keyedFilterOn, keyedSliceOn]) {
+  for (const marker of ["Set.prototype.has", "Map.prototype.get", "keyed-rows:filter-hinted"]) {
+    if (fixture.code.includes(marker)) {
+      throw new Error(`Removal-only fixture unexpectedly retained ${marker}.`);
+    }
+  }
 }
 if (
   !keyedRollingWindowOn.code.includes("FarmCompiledKeyedRows") ||

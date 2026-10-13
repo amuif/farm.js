@@ -295,6 +295,12 @@ and keyed-target fast paths, not support for other state changes: opaque updates
 still use complete keyed reconciliation. Mixed hints, targeted bindings, conditional rows, and host
 blocks keep their existing runtime. No additional option is required.
 
+The same component-wide proof selects a smaller removal-only runtime when the only emitted
+update hints are `filter()` and/or `slice()`. It omits unused append, map-update, and keyed-target
+fast paths while retaining complete keyed reconciliation for opaque updates or rejected hints.
+A sibling list requiring broader hints, targeted bindings, conditional rows, or host blocks keeps
+the existing combined runtime. This changes bundle selection, not native array or React semantics.
+
 Adjacent removal and append setters can share the same committed-row proof:
 
 ```tsx

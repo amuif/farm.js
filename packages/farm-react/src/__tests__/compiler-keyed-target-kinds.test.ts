@@ -5,7 +5,7 @@ import { normalizeReactCompilerOptions } from "../index";
 
 describe("keyed target runtime selection", () => {
   it.each([
-    ["row.id", "keyedRowsFilterHintedRuntimeFeature"],
+    ["row.id", "keyedRowsFilterOnlyRuntimeFeature"],
     ["selected === row.id", "keyedRowsIdentityFilterOnlyRuntimeFeature"],
     ["marked.has(row.id)", "keyedRowsFilterHintedRuntimeFeature"],
     ["lookup.get(row.id)", "keyedRowsFilterHintedRuntimeFeature"],
