@@ -197,13 +197,16 @@ export async function resolvePreviewTarget(
     throw new Error("Preview port must be an integer between 1 and 65535.");
   }
   const configPort = explicitPort ? undefined : await readConfigPort(root, options.configPath);
-  const candidates = uniqueNumbers([
-    explicitPort,
-    normalizePort(process.env.FARM_PORT),
-    normalizePort(process.env.PORT),
-    configPort,
-    ...DEFAULT_PREVIEW_PORTS,
-  ]);
+  // A port that was asked for is the only one probed: falling back to whatever
+  // else answers would publish a different local app.
+  const candidates = explicitPort
+    ? [explicitPort]
+    : uniqueNumbers([
+        normalizePort(process.env.FARM_PORT),
+        normalizePort(process.env.PORT),
+        configPort,
+        ...DEFAULT_PREVIEW_PORTS,
+      ]);
 
   if (!candidates.length) {
     throw new Error("No preview port candidates were available.");
