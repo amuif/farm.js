@@ -173,13 +173,14 @@ const server = createServer((req, res) => {
   }
 });
 let browser;
+let page;
 try {
   await new Promise((resolveListen, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolveListen);
   });
   browser = await chromium.launch({ headless: true, executablePath: values["executable-path"] });
-  const page = await browser.newPage();
+  page = await browser.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -307,6 +308,13 @@ try {
     ),
   );
 } finally {
-  await browser?.close();
-  await new Promise((resolveClose) => server.close(resolveClose));
+  try {
+    await page?.close();
+  } finally {
+    try {
+      await browser?.close();
+    } finally {
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  }
 }

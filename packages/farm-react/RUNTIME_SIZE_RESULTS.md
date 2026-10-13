@@ -271,6 +271,86 @@ within 73 B. The runtime-size gate passes without a baseline update. These are d
 allocation counts, not browser CPU, first-paint, or framework-ranking results. The pinned upstream
 application was not rebuilt for this change because it does not retain prepend hints.
 
+## Target-free removal-only runtime
+
+Plain keyed rows whose only accepted update hints are `filter()` and/or `slice()` now select
+`keyedRowsFilterOnlyRuntimeFeature`. This reuses the existing target-free core and filter-only
+update primitive; it does not change the removal algorithm. Selection considers every keyed plan
+in the component. Mixed hints, targeted bindings, conditional rows, and host blocks retain their
+existing capabilities; opaque updates and rejected hints still use complete reconciliation.
+
+Measured against main `ac736ba99a8020e01ecb686d5ff42e3d1b4652e0` on 2026-10-13 with Node 24.21.0,
+React/React DOM 19.2.8, Vite 5.4.20, esbuild 0.21.5, Babel 7.28.4, macOS 26.2 arm64 / Apple M1.
+The maintained production fixtures use identical dependencies, compiler settings, Vite/esbuild
+minification, gzip level 9, and Node's default Brotli compression on both sides:
+
+| Fixture | Build  |       Raw |     Gzip |   Brotli |
+| ------- | ------ | --------: | -------: | -------: |
+| Filter  | Before | 241,593 B | 74,307 B | 63,565 B |
+| Filter  | After  | 232,957 B | 72,190 B | 61,731 B |
+| Filter  | Saved  |   8,636 B |  2,117 B |  1,834 B |
+| Slice   | Before | 241,645 B | 74,325 B | 63,582 B |
+| Slice   | After  | 233,009 B | 72,210 B | 61,728 B |
+| Slice   | Saved  |   8,636 B |  2,115 B |  1,854 B |
+
+The compiler gzip premium falls from 14,164 B to 12,047 B for filter and from 14,193 B to
+12,078 B for slice (about 14.9%). All other 18 maintained fixture results and every compiler-off
+measurement are unchanged in raw/gzip/Brotli size. The existing persisted budgets pass without
+rewriting their baseline. A new paired gate builds each removal fixture twice with the same
+compiler, substituting the legacy broad filter export only for the control; it requires at least
+1 KiB gzip savings, a Brotli reduction, and removal of unused Set/Map target guards.
+
+Reproduce the size gates and browser controls after building the package:
+
+```bash
+pnpm --filter @farm.js/react test:runtime-size
+node packages/farm-react/scripts/test-removal-browser.mjs
+node packages/farm-react/scripts/benchmark-row-event-index.mjs --baseline-ref ac736ba99a8020e01ecb686d5ff42e3d1b4652e0 --operations filter,slice
+node packages/farm-react/scripts/benchmark-row-event-index.mjs --baseline-ref ac736ba99a8020e01ecb686d5ff42e3d1b4652e0 --operations filter,slice --reactivity static
+```
+
+The browser scripts accept `--executable-path` for an installed Chrome; otherwise they use
+Playwright Chromium. Development checks exercise both scheduling modes against uncompiled React.
+The production diagnostic uses 10,000 rows, ordinary/delegated row-event variants, uncompiled
+React correctness controls, five warm-ups and 35 alternating baseline/candidate samples. It checks
+all row content and retained DOM identities, button focus, and event dispatch. Its timing metric
+is programmatic click to mutation observer, excluding layout, paint, and startup. Bundle savings
+are not evidence of faster browser operations, first paint, or a cross-framework ranking.
+
+Chrome 155.0.8059.40 passed all development and production correctness controls in both modes.
+Production timings below retain both the original 35-sample run and a 70-sample repeat (add
+`--samples 70` to the commands above). Values are milliseconds, median and interpolated
+interquartile range. Each run uses five warm-ups per variant and alternates baseline/candidate:
+
+| Mode   | Operation | Delegated events | First median, before → after | Repeat before, median [IQR] | Repeat after, median [IQR] |
+| ------ | --------- | ---------------- | ---------------------------: | --------------------------: | -------------------------: |
+| Hybrid | Filter    | No               |                  2.40 → 2.30 |            4.10 [2.90–5.00] |           3.95 [2.93–5.37] |
+| Hybrid | Filter    | Yes              |                  2.60 → 2.40 |            3.20 [2.50–4.67] |           2.65 [2.20–3.30] |
+| Hybrid | Slice     | No               |                  1.40 → 1.70 |            2.05 [1.80–3.48] |           2.10 [1.50–3.10] |
+| Hybrid | Slice     | Yes              |                  1.30 → 1.50 |            1.80 [1.50–2.20] |           1.75 [1.43–2.57] |
+| Static | Filter    | No               |                  2.40 → 2.00 |            3.05 [2.22–4.05] |           3.30 [2.40–4.38] |
+| Static | Filter    | Yes              |                  2.30 → 2.50 |            4.00 [3.30–4.95] |           3.45 [2.60–5.10] |
+| Static | Slice     | No               |                  1.60 → 1.40 |            2.15 [1.60–3.48] |           2.30 [1.60–3.17] |
+| Static | Slice     | Yes              |                  1.50 → 1.60 |            2.30 [1.90–3.65] |           1.95 [1.50–2.90] |
+
+This shared host was heavily loaded: recorded start/end one-minute load averages span 18.6–29.1.
+Small regressions in the first slice run did not reproduce consistently; distributions overlap
+and several deltas change direction. These are noisy diagnostics, not evidence establishing a
+CPU improvement or ruling out small regressions. The confirmed improvement is payload size.
+The first static run emitted complete results but stalled during browser teardown and was stopped.
+The diagnostic now explicitly closes its owned page/context before the browser; the repeat exited
+normally. No framework timeout, fallback, or test assertion was relaxed.
+
+The mixed-operation `benchmarks/react-optimizer` dashboard remains byte-identical to the same
+baseline (232,382 B raw / 70,941 B gzip). Both builds and uncompiled React pass its create, update,
+select, swap, append, remove, and clear correctness controls with no page errors. Reusing the
+maintained runner's correctness and trial functions, five alternating paired trials with five
+warm-up cycles and 20 measured cycles per trial produce before/after median milliseconds of:
+create 3.70/3.70, update 0.50/0.50, select 0.20/0.20, swap 0.70/0.70, append 0.80/0.70,
+remove 0.90/0.90, clear 2.30/2.20. Recorded one-minute load averages are 28.62 before and 27.47
+after. Since the JavaScript is identical, these small timing differences are diagnostic noise,
+not a benefit attributed to this specialization. No existing framework benchmark headline changes.
+
 ## Existing production benchmark audit
 
 The existing js-framework-benchmark application was also rebuilt before and after runtime
