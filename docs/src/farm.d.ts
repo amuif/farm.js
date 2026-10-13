@@ -19,6 +19,7 @@ export type RoutePath =
   | `/agents/check/${string}`
   | "/blog"
   | "/blog/0.1.0"
+  | "/design"
   | "/docs"
   | `/docs/${string}`
   | "/docs/after"
@@ -125,6 +126,7 @@ export type RoutePattern =
   | "/agents/check/[id]"
   | "/blog"
   | "/blog/0.1.0"
+  | "/design"
   | "/docs"
   | "/docs/[...docs]"
   | "/docs/after"
@@ -231,6 +233,7 @@ export type RouteModulePattern =
   | "/agents/check/[id]"
   | "/blog"
   | "/blog/0.1.0"
+  | "/design"
   | "/docs"
   | "/docs/[...docs]"
   | "/docs/after"
