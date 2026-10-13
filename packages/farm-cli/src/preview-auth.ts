@@ -44,7 +44,7 @@ export interface PreviewCredentialStore {
 }
 
 /** Where Farm.js Infrastructure lives unless FARMJS_API_URL says otherwise, as for analytics. */
-const DEFAULT_INFRA_URL = "https://infra.farmjs.dev";
+const DEFAULT_INFRA_URL = "https://app.farmjs.dev";
 
 export interface PreviewEnvironmentCredential {
   token: string;
@@ -242,6 +242,149 @@ function safeAuthUrl(value: string, origin?: string) {
   return url;
 }
 
+export type PreviewSignInMode = "github" | "infrastructure" | "none";
+
+export interface PreviewSignInStatus {
+  gatewayUrl: string;
+  /** How the gateway signs people in; "none" for a gateway without sign-in. */
+  mode: PreviewSignInMode;
+  /** What farm preview would send. Undefined means it would ask for a browser sign-in. */
+  using?: {
+    source: PreviewEnvironmentCredential["source"] | "saved";
+    /** The start of an API key, never the whole key. */
+    hint?: string;
+    login?: string;
+    expiresAt?: number;
+  };
+  /** A saved sign-in exists, but an environment credential takes precedence. */
+  savedOverridden: boolean;
+  /** Why FARMJS_API_KEY is set but not used, when it is. */
+  ignoredKey?: string;
+}
+
+/** Which credential farm preview would use for this gateway, from its public config only. */
+export async function previewSignInStatus(
+  gatewayUrl: string,
+  runtime: PreviewAuthRuntime = createDefaultPreviewAuthRuntime(),
+  env: Record<string, string | undefined> = process.env,
+): Promise<PreviewSignInStatus> {
+  const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
+  if (!config.enabled) return { gatewayUrl, mode: "none", savedOverridden: false };
+  const mode = config.provider === "device" ? "infrastructure" : "github";
+  // whoami reports the deprecation itself rather than warning.
+  const environment = previewCredentialFromEnvironment(config, env, () => {});
+  const saved = await runtime.credentials.get(gatewayUrl);
+  const keyIgnored = !!env.FARMJS_API_KEY?.trim() && environment?.source !== "FARMJS_API_KEY";
+  const status: PreviewSignInStatus = {
+    gatewayUrl,
+    mode,
+    savedOverridden: !!environment && !!saved,
+    ...(keyIgnored
+      ? {
+          ignoredKey:
+            mode === "github"
+              ? "this gateway uses GitHub sign-in, which doesn't accept API keys"
+              : `it's for ${originOf(env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)}, but this gateway signs in through ${originOf(config.issuer)}. If the key is from there, set FARMJS_API_URL=${originOf(config.issuer)}`,
+        }
+      : {}),
+  };
+  if (environment) {
+    status.using = {
+      source: environment.source,
+      ...(environment.source === "FARMJS_API_KEY"
+        ? { hint: `${environment.token.slice(0, 11)}…` }
+        : {}),
+    };
+  } else if (saved) {
+    status.using = { source: "saved", ...accountClaims(saved) };
+  }
+  return status;
+}
+
+/** farm login: sign in to this gateway and save it, without starting a preview. */
+export async function signInToPreviewGateway(
+  gatewayUrl: string,
+  runtime: PreviewAuthRuntime = createDefaultPreviewAuthRuntime(),
+): Promise<{ login: string }> {
+  const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
+  if (!config.enabled) throw new Error("This preview gateway doesn't use sign-in.");
+  if ((config.provider !== "github" && config.provider !== "device") || !config.clientId) {
+    throw new Error("The Farm Preview gateway returned an unsupported login configuration.");
+  }
+  const account = await loginWithPreviewDeviceFlow(gatewayUrl, config, runtime);
+  await runtime.credentials.set(gatewayUrl, account.token);
+  return { login: account.user.login };
+}
+
+/**
+ * farm logout: forget this machine's saved sign-in for the gateway. A Farm.js
+ * Infrastructure sign-in is a session, so it is ended there too; a GitHub sign-in
+ * is a token the gateway signed, with no session to end. Infrastructure has no
+ * Better Auth bearer plugin, so its own /sign-out would answer 200 and end nothing:
+ * the session is ended through Infrastructure's preview sign-out endpoint instead.
+ */
+export async function signOutOfPreviewGateway(
+  gatewayUrl: string,
+  runtime: Pick<PreviewAuthRuntime, "credentials" | "fetch"> = createDefaultPreviewAuthRuntime(),
+): Promise<{ removed: boolean; ended: boolean; error?: string }> {
+  const token = await runtime.credentials.get(gatewayUrl);
+  if (!token) return { removed: false, ended: false };
+  let ended = false;
+  let error: string | undefined;
+  try {
+    const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
+    if (config.enabled && config.provider === "device" && !accountClaims(token)) {
+      const response = await runtime.fetch(`${deviceIssuer(config).origin}/api/previews/sign-out`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+        redirect: "error",
+      });
+      if (!response.ok) throw new Error(`Farm.js Infrastructure answered ${response.status}`);
+      // Only an explicit answer counts, never a 200 from some other page.
+      const body = (await response.json().catch(() => undefined)) as { signedOut?: unknown };
+      if (body?.signedOut !== true)
+        throw new Error("Farm.js Infrastructure didn't confirm the sign-out");
+      ended = true;
+    }
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause);
+  }
+  // Forgotten either way: a sign-in the server couldn't end still leaves this machine.
+  await runtime.credentials.delete(gatewayUrl);
+  return { removed: true, ended, ...(error ? { error } : {}) };
+}
+
+/** The login and expiry inside a GitHub sign-in account token, or undefined for any other token. */
+function accountClaims(token: string): { login?: string; expiresAt?: number } | undefined {
+  try {
+    const claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+    if (claims?.kind !== "account") return undefined;
+    return {
+      ...(typeof claims.login === "string" ? { login: claims.login } : {}),
+      ...(Number.isSafeInteger(claims.expiresAt) ? { expiresAt: claims.expiresAt } : {}),
+    };
+  } catch {
+    // An Infrastructure sign-in is an opaque session token.
+    return undefined;
+  }
+}
+
+/** The Better Auth base URL a device-mode gateway signs in through. */
+function deviceIssuer(config: PreviewAuthPublicConfig) {
+  const issuer = safeAuthUrl(config.issuer || "");
+  if (issuer.search) throw new Error("Invalid Farm Preview device issuer.");
+  return { origin: issuer.origin, base: issuer.href.replace(/\/$/, "") };
+}
+
+function originOf(value: string | undefined) {
+  try {
+    return new URL(value ?? "").origin;
+  } catch {
+    return String(value);
+  }
+}
+
 async function loginWithPreviewDeviceFlow(
   gatewayUrl: string,
   config: PreviewAuthPublicConfig,
@@ -250,13 +393,12 @@ async function loginWithPreviewDeviceFlow(
   if (runtime.interactive === false)
     throw new Error(
       config.provider === "device"
-        ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://infra.farmjs.dev), or sign in once from an interactive terminal."
-        : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
+        ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://app.farmjs.dev), or sign in once from an interactive terminal."
+        : "This preview gateway only supports browser sign-in, so it can't sign in from CI or a non-interactive terminal. Run the command from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);
-  const issuer = safeAuthUrl(config.issuer || "");
-  if (issuer.search) throw new Error("Invalid Farm Preview device issuer.");
-  const base = issuer.href.replace(/\/$/, "");
+  const issuer = deviceIssuer(config);
+  const base = issuer.base;
   const post = (path: string, body: object) =>
     runtime.fetch(`${base}${path}`, {
       method: "POST",
@@ -289,7 +431,7 @@ async function loginWithPreviewDeviceFlow(
   logger.info(`Open: ${browserUrl}`);
   if (!(await runtime.openBrowser(browserUrl)))
     logger.warn("Open the URL above in your browser to continue.");
-  logger.info("After approving this device, return here to choose the preview duration.");
+  logger.info("After approving this device, return here.");
   const deadline = Date.now() + device.expires_in * 1000;
   let interval = (device.interval ?? 5) * 1000;
   while (Date.now() < deadline) {
@@ -323,15 +465,11 @@ async function loginWithPreviewDeviceFlow(
       continue;
     }
     if (result.error === "access_denied")
-      throw new Error(
-        "Farm.js Infrastructure sign-in was declined. Run farm preview again when ready.",
-      );
+      throw new Error("Farm.js Infrastructure sign-in was declined. Try again when ready.");
     if (result.error === "expired_token") break;
     throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
   }
-  throw new Error(
-    "Farm.js Infrastructure sign-in expired. Run farm preview again to get a new code.",
-  );
+  throw new Error("Farm.js Infrastructure sign-in expired. Try again to get a new code.");
 }
 
 export function parsePreviewDuration(value: string | number | undefined): number | undefined {
@@ -465,7 +603,7 @@ async function loginWithGitHubDeviceFlow(
     if (tokenResult.error === "expired_token") break;
     throw new Error(tokenResult.error_description || "GitHub sign-in was denied.");
   }
-  throw new Error("GitHub sign-in expired before it was completed. Run farm preview again.");
+  throw new Error("GitHub sign-in expired before it was completed. Try again.");
 }
 
 async function exchangePreviewAccount(

@@ -1,6 +1,6 @@
 # @farm.js/react
 
-React renderer integration for FARMJS, including the opt-in AOT compiler.
+React renderer integration for FARMJS, including the experimental AOT compiler.
 
 React remains the default renderer and needs no package or configuration. Install this package only
 when opting into the compiler:
@@ -23,7 +23,7 @@ export default defineConfig({
 `compiler: true` uses inference: every application TSX/JSX component is considered, eligible
 components are compiled with hybrid reactivity, and everything else keeps the normal React path.
 
-The compiler stays off when this option is omitted or `false`. The former
+The compiler is experimental and stays off when this option is omitted or `false`. The former
 `react({ experimental: { compiler } })` spelling remains a deprecated alias with the same options
 and a one-time warning. Do not configure both spellings, even when one is `false`.
 

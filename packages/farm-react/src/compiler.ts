@@ -46,6 +46,8 @@ interface LocalBinding {
   kind: "derived" | "handler";
   name: string;
   value: t.Expression;
+  /** useState declarations that precede this binding in the component body. */
+  statesBefore: number;
 }
 
 interface PropsPlan {
@@ -4529,6 +4531,63 @@ function rewriteKeyedCollectionUpdateHints(
   };
 }
 
+// React handlers read state and props from the render that created them, even
+// after an await or inside a deferred callback. Compiled reads are live, so a
+// handler that can run code later reads each of them once, on entry.
+function snapshotDeferredHandlerReads(
+  root: t.JSXElement,
+  reactiveNames: ReadonlySet<string>,
+): t.JSXElement {
+  if (reactiveNames.size === 0) return root;
+  const file = expressionFile(t.cloneNode(root, true));
+  traverse(file, {
+    JSXAttribute(path) {
+      if (!t.isJSXIdentifier(path.node.name) || !/^on[A-Z]/.test(path.node.name.name)) return;
+      const value = path.get("value");
+      if (!value.isJSXExpressionContainer()) return;
+      const handler = value.get("expression");
+      if (!handler.isArrowFunctionExpression() && !handler.isFunctionExpression()) return;
+      let defers = false;
+      handler.traverse({
+        AwaitExpression(inner) {
+          defers = true;
+          inner.stop();
+        },
+        Function(inner) {
+          defers = true;
+          inner.stop();
+        },
+      });
+      if (!defers) return;
+      const snapshots = new Map<string, t.Identifier>();
+      handler.traverse({
+        ReferencedIdentifier(reference) {
+          const name = reference.node.name;
+          if (!reactiveNames.has(name) || reference.scope.hasBinding(name)) return;
+          let snapshot = snapshots.get(name);
+          if (!snapshot) {
+            snapshot = handler.scope.generateUidIdentifier(name);
+            snapshots.set(name, snapshot);
+          }
+          reference.replaceWith(t.cloneNode(snapshot));
+        },
+      });
+      if (snapshots.size === 0) return;
+      const declaration = t.variableDeclaration(
+        "const",
+        [...snapshots].map(([name, snapshot]) =>
+          t.variableDeclarator(snapshot, t.identifier(name)),
+        ),
+      );
+      const body = handler.node.body;
+      handler.node.body = t.isBlockStatement(body)
+        ? t.blockStatement([declaration, ...body.body], body.directives)
+        : t.blockStatement([declaration, t.returnStatement(body)]);
+    },
+  });
+  return (file.program.body[0] as t.ExpressionStatement).expression as t.JSXElement;
+}
+
 function rewriteStateAccess(
   expression: t.Expression,
   stateParameter: t.Identifier,
@@ -8734,31 +8793,46 @@ function analyzePropsParameter(
     };
   }
   if (!t.isObjectPattern(parameter)) {
-    return "components must use zero parameters, one props identifier, or flat object props destructuring";
+    return "components must use zero parameters, one props identifier, or object props destructuring";
   }
 
+  // The original parameter stays on the wrapper, which destructures (and
+  // applies defaults) exactly as React would and passes every bound name on.
   const localNames = new Set<string>();
-  for (const property of parameter.properties) {
-    if (t.isRestElement(property)) {
-      return "rest properties in component props destructuring are not supported yet";
+  const collect = (pattern: t.LVal | t.PatternLike | null): string | undefined => {
+    if (!pattern) return undefined;
+    if (t.isIdentifier(pattern)) {
+      if (localNames.has(pattern.name)) {
+        return "component props destructuring local names must be unique";
+      }
+      localNames.add(pattern.name);
+      return undefined;
     }
-    if (property.computed) {
-      return "computed component props destructuring is not supported yet";
+    if (t.isAssignmentPattern(pattern)) return collect(pattern.left);
+    if (t.isRestElement(pattern)) return collect(pattern.argument);
+    if (t.isArrayPattern(pattern)) {
+      for (const element of pattern.elements) {
+        const reason = collect(element);
+        if (reason) return reason;
+      }
+      return undefined;
     }
-    let local: t.Identifier | undefined;
-    if (t.isIdentifier(property.value)) {
-      local = property.value;
-    } else if (t.isAssignmentPattern(property.value) && t.isIdentifier(property.value.left)) {
-      local = property.value.left;
+    if (t.isObjectPattern(pattern)) {
+      for (const property of pattern.properties) {
+        if (t.isObjectProperty(property) && property.computed) {
+          return "computed component props destructuring is not supported yet";
+        }
+        const reason = collect(
+          t.isRestElement(property) ? property : (property.value as t.PatternLike),
+        );
+        if (reason) return reason;
+      }
+      return undefined;
     }
-    if (!local) {
-      return "nested component props destructuring is not supported yet";
-    }
-    if (localNames.has(local.name)) {
-      return "component props destructuring local names must be unique";
-    }
-    localNames.add(local.name);
-  }
+    return "components must use zero parameters, one props identifier, or object props destructuring";
+  };
+  const reason = collect(parameter);
+  if (reason) return reason;
 
   const definitionParameter = path.scope.generateUidIdentifier("props");
   return {
@@ -8925,13 +8999,14 @@ function compileCandidate(
     }
     if (t.isFunctionDeclaration(statement)) {
       if (!statement.id) return "named event handler declarations must have a name";
-      if (statement.async || statement.generator || statement.typeParameters) {
-        return `event handler ${statement.id.name} must be synchronous and non-generic`;
+      if (statement.generator || statement.typeParameters) {
+        return `event handler ${statement.id.name} must be a non-generator, non-generic function`;
       }
       locals.push({
         kind: "handler",
         name: statement.id.name,
         value: t.toExpression(t.cloneNode(statement, true)) as t.FunctionExpression,
+        statesBefore: states.length,
       });
       continue;
     }
@@ -8954,9 +9029,6 @@ function compileCandidate(
       ) {
         return "only const [value, setValue] = useState(initial) state declarations are supported";
       }
-      if (locals.length > 0) {
-        return "useState declarations must appear before derived local values and event handlers";
-      }
       states.push({
         valueName: declaration.id.elements[0].name,
         setterName: declaration.id.elements[1].name,
@@ -8969,19 +9041,21 @@ function compileCandidate(
       return "derived const values and event handlers must use one identifier and one expression";
     }
     if (t.isArrowFunctionExpression(declaration.init) || t.isFunctionExpression(declaration.init)) {
-      if (declaration.init.async || declaration.init.generator) {
-        return `event handler ${declaration.id.name} must be synchronous`;
+      if (declaration.init.generator) {
+        return `event handler ${declaration.id.name} cannot be a generator`;
       }
       locals.push({
         kind: "handler",
         name: declaration.id.name,
         value: declaration.init,
+        statesBefore: states.length,
       });
     } else {
       locals.push({
         kind: "derived",
         name: declaration.id.name,
         value: declaration.init,
+        statesBefore: states.length,
       });
     }
   }
@@ -9005,6 +9079,21 @@ function compileCandidate(
         ))
     ) {
       return "useState initializers cannot reference another local binding";
+    }
+  }
+  for (const binding of locals) {
+    // Handlers run after render, but a derived value is read where it is
+    // declared: React would throw for a state declared after it.
+    if (
+      binding.kind === "derived" &&
+      states.some(
+        (state) =>
+          state.index >= binding.statesBefore &&
+          (referencesIdentifier(binding.value, state.valueName) ||
+            referencesIdentifier(binding.value, state.setterName)),
+      )
+    ) {
+      return `derived local ${binding.name} reads a useState declared after it`;
     }
   }
   const derivedByName = new Map<string, t.Expression>();
@@ -9036,8 +9125,12 @@ function compileCandidate(
   const handlerRewrite = rewriteHandlerAccess(rootWithDerived, handlersByName);
   if (handlerRewrite.reason) return handlerRewrite.reason;
   if (!handlerRewrite.root) return "event handlers could not be prepared safely";
-  const expandedRootWithDeferredEvents = rewriteDestructuredPropAccess(
+  const snapshotRoot = snapshotDeferredHandlerReads(
     handlerRewrite.root,
+    new Set([...states.map((state) => state.valueName), ...propsPlan.destructuredNames]),
+  );
+  const expandedRootWithDeferredEvents = rewriteDestructuredPropAccess(
+    snapshotRoot,
     propsPlan.destructuredNames,
     propsPlan.definitionParameter,
   );

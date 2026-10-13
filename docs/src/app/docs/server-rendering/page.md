@@ -206,7 +206,7 @@ The export must be one of these static string literals so Farm can analyze it wi
 application code. Without an explicit route-level `island` export, a route that imports client
 boundaries with different strategies safely falls back to `load` because its current route-level
 React-compatible root cannot schedule those children independently. Keep interactive leaves small today; a
-eligible leaves can also use Farm's opt-in React compiler for direct state binding updates
+eligible leaves can also use Farm's experimental React compiler for direct state binding updates
 after their independent roots mount.
 
 ### Async pages and client components

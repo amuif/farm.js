@@ -403,6 +403,60 @@ program
     }
   });
 
+const gatewayOption = [
+  "--gateway <url>",
+  "Advanced: override the hosted Farm Preview gateway URL",
+  process.env.FARM_PREVIEW_GATEWAY_URL,
+];
+
+program
+  .command("login")
+  .description("Sign in to Farm Preview without starting a preview")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { loginToFarmPreview } = require("../dist/index.js");
+      await loginToFarmPreview({ root: options.root, gatewayUrl: options.gateway });
+    } catch (error) {
+      console.error("Failed to sign in:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("logout")
+  .description("Sign out of Farm Preview on this machine")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { logoutOfFarmPreview } = require("../dist/index.js");
+      await logoutOfFarmPreview({ root: options.root, gatewayUrl: options.gateway });
+    } catch (error) {
+      console.error("Failed to sign out:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("whoami")
+  .description("Show which credential farm preview uses")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { whoamiFarmPreview } = require("../dist/index.js");
+      // Exits 1 when farm preview would need a browser sign-in, for scripts.
+      if (!(await whoamiFarmPreview({ root: options.root, gatewayUrl: options.gateway }))) {
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error("Failed to check sign-in:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 program
   .command("migrate [source]")
   .description("Run one-shot migration commands or migrate from another framework")
