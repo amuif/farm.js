@@ -6259,7 +6259,7 @@ function createHostConditionalBlockComponent(
     private schedulePropSync(): void {
       if (this.propSyncQueued) return;
       this.propSyncQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.propSyncQueued = false;
         if (this.mounted && !this.state.fallback) {
           this.listen();
@@ -6790,6 +6790,26 @@ function reorderCompilerKeyedRows(
     }
   }
   restoreCompilerFocus(activeElement);
+}
+
+const RESOLVED_COMPILER_MICROTASK = Promise.resolve();
+
+/**
+ * Runs `callback` as a microtask, in the same queue and order as `queueMicrotask`. Every compiled
+ * update schedules one, and in Chrome a reaction on an already-resolved promise skips the binding
+ * and async-task bookkeeping `queueMicrotask` pays per call. A throw is rethrown through
+ * `queueMicrotask` so it is reported as an uncaught error, not an unhandled rejection.
+ */
+function scheduleCompilerMicrotask(callback: () => void): void {
+  void RESOLVED_COMPILER_MICROTASK.then(() => {
+    try {
+      callback();
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  });
 }
 
 function compilerFocusedElement(root: Element): Element | null {
@@ -10285,7 +10305,7 @@ function createKeyedRowsBlockComponentCore(
     private schedulePropSync(): void {
       if (this.propSyncQueued) return;
       this.propSyncQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.propSyncQueued = false;
         if (this.mounted && !this.state.fallback) {
           this.listen();
@@ -12074,7 +12094,7 @@ export function createCompiledComponentWithFeatures<Props>(
       this.captureInputSelection();
       if (!this.mounted || this.flushQueued) return;
       this.flushQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.flushQueued = false;
         this.flushBindingUpdates();
       });
