@@ -81,7 +81,7 @@ test("uses concise labels for CLI template choices", async () => {
   const source = await readFile(path.join(packageDir, "src/index.ts"), "utf8");
 
   assert.match(source, /title: "Basic starter"/);
-  assert.match(source, /title: "React Compiler starter"/);
+  assert.match(source, /title: "React Compiler starter \(experimental\)"/);
   assert.match(source, /title: "Auth starter"/);
   assert.match(source, /title: "Better Auth starter"/);
   assert.match(source, /title: "Stripe starter"/);
@@ -340,7 +340,7 @@ test("generates a buildable starter application", async () => {
   }
 });
 
-test("generates the opt-in React Compiler starter with the shared dark starter UI", async () => {
+test("generates the experimental React Compiler starter with the shared dark starter UI", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-react-compiler-"));
 
   try {
@@ -404,8 +404,8 @@ test("generates the opt-in React Compiler starter with the shared dark starter U
     const page = await readFile(path.join(generatedDir, "src/app/page.tsx"), "utf8");
     assert.match(page, /className="landing-main"/);
     assert.match(page, /FARMJS \/ React Compiler starter/);
-    assert.match(page, />Opt-in<\/span>/);
-    assert.doesNotMatch(page, />Experimental<\/span>/);
+    assert.match(page, />Experimental<\/span>/);
+    assert.doesNotMatch(page, />Opt-in<\/span>/);
     assert.match(page, /The compiler handles the rest\./);
     assert.match(page, /data-compiler-status/);
     assert.match(page, /publicEnv\.FARM_REACT_COMPILER_ENABLED/);
@@ -452,8 +452,7 @@ test("generates the opt-in React Compiler starter with the shared dark starter U
     assert.match(generatedWorkspace, /^minimumReleaseAgeExclude:$/m);
     assert.match(generatedWorkspace, /^  - "@farm\.js\/\*"$/m);
 
-    assert.match(output, /React AOT compiler is opt-in/);
-    assert.doesNotMatch(output, /starter \(experimental\)/);
+    assert.match(output, /React AOT compiler is experimental/);
     assert.match(output, /pnpm experiment/);
   } finally {
     await rm(tempDir, { recursive: true, force: true });

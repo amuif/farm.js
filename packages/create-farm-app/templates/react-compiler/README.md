@@ -1,11 +1,11 @@
 # FARMJS React Compiler Starter
 
-A focused starter for FARMJS's opt-in React AOT compiler. It uses the same minimal dark shell
+A focused starter for FARMJS's experimental React AOT compiler. It uses the same minimal dark shell
 as the other Create FARMJS App starters and includes one live comparison: an eligible local state
 update beside ordinary React reconciliation.
 
-> The compiler is opt-in. Unsupported component shapes stay on React, so the optimization is
-> never required for correctness.
+> The compiler is experimental and opt-in. Unsupported component shapes stay on React, so the
+> optimization is never required for correctness.
 
 ## Create this starter
 
