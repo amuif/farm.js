@@ -33,6 +33,7 @@ afterEach(async () => {
   });
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function trackRowIndexWrites() {
@@ -49,6 +50,27 @@ function trackRowIndexWrites() {
     return original.call(this, key, value);
   });
   return writes;
+}
+
+function trackCopiedRowEntries() {
+  const copies = { count: 0 };
+  const NativeMap = globalThis.Map;
+  vi.stubGlobal(
+    "Map",
+    new Proxy(NativeMap, {
+      construct(target, args) {
+        const source = args[0];
+        if (
+          source instanceof NativeMap &&
+          source.values().next().value?.element instanceof Element
+        ) {
+          copies.count += source.size;
+        }
+        return Reflect.construct(target, args, target);
+      },
+    }),
+  );
+  return copies;
 }
 
 function harness(reactivity: "static" | "hybrid") {
@@ -149,6 +171,81 @@ async function change(fn: () => void) {
 describe("keyed-row delegated element index", () => {
   for (const reactivity of ["static", "hybrid"] as const) {
     for (const lifecycle of ["mount", "hydrate"] as const) {
+      it.each(["none", "delegated"] as const)(
+        `${reactivity}/${lifecycle}: appends without copying retained rows or reindexing them in %s mode`,
+        async (mode) => {
+          const h = harness(reactivity);
+          const Table = createCompiledComponent(h.definition(mode));
+          const container = document.createElement("div");
+          document.body.append(container);
+          const content = (
+            <StrictMode>
+              <Table />
+            </StrictMode>
+          );
+          if (lifecycle === "hydrate") container.innerHTML = renderToString(content);
+          await act(async () => {
+            const root =
+              lifecycle === "hydrate" ? hydrateRoot(container, content) : createRoot(container);
+            roots.push(root);
+            if (lifecycle === "mount") root.render(content);
+          });
+          const retained = [...container.querySelectorAll<HTMLButtonElement>("button")];
+          retained[32].focus();
+          const writes = trackRowIndexWrites();
+          const copies = trackCopiedRowEntries();
+          await change(() => {
+            for (let index = 0; index < 2; index += 1) {
+              h.update(
+                (items) =>
+                  createCompilerKeyedArrayAppend(items, [
+                    ...items,
+                    { id: `added-${index}`, label: `Added ${index}` },
+                  ]) as Item[],
+              );
+            }
+          });
+          expect(copies.count).toBe(0);
+          expect(writes.count).toBe(mode === "delegated" ? 2 : 0);
+          const rows = [...container.querySelectorAll<HTMLButtonElement>("button")];
+          expect(rows).toHaveLength(66);
+          expect(retained.every((row, index) => rows[index] === row)).toBe(true);
+          expect(rows.slice(64).map((row) => row.textContent)).toEqual(["Added 0", "Added 1"]);
+          expect(document.activeElement).toBe(retained[32]);
+          if (mode === "delegated") {
+            await change(() => {
+              retained[32].click();
+              rows[64].click();
+              rows[65].click();
+            });
+            expect(h.calls).toEqual(["Row 32:32:32", "Added 0:64:added-0", "Added 1:65:added-1"]);
+          }
+          // Empty and later appends must not reuse an earlier append's index delta.
+          writes.count = 0;
+          await change(() =>
+            h.update((items) => createCompilerKeyedArrayAppend(items, [...items]) as Item[]),
+          );
+          expect(writes.count).toBe(0);
+          await change(() =>
+            h.update(
+              (items) =>
+                createCompilerKeyedArrayAppend(items, [
+                  ...items,
+                  { id: "later", label: "Later" },
+                ]) as Item[],
+            ),
+          );
+          expect(copies.count).toBe(0);
+          expect(writes.count).toBe(mode === "delegated" ? 1 : 0);
+          if (mode === "delegated") {
+            await change(() =>
+              container.querySelector<HTMLButtonElement>('[data-key="later"]')!.click(),
+            );
+            expect(h.calls.at(-1)).toBe("Later:66:later");
+          }
+        },
+      );
+
       it.each(["none", "empty", "direct", "missing-path", "delegated"] as const)(
         `${reactivity}/${lifecycle}: indexes only incoming delegated rolling-window rows in %s mode`,
         async (mode) => {
@@ -309,6 +406,7 @@ describe("keyed-row delegated element index", () => {
       let retained = container.querySelector('[data-key="32"]');
       const writes = trackRowIndexWrites();
       let staleReactRows = false;
+      let refreshIndex = 0;
       for (const mode of ["delegated", "direct", "empty", "delegated"] as const) {
         writes.count = 0;
         await change(() => {
@@ -322,6 +420,26 @@ describe("keyed-row delegated element index", () => {
         retained = adopted;
         if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
         else expect(writes.count).toBe(0);
+        writes.count = 0;
+        const appendedId = `refresh-${refreshIndex++}`;
+        await change(() =>
+          h.update(
+            (items) =>
+              createCompilerKeyedArrayAppend(items, [
+                ...items,
+                { id: appendedId, label: "After refresh" },
+              ]) as Item[],
+          ),
+        );
+        expect(writes.count).toBe(mode === "delegated" ? 1 : 0);
+        if (mode !== "empty") {
+          await change(() =>
+            container.querySelector<HTMLButtonElement>(`[data-key="${appendedId}"]`)!.click(),
+          );
+          expect(h.calls.at(-1)).toBe(
+            `After refresh:${container.querySelectorAll("button").length - 1}:${appendedId}`,
+          );
+        }
         writes.count = 0;
         await change(() => h.update((items) => items.slice(1)));
         expect(container.querySelector('[data-key="32"]')).toBe(retained);

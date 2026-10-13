@@ -2,7 +2,7 @@ import React, { StrictMode, useState } from "react";
 import { act } from "react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCompiledComponentWithFeatures,
   createCompilerKeyedArrayAppend,
@@ -45,6 +45,7 @@ afterEach(async () => {
     for (const root of roots.splice(0)) root.unmount();
   });
   document.body.replaceChildren();
+  vi.restoreAllMocks();
 });
 
 async function flushCompilerUpdates(): Promise<void> {
@@ -444,6 +445,86 @@ function createAppendHarness(
 }
 
 describe("compiled keyed-array append hints", () => {
+  it.each([
+    ["key", "id", 1],
+    ["descriptor", "label", 1],
+    ["binding", "label", 2],
+    ["committed duplicate", "id", 0],
+    ["incoming duplicate", "id", 0],
+  ] as const)(
+    "keeps the owned map and DOM untouched when append preparation rejects a %s",
+    async (phase, field, failAt) => {
+      const maps = new Set<Map<unknown, { element: Element }>>();
+      const originalSet = Map.prototype.set;
+      vi.spyOn(Map.prototype, "set").mockImplementation(
+        function (this: Map<unknown, unknown>, key, value) {
+          if (value?.element instanceof Element)
+            maps.add(this as Map<unknown, { element: Element }>);
+          return originalSet.call(this, key, value);
+        },
+      );
+      const harness = createAppendHarness([{ id: "a", label: "Alpha" }]);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<harness.Inventory />));
+      const retained = container.querySelector("li")!;
+      const ownedMaps = [...maps].filter((map) =>
+        [...map.values()].some((row) => row.element === retained),
+      );
+      expect(ownedMaps.length).toBeGreaterThan(0);
+      let reads = 0;
+      let snapshot: { sizes: number[]; rows: Element[] } | undefined;
+      const rejected: Item = { id: "c", label: "Gamma" };
+      Object.defineProperty(rejected, field, {
+        get() {
+          reads += 1;
+          if (reads === (failAt || 1)) {
+            snapshot = {
+              sizes: ownedMaps.map((map) => map.size),
+              rows: [...container.querySelectorAll("li")],
+            };
+            if (failAt) throw new Error(`Rejected ${phase}`);
+          }
+          if (phase === "committed duplicate") return "a";
+          if (phase === "incoming duplicate") return "b";
+          return field === "id" ? "c" : "Gamma";
+        },
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      await act(async () => {
+        harness.append([{ id: "b", label: "Beta" }, rejected]);
+        await flushCompilerUpdates();
+      });
+      expect(snapshot).toEqual({ sizes: ownedMaps.map(() => 1), rows: [retained] });
+      expect([...container.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
+        "Alpha",
+        "Beta",
+        "Gamma",
+      ]);
+      if (failAt) {
+        expect(container.querySelector("li")).toBe(retained);
+        expect(errors).not.toHaveBeenCalled();
+      } else {
+        // Duplicate keys deliberately hand the complete list back to React.
+        expect(harness.counters.listRenders).toBeGreaterThan(1);
+        expect(errors.mock.calls.every((args) => String(args[0]).includes("same key"))).toBe(true);
+      }
+      // Recovery must not retain a detached, partially prepared row in the map.
+      await act(async () => {
+        harness.append([{ id: "d", label: "Delta" }]);
+        await flushCompilerUpdates();
+      });
+      expect([...container.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
+        "Alpha",
+        "Beta",
+        "Gamma",
+        "Delta",
+      ]);
+    },
+  );
+
   it("creates only appended rows while preserving every existing DOM identity", async () => {
     const initialItems = Array.from(
       { length: 2_048 },
