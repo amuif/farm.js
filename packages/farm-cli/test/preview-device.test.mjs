@@ -189,7 +189,7 @@ test("FARMJS_API_KEY never goes to a GitHub sign-in gateway or another Infrastru
   for (const [env, config] of [
     // The hosted gateway still signs in with GitHub, which has no idea what an API key is.
     [{ FARMJS_API_KEY: "farmjs_fixture_key" }, { provider: "github", issuer: undefined }],
-    // An API key belongs to one installation; the default is https://infra.farmjs.dev.
+    // An API key belongs to one installation; the default is https://app.farmjs.dev.
     [{ FARMJS_API_KEY: "farmjs_fixture_key" }, {}],
     [{ FARMJS_API_KEY: "farmjs_fixture_key", FARMJS_API_URL: "https://other.example.com" }, {}],
   ]) {
@@ -203,7 +203,7 @@ test("FARMJS_API_KEY never goes to a GitHub sign-in gateway or another Infrastru
 });
 
 test("FARM_PREVIEW_TOKEN still works, deprecated, and can't disagree with FARMJS_API_KEY", () => {
-  const infra = { provider: "device", issuer: "https://infra.farmjs.dev/api/auth" };
+  const infra = { provider: "device", issuer: "https://app.farmjs.dev/api/auth" };
   const warnings = [];
   const warn = (message) => warnings.push(message);
   assert.deepEqual(

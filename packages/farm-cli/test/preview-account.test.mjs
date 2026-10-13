@@ -100,7 +100,7 @@ test("whoami reports the credential farm preview would use, never a whole key", 
   assert.equal(elsewhere.using, undefined);
   assert.match(
     elsewhere.ignoredKey,
-    /for https:\/\/infra\.farmjs\.dev, but this gateway signs in through https:\/\/infra\.example\.com/,
+    /for https:\/\/app\.farmjs\.dev, but this gateway signs in through https:\/\/infra\.example\.com/,
   );
 
   // An Infrastructure sign-in is opaque, and the deprecated variable is only reported.

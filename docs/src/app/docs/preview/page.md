@@ -442,7 +442,7 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 | `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                       |
 | `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                            |
 | `FARMJS_API_KEY`                | Farm.js Infrastructure API key. Signs previews in without a browser on a gateway that uses that Infrastructure. |
-| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://infra.farmjs.dev`.                                       |
+| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://app.farmjs.dev`.                                         |
 | `FARM_PREVIEW_TOKEN`            | Deprecated. Use `FARMJS_API_KEY`. Still accepted, with a warning.                                               |
 | `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                             |
 
