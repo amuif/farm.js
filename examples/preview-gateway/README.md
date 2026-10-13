@@ -46,7 +46,7 @@ vercel integration add upstash/upstash-kv \
 The integration injects `REDIS_URL`. Without it, the WebSocket relay uses only the current Function's memory, which is suitable for local development but not multi-instance Vercel traffic.
 The same Redis connection enforces a shared per-client limit on managed login exchanges. A production
 deployment with managed authentication enabled refuses to start without `REDIS_URL`, `KV_URL`, or
-`UPSTASH_REDIS_URL` so GitHub token verification cannot be exposed without shared abuse control.
+`UPSTASH_REDIS_URL` so API key verification cannot be exposed without shared abuse control.
 
 ### Compatibility polling storage
 
@@ -81,25 +81,24 @@ FARM_PREVIEW_GATEWAY_URL=https://preview.farmjs.dev
 
 ### Managed developer login
 
-#### Farm.js Infrastructure mode
-
-To use Farm.js Infrastructure API keys and first-party browser device approval, configure:
+Developers preview with a Farm.js Infrastructure API key: `FARMJS_API_KEY`, or the key
+`farm login` gets them by signing in at app.farmjs.dev. Turn managed login on with two secrets:
 
 ```txt
-FARM_INFRA_URL=https://your-infra.example.com
-FARM_PREVIEW_GATEWAY_SECRET=<separate-random-secret-at-least-32-bytes>
 FARM_PREVIEW_AUTH_SECRET=<gateway-signing-secret-at-least-32-bytes>
+FARM_PREVIEW_GATEWAY_SECRET=<separate-random-secret-at-least-32-bytes>
 ```
 
 Set the identical `FARM_PREVIEW_GATEWAY_SECRET` in Infra. It authenticates the private
 identity/activity backchannel; it is not a developer API key and must never reach the
-CLI or browser. `FARM_INFRA_URL` must be an HTTPS origin (loopback HTTP works locally).
-The integration never follows redirects carrying credentials.
+CLI or browser. Infra is `https://app.farmjs.dev`; `FARM_INFRA_URL` overrides it only for a
+local or self-hosted Infra (HTTPS, or loopback HTTP). The integration never follows redirects
+carrying credentials.
 
 Apply Infra's auth, API-key, and preview schema migrations **before** deploying and
 enabling this gateway mode. Production auth includes a database-backed rate limiter.
-Ship the compatible CLI update as well: older clients do not understand the new
-`device` provider. Keep the existing Redis and Blob configuration described above.
+Ship the compatible CLI update as well: older clients do not understand the `device`
+provider. Keep the existing Redis and Blob configuration described above.
 
 The gateway verifies API keys/device credentials with Infra on every grant. The signed
 grant contains the verified owner, preview name, and expiry. Only that short-lived grant
@@ -125,24 +124,9 @@ expired less than seven days ago. Configure the maintenance POST described in th
 README to physically delete expired sessions and their request records. This gateway
 does not automatically provision that scheduler.
 
-#### Legacy GitHub mode
-
-Leave `FARM_INFRA_URL` unset to retain the existing GitHub flow:
-
-Create a GitHub OAuth app with Device Flow enabled. Configure its public client id and a private Farm
-signing secret:
-
-```bash
-openssl rand -hex 32
-vercel env add FARM_PREVIEW_GITHUB_CLIENT_ID production
-vercel env add FARM_PREVIEW_AUTH_SECRET production
-```
-
-The signing secret must contain at least 32 bytes and must not be distributed to CLI users. When
-both variables are present, the gateway exchanges a verified GitHub device login for an opaque Farm
-account token, then issues a name-bound, expiring grant for each preview. Set
+The signing secret must contain at least 32 bytes and must not be distributed to CLI users. Set
 `FARM_PREVIEW_DEFAULT_TTL_MS` and `FARM_PREVIEW_MAX_TTL_MS` to override the default one-hour and
-maximum 24-hour lifetimes. Set both auth variables or neither; a partial setup fails at startup.
+maximum 24-hour lifetimes.
 
 The included Redis limiter trusts `x-forwarded-for` only when Vercel's `VERCEL=1` runtime marker is
 present, because Vercel overwrites that header at the edge. If the marker or client address is

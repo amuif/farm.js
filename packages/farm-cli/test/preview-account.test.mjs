@@ -24,18 +24,23 @@ const infra = {
 };
 const github = { ...infra, provider: "github", issuer: undefined, clientId: "github-client" };
 const key = "farmjs_secretsecretsecretsecretsecret00";
+const savedKey = "farmjs_saved_key_0123456789abcdef0123";
 
 /** The shape the gateway signs after a GitHub sign-in: prefix.payload.signature. */
 function accountToken(claims) {
   return `fp1.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
 }
 
-function runtime({ config, saved, signOut = () => Response.json({ signedOut: true }) } = {}) {
+function runtime({
+  config,
+  saved,
+  keyResponse = () => Response.json({ key: savedKey }, { status: 201 }),
+} = {}) {
   const store = new Map(saved ? [[gatewayUrl, saved]] : []);
-  const signOuts = [];
+  const keyRequests = [];
   return {
     store,
-    signOuts,
+    keyRequests,
     interactive: true,
     credentials: {
       async get(url) {
@@ -56,9 +61,12 @@ function runtime({ config, saved, signOut = () => Response.json({ signedOut: tru
       return undefined;
     },
     async fetch(url, init) {
-      if (url === "https://infra.example.com/api/previews/sign-out") {
-        signOuts.push(init.headers.authorization);
-        return signOut();
+      if (url === "https://infra.example.com/api/previews/key") {
+        keyRequests.push({
+          authorization: init.headers.authorization,
+          body: JSON.parse(init.body),
+        });
+        return keyResponse();
       }
       if (url.endsWith("/api/auth/config"))
         return config ? Response.json(config) : new Response(null, { status: 404 });
@@ -116,63 +124,51 @@ test("whoami reports the credential farm preview would use, never a whole key", 
   assert.deepEqual(legacy.using, { source: "FARM_PREVIEW_TOKEN" });
 });
 
-test("login saves a sign-in without starting a preview, and logout ends it", async () => {
+test("login saves an API key from Infrastructure, and logout only forgets it here", async () => {
   const r = runtime({ config: infra });
   assert.deepEqual(await signInToPreviewGateway(gatewayUrl, r), {
     login: "your Farm.js Infrastructure account",
   });
-  assert.equal(r.store.get(gatewayUrl), "device-session");
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, r), { removed: true, ended: true });
-  assert.deepEqual(r.signOuts, ["Bearer device-session"]);
+  // The approved device sign-in is exchanged once for a key, and only the key is kept.
+  assert.equal(r.keyRequests.length, 1);
+  assert.equal(r.keyRequests[0].authorization, "Bearer device-session");
+  assert.match(r.keyRequests[0].body.name, /^Farm CLI on /);
+  assert.equal(r.store.get(gatewayUrl), savedKey);
+  assert.deepEqual((await previewSignInStatus(gatewayUrl, r, {})).using, {
+    source: "saved",
+    hint: "farmjs_save…",
+  });
+  // Logging out asks Infrastructure for nothing: the key stays valid there.
+  assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), true);
   assert.equal(r.store.has(gatewayUrl), false);
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, r), { removed: false, ended: false });
-  assert.equal(r.signOuts.length, 1);
+  assert.equal(r.keyRequests.length, 1);
+  assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), false);
   await assert.rejects(signInToPreviewGateway(gatewayUrl, runtime()), /doesn't use sign-in/);
 });
 
-test("logout forgets a sign-in the server can't end", async () => {
-  // A GitHub sign-in is signed by the gateway, so there is no session to end anywhere.
-  const saved = accountToken({ kind: "account", provider: "github", login: "sam" });
-  const githubRuntime = runtime({ config: github, saved });
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, githubRuntime), {
-    removed: true,
-    ended: false,
+test("login saves nothing when Infrastructure can't make a key", async () => {
+  const full = runtime({
+    config: infra,
+    keyResponse: () =>
+      Response.json(
+        { message: "Revoke one in Farm.js Infrastructure, then run farm login again." },
+        { status: 409 },
+      ),
   });
-  // Nor is one sent to Infrastructure after the gateway switches to it.
-  const switched = runtime({ config: infra, saved });
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, switched), {
-    removed: true,
-    ended: false,
+  await assert.rejects(
+    signInToPreviewGateway(gatewayUrl, full),
+    /Revoke one in Farm\.js Infrastructure/,
+  );
+  assert.equal(full.store.size, 0);
+  const older = runtime({
+    config: infra,
+    keyResponse: () => new Response("Not found", { status: 404 }),
   });
-  assert.deepEqual(switched.signOuts, []);
-
-  for (const [signOut, error] of [
-    [() => new Response(null, { status: 503 }), "Farm.js Infrastructure answered 503"],
-    // An Infrastructure from before the sign-out endpoint.
-    [() => new Response("Not found", { status: 404 }), "Farm.js Infrastructure answered 404"],
-    // What Better Auth's own /sign-out says for a token it can't see.
-    [() => Response.json({ success: true }), "Farm.js Infrastructure didn't confirm the sign-out"],
-    [() => new Response("<!doctype html>"), "Farm.js Infrastructure didn't confirm the sign-out"],
-  ]) {
-    const failing = runtime({ config: infra, saved: "device-session", signOut });
-    assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, failing), {
-      removed: true,
-      ended: false,
-      error,
-    });
-    assert.equal(failing.store.has(gatewayUrl), false);
-  }
-
-  const offline = runtime({ saved: "device-session" });
-  offline.fetch = async () => {
-    throw new Error("fetch failed");
-  };
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, offline), {
-    removed: true,
-    ended: false,
-    error: "fetch failed",
-  });
-  assert.equal(offline.store.has(gatewayUrl), false);
+  await assert.rejects(
+    signInToPreviewGateway(gatewayUrl, older),
+    /couldn't create an API key \(404\)/,
+  );
+  assert.equal(older.store.size, 0);
 });
 
 test("farm whoami and farm logout run end to end against a gateway", async () => {

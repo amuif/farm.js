@@ -26,7 +26,13 @@ test("access checks send only verified grant metadata and reject incomplete or u
 });
 
 test("Infra backchannel requires a safe origin and a separate secret", () => {
-  assert.equal(createInfraPreviewIntegration({}), undefined);
+  // app.farmjs.dev unless FARM_INFRA_URL overrides it, and never without the shared secret.
+  assert.equal(
+    createInfraPreviewIntegration({ FARM_PREVIEW_GATEWAY_SECRET: env.FARM_PREVIEW_GATEWAY_SECRET })!
+      .deviceAuth.issuer,
+    "https://app.farmjs.dev/api/auth",
+  );
+  assert.throws(() => createInfraPreviewIntegration({}), /FARM_PREVIEW_GATEWAY_SECRET/);
   for (const FARM_INFRA_URL of [
     "http://public.example.com",
     "https://user:pass@infra.example.com",

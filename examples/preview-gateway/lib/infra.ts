@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { PreviewManagedAuthOptions, PreviewGatewayObserver, PreviewSessionAccess } from "@farm.js/preview-gateway";
 
+/** Where Farm.js Infrastructure lives; FARM_INFRA_URL only overrides it, for local testing. */
+const DEFAULT_INFRA_URL = "https://app.farmjs.dev";
+
 /** Private backchannel; account credentials are used only for verification. */
 export function createInfraPreviewIntegration(
   env: Record<string, string | undefined>,
   request: typeof fetch = fetch,
   waitUntil: (promise: Promise<unknown>) => void = () => {},
 ) {
-  if (!env.FARM_INFRA_URL) return undefined;
-  const url = new URL(env.FARM_INFRA_URL);
+  const url = new URL(env.FARM_INFRA_URL || DEFAULT_INFRA_URL);
   if (
     (url.protocol !== "https:" &&
       !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) ||

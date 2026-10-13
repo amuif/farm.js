@@ -27,22 +27,14 @@ export async function loginToFarmPreview(options: PreviewAccountOptions = {}) {
   logger.success(`Signed in to Farm Preview as ${login}.`);
 }
 
-/** farm logout. API keys are never revoked here; they are managed in Farm.js Infrastructure. */
+/** farm logout. Only this machine forgets the key; it stays valid in Farm.js Infrastructure. */
 export async function logoutOfFarmPreview(options: PreviewAccountOptions = {}) {
   await loadPreviewEnvironment(options.root, options.configPath);
   const gatewayUrl = resolvePreviewGatewayUrl(options.gatewayUrl);
-  const result = await signOutOfPreviewGateway(gatewayUrl);
-  if (!result.removed) {
-    logger.info(`No saved sign-in for ${gatewayUrl}.`);
-  } else if (result.ended) {
-    logger.success(`Signed out of ${gatewayUrl} and ended the Farm.js Infrastructure session.`);
-  } else {
+  if (await signOutOfPreviewGateway(gatewayUrl)) {
     logger.success(`Signed out of ${gatewayUrl} on this machine.`);
-    if (result.error) {
-      logger.warn(
-        `Couldn't end the sign-in on the server (${result.error}). It stays valid until it expires.`,
-      );
-    }
+  } else {
+    logger.info(`No saved sign-in for ${gatewayUrl}.`);
   }
   if (process.env.FARMJS_API_KEY?.trim()) {
     logger.info(
@@ -70,6 +62,8 @@ export async function whoamiFarmPreview(options: PreviewAccountOptions = {}): Pr
     logger.info(
       `Using FARM_PREVIEW_TOKEN, which is deprecated${status.mode === "infrastructure" ? ". Set FARMJS_API_KEY instead" : ""}.`,
     );
+  } else if (using.hint) {
+    logger.info(`Signed in with a saved API key (${using.hint}).`);
   } else {
     const until = using.expiresAt ? `, until ${formatPreviewExpiration(using.expiresAt)}` : "";
     logger.info(`Signed in as ${using.login ?? "your saved account"}${until}.`);

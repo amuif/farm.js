@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
@@ -296,7 +296,10 @@ export async function previewSignInStatus(
         : {}),
     };
   } else if (saved) {
-    status.using = { source: "saved", ...accountClaims(saved) };
+    status.using = {
+      source: "saved",
+      ...(saved.startsWith("farmjs_") ? { hint: `${saved.slice(0, 11)}…` } : accountClaims(saved)),
+    };
   }
   return status;
 }
@@ -316,43 +319,14 @@ export async function signInToPreviewGateway(
   return { login: account.user.login };
 }
 
-/**
- * farm logout: forget this machine's saved sign-in for the gateway. A Farm.js
- * Infrastructure sign-in is a session, so it is ended there too; a GitHub sign-in
- * is a token the gateway signed, with no session to end. Infrastructure has no
- * Better Auth bearer plugin, so its own /sign-out would answer 200 and end nothing:
- * the session is ended through Infrastructure's preview sign-out endpoint instead.
- */
+/** farm logout: forget this machine's saved sign-in. A saved API key stays valid in Infrastructure. */
 export async function signOutOfPreviewGateway(
   gatewayUrl: string,
-  runtime: Pick<PreviewAuthRuntime, "credentials" | "fetch"> = createDefaultPreviewAuthRuntime(),
-): Promise<{ removed: boolean; ended: boolean; error?: string }> {
-  const token = await runtime.credentials.get(gatewayUrl);
-  if (!token) return { removed: false, ended: false };
-  let ended = false;
-  let error: string | undefined;
-  try {
-    const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
-    if (config.enabled && config.provider === "device" && !accountClaims(token)) {
-      const response = await runtime.fetch(`${deviceIssuer(config).origin}/api/previews/sign-out`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-        signal: AbortSignal.timeout(10_000),
-        redirect: "error",
-      });
-      if (!response.ok) throw new Error(`Farm.js Infrastructure answered ${response.status}`);
-      // Only an explicit answer counts, never a 200 from some other page.
-      const body = (await response.json().catch(() => undefined)) as { signedOut?: unknown };
-      if (body?.signedOut !== true)
-        throw new Error("Farm.js Infrastructure didn't confirm the sign-out");
-      ended = true;
-    }
-  } catch (cause) {
-    error = cause instanceof Error ? cause.message : String(cause);
-  }
-  // Forgotten either way: a sign-in the server couldn't end still leaves this machine.
+  runtime: Pick<PreviewAuthRuntime, "credentials"> = createDefaultPreviewAuthRuntime(),
+): Promise<boolean> {
+  if (!(await runtime.credentials.get(gatewayUrl))) return false;
   await runtime.credentials.delete(gatewayUrl);
-  return { removed: true, ended, ...(error ? { error } : {}) };
+  return true;
 }
 
 /** The login and expiry inside a GitHub sign-in account token, or undefined for any other token. */
@@ -365,7 +339,7 @@ function accountClaims(token: string): { login?: string; expiresAt?: number } | 
       ...(Number.isSafeInteger(claims.expiresAt) ? { expiresAt: claims.expiresAt } : {}),
     };
   } catch {
-    // An Infrastructure sign-in is an opaque session token.
+    // A Farm.js Infrastructure API key carries no claims.
     return undefined;
   }
 }
@@ -455,7 +429,7 @@ async function loginWithPreviewDeviceFlow(
       result.expires_in! > 0
     )
       return {
-        token: result.access_token,
+        token: await createPreviewApiKey(issuer.origin, result.access_token, runtime.fetch),
         expiresAt: Date.now() + result.expires_in! * 1000,
         user: { login: "your Farm.js Infrastructure account" },
       };
@@ -470,6 +444,29 @@ async function loginWithPreviewDeviceFlow(
     throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
   }
   throw new Error("Farm.js Infrastructure sign-in expired. Try again to get a new code.");
+}
+
+/** Infrastructure turns the approved sign-in into an API key, the one credential the CLI keeps. */
+async function createPreviewApiKey(origin: string, deviceToken: string, request: typeof fetch) {
+  const response = await request(`${origin}/api/previews/key`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${deviceToken}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({ name: `Farm CLI on ${hostname()}`.slice(0, 64) }),
+    signal: AbortSignal.timeout(10_000),
+    redirect: "error",
+  });
+  const body = (await response.json().catch(() => ({}))) as { key?: unknown; message?: unknown };
+  if (response.status === 201 && typeof body.key === "string" && body.key.startsWith("farmjs_"))
+    return body.key;
+  throw new Error(
+    response.status === 409 && typeof body.message === "string"
+      ? body.message
+      : `Farm.js Infrastructure couldn't create an API key (${response.status}). Run farm login again.`,
+  );
 }
 
 export function parsePreviewDuration(value: string | number | undefined): number | undefined {
