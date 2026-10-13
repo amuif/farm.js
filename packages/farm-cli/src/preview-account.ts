@@ -25,8 +25,9 @@ const MODE_LABELS = {
 export async function loginToFarmPreview(options: PreviewAccountOptions = {}) {
   await loadPreviewEnvironment(options.root, options.configPath);
   try {
-    const { login } = await signInToPreviewGateway(resolvePreviewGatewayUrl(options.gatewayUrl));
-    logger.success(`Signed in to Farm Preview as ${login}.`);
+    await signInToPreviewGateway(resolvePreviewGatewayUrl(options.gatewayUrl), undefined, {
+      root: options.root,
+    });
   } catch (error) {
     // Saying no is a choice, not a failure.
     if (!(error instanceof PreviewApiKeyDeclinedError)) throw error;

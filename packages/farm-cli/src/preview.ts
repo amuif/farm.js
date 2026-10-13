@@ -91,6 +91,7 @@ export async function previewFarm(options: PreviewFarmOptions = {}): Promise<Pre
     const authorizedPlan = await authorizePreviewGatewayPlan(plan, {
       expiresInMs,
       forceLogin: options.login,
+      root: options.root,
     });
     logger.info(`Relay: ${authorizedPlan.relayUrl}`);
     logger.info("Opening native Farm preview tunnel...");

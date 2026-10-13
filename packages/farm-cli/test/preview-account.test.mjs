@@ -36,11 +36,18 @@ function runtime({
   saved,
   keyResponse = () => Response.json({ key: savedKey }, { status: 201 }),
   answer = true,
+  pick,
 } = {}) {
   const store = new Map(saved ? [[gatewayUrl, saved]] : []);
   const keyRequests = [];
   const questions = [];
+  const offered = [];
   return {
+    offered,
+    async chooseProject(projects) {
+      offered.push(projects);
+      return pick === undefined ? undefined : projects[pick];
+    },
     store,
     keyRequests,
     questions,
@@ -153,6 +160,53 @@ test("login saves an API key from Infrastructure, and logout only forgets it her
   assert.equal(r.keyRequests.length, 1);
   assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), false);
   await assert.rejects(signInToPreviewGateway(gatewayUrl, runtime()), /doesn't use sign-in/);
+});
+
+test("after signing in, a picked project is saved to the app's .env", async () => {
+  const previous = process.env.FARMJS_PROJECT_ID;
+  delete process.env.FARMJS_PROJECT_ID;
+  const roots = [];
+  const tempRoot = async () => {
+    roots.push(await fs.mkdtemp(path.join(os.tmpdir(), "farm-login-project-")));
+    return roots.at(-1);
+  };
+  const projects = [
+    { id: "project_1", name: "Storefront", organization: "Acme" },
+    { id: "project_2", name: "Docs", organization: "Acme" },
+  ];
+  // A malformed id is never offered: it would be written into .env.
+  const keyResponse = () =>
+    Response.json(
+      { key: savedKey, projects: [...projects, { id: "bad\nX=1", name: "Injected" }] },
+      { status: 201 },
+    );
+  try {
+    const root = await tempRoot();
+    await fs.writeFile(path.join(root, ".env"), "OTHER=1");
+    const picked = runtime({ config: infra, keyResponse, pick: 1 });
+    await signInToPreviewGateway(gatewayUrl, picked, { root });
+    assert.deepEqual(picked.offered, [projects]);
+    assert.equal(
+      await fs.readFile(path.join(root, ".env"), "utf8"),
+      "OTHER=1\nFARMJS_PROJECT_ID=project_2\n",
+    );
+    // An app that already names its project isn't asked again.
+    const again = runtime({ config: infra, keyResponse, pick: 0 });
+    await signInToPreviewGateway(gatewayUrl, again, { root });
+    assert.deepEqual(again.offered, []);
+
+    // Skipping writes nothing.
+    delete process.env.FARMJS_PROJECT_ID;
+    const skipped = await tempRoot();
+    const skip = runtime({ config: infra, keyResponse });
+    await signInToPreviewGateway(gatewayUrl, skip, { root: skipped });
+    assert.equal(skip.offered.length, 1);
+    await assert.rejects(fs.readFile(path.join(skipped, ".env")), { code: "ENOENT" });
+  } finally {
+    if (previous === undefined) delete process.env.FARMJS_PROJECT_ID;
+    else process.env.FARMJS_PROJECT_ID = previous;
+    await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true })));
+  }
 });
 
 test("answering no creates and saves nothing", async () => {

@@ -47,6 +47,9 @@ function fixture(options = {}) {
     async confirm() {
       return true;
     },
+    async chooseProject() {
+      return undefined;
+    },
     async promptDuration() {
       assert.ok(options.cached || saved.length);
       return 7200_000;
