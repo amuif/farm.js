@@ -271,3 +271,41 @@ test("the CI error only suggests an API key where the gateway accepts one", asyn
     );
   });
 });
+
+test("beside GitHub sign-in, FARMJS_API_KEY is the opt-in into Infrastructure", async () => {
+  const dual = {
+    provider: "github",
+    clientId: "github-client",
+    scope: "read:user",
+    issuer: undefined,
+    dashboardUrl: undefined,
+    infrastructure: {
+      issuer: "https://infra.example.com/api/auth",
+      dashboardUrl: "https://infra.example.com/dashboard/previews",
+    },
+  };
+  const options = (f) => ({ runtime: f.runtime, expiresInMs: 60000 });
+  // Opted in: the key signs the preview in, no browser, and its dashboard link is shown.
+  await withEnv(
+    { FARMJS_API_KEY: "farmjs_fixture_key", FARMJS_API_URL: "https://infra.example.com" },
+    async () => {
+      const f = fixture({ config: dual, interactive: false });
+      const authorized = await authorizePreviewGatewayPlan(plan, options(f));
+      assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer farmjs_fixture_key");
+      assert.equal(authorized.dashboardUrl, "https://infra.example.com/dashboard/previews");
+      assert.equal(f.opened.length, 0);
+    },
+  );
+  await withEnv({}, async () => {
+    // Not opted in: the GitHub sign-in as before, with no Infrastructure dashboard link.
+    const f = fixture({ config: dual, cached: "saved-github-login" });
+    const authorized = await authorizePreviewGatewayPlan(plan, options(f));
+    assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer saved-github-login");
+    assert.equal(authorized.dashboardUrl, undefined);
+    // CI has no browser for GitHub, so it is pointed at the key.
+    await assert.rejects(
+      authorizePreviewGatewayPlan(plan, options(fixture({ config: dual, interactive: false }))),
+      /set FARMJS_API_KEY to a Farm\.js Infrastructure API key/,
+    );
+  });
+});

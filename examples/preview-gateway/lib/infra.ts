@@ -28,6 +28,9 @@ export function createInfraPreviewIntegration(
       "FARM_PREVIEW_GATEWAY_SECRET must contain at least 32 bytes and match Farm.js Infrastructure.",
     );
   const headers = { "content-type": "application/json", "x-farm-gateway-token": secret };
+  // With GitHub sign-in also on, Infrastructure is an opt-in: only previews started
+  // with one of its credentials are reported to it or checked by it.
+  const alongsideGitHub = !!env.FARM_PREVIEW_GITHUB_CLIENT_ID;
   const deviceAuth: NonNullable<PreviewManagedAuthOptions["deviceAuth"]> = {
     issuer: `${url.origin}/api/auth`,
     clientId: "farm-preview",
@@ -102,13 +105,17 @@ export function createInfraPreviewIntegration(
           transport,
         });
       },
-      request(event) {
+      request({ ownerId, ...event }) {
+        // An unknown owner is only safe to report when every preview is Infrastructure's.
+        if (ownerId ? !ownerId.startsWith("device:") : alongsideGitHub) return;
         send(event.sessionId, { type: "request", id: randomUUID(), ...event });
       },
     };
   }
   async function authorizeSession(session: PreviewSessionAccess) {
-    if (!session.ownerId?.startsWith("device:") || !session.grantId || !session.expiresAt) return false;
+    // A GitHub preview is the gateway's own to authorize, as without Infrastructure.
+    if (!session.ownerId?.startsWith("device:")) return alongsideGitHub;
+    if (!session.grantId || !session.expiresAt) return false;
     const response = await request(`${url.origin}/api/previews/access`, {
       method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(5000),
       body: JSON.stringify({ userId: session.ownerId.slice(7), grantId: session.grantId,

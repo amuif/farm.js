@@ -43,7 +43,7 @@ vercel integration add upstash/upstash-kv \
   -m autoUpgrade=false
 ```
 
-The integration injects `REDIS_URL`. Without it, the WebSocket relay uses only the current Function's memory, which is suitable for local development but not multi-instance Vercel traffic.
+The integration injects `REDIS_URL`. Without it, the WebSocket relay uses only the current Function's memory, which is suitable for local development but not multi-instance Vercel traffic. Redis also keeps each preview's owner beside its name, so a request answered by another Function instance is still attributed to the right owner (and only Infra-owned previews are reported to Infra).
 The same Redis connection enforces a shared per-client limit on managed login exchanges. A production
 deployment with managed authentication enabled refuses to start without `REDIS_URL`, `KV_URL`, or
 `UPSTASH_REDIS_URL` so GitHub token verification cannot be exposed without shared abuse control.
@@ -91,6 +91,13 @@ FARM_PREVIEW_GATEWAY_SECRET=<separate-random-secret-at-least-32-bytes>
 FARM_PREVIEW_AUTH_SECRET=<gateway-signing-secret-at-least-32-bytes>
 ```
 
+Keep `FARM_PREVIEW_GITHUB_CLIENT_ID` (see the GitHub mode below) set as well to make Infra an
+opt-in: GitHub stays the sign-in for everyone, and developers who set `FARMJS_API_KEY` get
+Infra verification, access checks and dashboard activity for those previews only. GitHub
+previews are never checked by or reported to Infra. The public config stays
+`provider: "github"` and nests Infra under `infrastructure`, so older CLIs keep signing in
+with GitHub. Without the GitHub client id, Infra's device login replaces GitHub.
+
 Set the identical `FARM_PREVIEW_GATEWAY_SECRET` in Infra. It authenticates the private
 identity/activity backchannel; it is not a developer API key and must never reach the
 CLI or browser. `FARM_INFRA_URL` must be an HTTPS origin (loopback HTTP works locally).
@@ -99,7 +106,8 @@ The integration never follows redirects carrying credentials.
 Apply Infra's auth, API-key, and preview schema migrations **before** deploying and
 enabling this gateway mode. Production auth includes a database-backed rate limiter.
 Ship the compatible CLI update as well: older clients do not understand the new
-`device` provider. Keep the existing Redis and Blob configuration described above.
+`device` provider. In opt-in mode they keep working with GitHub and need the update only
+to use keys. Keep the existing Redis and Blob configuration described above.
 
 The gateway verifies API keys/device credentials with Infra on every grant. The signed
 grant contains the verified owner, preview name, and expiry. Only that short-lived grant

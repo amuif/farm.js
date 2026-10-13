@@ -16,6 +16,8 @@ export interface PreviewAuthPublicConfig {
   provider?: "github" | "device";
   issuer?: string;
   dashboardUrl?: string;
+  /** A GitHub sign-in gateway that also accepts Farm.js Infrastructure API keys, as an opt-in. */
+  infrastructure?: { issuer: string; dashboardUrl?: string };
   clientId?: string;
   scope?: string;
   defaultSessionTtlMs: number;
@@ -66,8 +68,10 @@ export function previewCredentialFromEnvironment(
   const key = env.FARMJS_API_KEY?.trim() || undefined;
   if (
     key &&
-    config.provider === "device" &&
-    sameOrigin(config.issuer, env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)
+    sameOrigin(
+      previewInfrastructure(config)?.issuer,
+      env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL,
+    )
   ) {
     if (legacy && legacy !== key) {
       throw new Error(
@@ -84,6 +88,13 @@ export function previewCredentialFromEnvironment(
     );
   }
   return { token: legacy, source: "FARM_PREVIEW_TOKEN" };
+}
+
+/** The Farm.js Infrastructure a gateway takes credentials from: its sign-in, or an opt-in beside GitHub. */
+function previewInfrastructure(config: PreviewAuthPublicConfig) {
+  if (config.provider === "device")
+    return config.issuer ? { issuer: config.issuer, dashboardUrl: config.dashboardUrl } : undefined;
+  return config.infrastructure;
 }
 
 function sameOrigin(left: string | undefined, right: string) {
@@ -166,8 +177,22 @@ export async function authorizePreviewGatewayPlan(
     relayToken: grant.token,
     expiresAt: grant.expiresAt,
     expiresInMs,
-    ...(config.dashboardUrl ? { dashboardUrl: config.dashboardUrl } : {}),
+    ...(dashboardUrlFor(config, environment)
+      ? { dashboardUrl: dashboardUrlFor(config, environment) }
+      : {}),
   };
+}
+
+/** Beside GitHub sign-in, only a preview started with an Infrastructure key is on its dashboard. */
+function dashboardUrlFor(
+  config: PreviewAuthPublicConfig,
+  environment: PreviewEnvironmentCredential | undefined,
+) {
+  if (config.provider === "github" && config.infrastructure)
+    return environment?.source === "FARMJS_API_KEY"
+      ? config.infrastructure.dashboardUrl
+      : undefined;
+  return config.dashboardUrl;
 }
 
 export async function loadPreviewAuthConfig(
@@ -225,6 +250,15 @@ export async function loadPreviewAuthConfig(
     throw new Error("Invalid Farm Preview device issuer.");
   if (config.dashboardUrl && safeAuthUrl(config.dashboardUrl).search)
     throw new Error("Invalid Farm Preview dashboard URL.");
+  if (
+    config.infrastructure !== undefined &&
+    (typeof config.infrastructure !== "object" ||
+      typeof config.infrastructure?.issuer !== "string" ||
+      safeAuthUrl(config.infrastructure.issuer).search ||
+      (config.infrastructure.dashboardUrl !== undefined &&
+        safeAuthUrl(config.infrastructure.dashboardUrl).search))
+  )
+    throw new Error("Invalid Farm Preview Infrastructure configuration.");
   return { ...config, controlAuth: config.controlAuth ?? "bearer" };
 }
 
@@ -260,6 +294,8 @@ export interface PreviewSignInStatus {
   savedOverridden: boolean;
   /** Why FARMJS_API_KEY is set but not used, when it is. */
   ignoredKey?: string;
+  /** A GitHub sign-in gateway that also takes Farm.js Infrastructure API keys. */
+  acceptsInfrastructureKeys?: boolean;
 }
 
 /** Which credential farm preview would use for this gateway, from its public config only. */
@@ -275,16 +311,17 @@ export async function previewSignInStatus(
   const environment = previewCredentialFromEnvironment(config, env, () => {});
   const saved = await runtime.credentials.get(gatewayUrl);
   const keyIgnored = !!env.FARMJS_API_KEY?.trim() && environment?.source !== "FARMJS_API_KEY";
+  const infrastructure = previewInfrastructure(config);
   const status: PreviewSignInStatus = {
     gatewayUrl,
     mode,
     savedOverridden: !!environment && !!saved,
+    ...(mode === "github" && infrastructure ? { acceptsInfrastructureKeys: true } : {}),
     ...(keyIgnored
       ? {
-          ignoredKey:
-            mode === "github"
-              ? "this gateway uses GitHub sign-in, which doesn't accept API keys"
-              : `it's for ${originOf(env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)}, but this gateway signs in through ${originOf(config.issuer)}`,
+          ignoredKey: !infrastructure
+            ? "this gateway uses GitHub sign-in, which doesn't accept API keys"
+            : `it's for ${originOf(env.FARMJS_API_URL?.trim() || DEFAULT_INFRA_URL)}, but this gateway signs in through ${originOf(infrastructure.issuer)}`,
         }
       : {}),
   };
@@ -394,7 +431,9 @@ async function loginWithPreviewDeviceFlow(
     throw new Error(
       config.provider === "device"
         ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://infra.farmjs.dev), or sign in once from an interactive terminal."
-        : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
+        : config.infrastructure
+          ? `This preview gateway's sign-in needs a browser, so CI and non-interactive terminals need a key: set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at ${DEFAULT_INFRA_URL}).`
+          : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);
   const issuer = deviceIssuer(config);

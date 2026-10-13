@@ -99,3 +99,119 @@ test("device grants honor the shared limiter before verifying credentials", asyn
   assert.equal(response.headers.get("retry-after"), "2");
   assert.equal(verifications, 0);
 });
+test("beside GitHub sign-in, takes Infra API keys as an opt-in and keeps GitHub the default", async () => {
+  const verified = [];
+  const handler = createPreviewGatewayHandler({
+    store: new MemoryPreviewGatewayStore(),
+    auth: {
+      signingSecret,
+      githubClientId: "github-client",
+      dashboardUrl: "https://infra.example.com/dashboard/previews",
+      deviceAuth: {
+        issuer: "https://infra.example.com/api/auth",
+        clientId: "farm-preview",
+        async authorizeAccount(token) {
+          verified.push(token);
+          return token === "farmjs_valid"
+            ? { subject: "owner-1", login: "Owner", keyId: "key_1" }
+            : null;
+        },
+      },
+      async fetch(url) {
+        assert.equal(url, "https://api.github.com/user");
+        return Response.json({ id: 42, login: "sam", name: "Sam" });
+      },
+    },
+  });
+  const post = (path, body, token) =>
+    handler(
+      new Request(`https://preview.example.com${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  const config = await (
+    await handler(new Request("https://preview.example.com/api/auth/config"))
+  ).json();
+  // GitHub stays the sign-in; Infrastructure is nested, so older CLIs never see its dashboard.
+  assert.equal(config.provider, "github");
+  assert.equal(config.clientId, "github-client");
+  assert.equal(config.dashboardUrl, undefined);
+  assert.deepEqual(config.infrastructure, {
+    issuer: "https://infra.example.com/api/auth",
+    dashboardUrl: "https://infra.example.com/dashboard/previews",
+  });
+
+  const exchange = await post("/api/auth/exchange", { provider: "github", accessToken: "gho_x" });
+  assert.equal(exchange.status, 200);
+  const account = await exchange.json();
+  const github = await (await post("/api/tunnel/grants", { name: "docs" }, account.token)).json();
+  const githubClaims = verifyPreviewTunnelGrant(github.token, { signingSecret, name: "docs" });
+  assert.equal(githubClaims.provider, "github");
+  assert.equal(githubClaims.subject, "42");
+  // A GitHub sign-in is the gateway's own token and never goes to Infrastructure.
+  assert.deepEqual(verified, []);
+
+  const keyed = await (await post("/api/tunnel/grants", { name: "docs" }, "farmjs_valid")).json();
+  const keyedClaims = verifyPreviewTunnelGrant(keyed.token, { signingSecret, name: "docs" });
+  assert.equal(keyedClaims.provider, "device");
+  assert.equal(keyedClaims.subject, "owner-1");
+  assert.equal(keyedClaims.keyId, "key_1");
+  assert.equal((await post("/api/tunnel/grants", { name: "docs" }, "farmjs_revoked")).status, 401);
+  assert.deepEqual(verified, ["farmjs_valid", "farmjs_revoked"]);
+});
+test("reports the verified owner with each proxied request", async () => {
+  const requests = [];
+  const handler = createPreviewGatewayHandler({
+    store: new MemoryPreviewGatewayStore(),
+    auth: {
+      signingSecret,
+      deviceAuth: {
+        issuer: "https://infra.example.com/api/auth",
+        clientId: "farm-preview",
+        authorizeAccount: async () => ({ subject: "owner-1", login: "Owner" }),
+      },
+    },
+    observer: { request: (event) => requests.push(event) },
+  });
+  const call = (url, init = {}) => handler(new Request(url, init));
+  const json = { "content-type": "application/json" };
+  const grant = await (
+    await call("https://preview.example.com/api/tunnel/grants", {
+      method: "POST",
+      headers: { ...json, authorization: "Bearer farmjs_key" },
+      body: JSON.stringify({ name: "docs" }),
+    })
+  ).json();
+  const session = await (
+    await call("https://preview.example.com/api/sessions", {
+      method: "POST",
+      headers: { ...json, authorization: `Bearer ${grant.token}` },
+      body: JSON.stringify({ name: "docs" }),
+    })
+  ).json();
+  const control = { authorization: `Bearer ${session.token}` };
+  const visit = call(`${session.publicUrl}/page`);
+  const poll = await (
+    await call(`https://preview.example.com/api/sessions/${session.id}/requests?wait=1000`, {
+      headers: control,
+    })
+  ).json();
+  await call(
+    `https://preview.example.com/api/sessions/${session.id}/responses/${poll.requests[0].id}`,
+    {
+      method: "POST",
+      headers: { ...control, ...json },
+      body: JSON.stringify({ status: 200, headers: {}, body: "ok" }),
+    },
+  );
+  assert.equal((await visit).status, 200);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].ownerId, "device:owner-1");
+  assert.equal(requests[0].path, "/page");
+});

@@ -5,7 +5,11 @@ export interface PreviewManagedAuthOptions {
   signingSecret: string;
   /** Public client id for the Farming Labs GitHub OAuth app. */
   githubClientId?: string;
-  /** First-party device login. Omit to preserve GitHub account authentication. */
+  /**
+   * Farm.js Infrastructure credentials. Alone, it replaces GitHub with Infrastructure's
+   * device login. With githubClientId too, GitHub stays the sign-in and Infrastructure
+   * credentials (API keys) are accepted as well, for developers who opt into it.
+   */
   deviceAuth?: {
     issuer: string;
     clientId: string;
@@ -96,14 +100,30 @@ export function getPreviewAuthPublicConfig(options: PreviewManagedAuthOptions) {
   return {
     enabled: true as const,
     controlAuth: "bearer" as const,
-    ...(options.deviceAuth
+    ...(options.deviceAuth && !options.githubClientId
       ? {
           provider: "device" as const,
           clientId: options.deviceAuth.clientId,
           issuer: options.deviceAuth.issuer,
+          ...(options.dashboardUrl ? { dashboardUrl: options.dashboardUrl } : {}),
         }
-      : { provider: "github" as const, clientId: options.githubClientId, scope: "read:user" }),
-    ...(options.dashboardUrl ? { dashboardUrl: options.dashboardUrl } : {}),
+      : {
+          provider: "github" as const,
+          clientId: options.githubClientId,
+          scope: "read:user",
+          // Nested, so a CLI that predates it keeps GitHub sign-in and never shows an
+          // Infrastructure dashboard link for a GitHub preview.
+          ...(options.deviceAuth
+            ? {
+                infrastructure: {
+                  issuer: options.deviceAuth.issuer,
+                  ...(options.dashboardUrl ? { dashboardUrl: options.dashboardUrl } : {}),
+                },
+              }
+            : options.dashboardUrl
+              ? { dashboardUrl: options.dashboardUrl }
+              : {}),
+        }),
     defaultSessionTtlMs: durations.defaultSessionTtlMs,
     maxSessionTtlMs: durations.maxSessionTtlMs,
   };
@@ -114,7 +134,7 @@ export async function exchangeGitHubPreviewToken(
   options: PreviewManagedAuthOptions,
 ): Promise<{ token: string; expiresAt: number; user: PreviewAccountIdentity }> {
   validatePreviewAuthOptions(options);
-  if (options.deviceAuth)
+  if (!options.githubClientId)
     throw new PreviewAuthError(400, "Use the configured device sign-in flow.");
   if (!providerToken || providerToken.length > 4096) {
     throw new PreviewAuthError(400, "A GitHub access token is required.");
@@ -325,7 +345,10 @@ export async function authorizePreviewAccount(
   token: string,
   options: PreviewManagedAuthOptions,
 ): Promise<PreviewAccountClaims> {
-  if (!options.deviceAuth) return verifyPreviewAccountToken(token, options);
+  // Alongside GitHub, the gateway's own account tokens are GitHub sign-ins; anything
+  // else is an Infrastructure credential for Infrastructure to verify.
+  if (!options.deviceAuth || (options.githubClientId && token?.startsWith(`${TOKEN_PREFIX}.`)))
+    return verifyPreviewAccountToken(token, options);
   if (!token || token.length > 4096) throw new PreviewAuthError(401, "Invalid preview credential.");
   let account;
   try {

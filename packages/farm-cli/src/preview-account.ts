@@ -55,13 +55,16 @@ export async function logoutOfFarmPreview(options: PreviewAccountOptions = {}) {
 export async function whoamiFarmPreview(options: PreviewAccountOptions = {}): Promise<boolean> {
   await loadPreviewEnvironment(options.root, options.configPath);
   const status = await previewSignInStatus(resolvePreviewGatewayUrl(options.gatewayUrl));
-  logger.info(`Preview gateway: ${status.gatewayUrl} (${MODE_LABELS[status.mode]})`);
+  const label = status.acceptsInfrastructureKeys
+    ? "GitHub sign-in, or a Farm.js Infrastructure API key"
+    : MODE_LABELS[status.mode];
+  logger.info(`Preview gateway: ${status.gatewayUrl} (${label})`);
   const using = status.using;
   if (status.mode === "none") {
     logger.info("Previews here don't need an account.");
   } else if (!using) {
     logger.info(
-      `Not signed in. Run farm login${status.mode === "infrastructure" ? ", or set FARMJS_API_KEY" : ""}.`,
+      `Not signed in. Run farm login${status.mode === "infrastructure" || status.acceptsInfrastructureKeys ? ", or set FARMJS_API_KEY" : ""}.`,
     );
   } else if (using.source === "FARMJS_API_KEY") {
     logger.info(`Using FARMJS_API_KEY (${using.hint}).`);

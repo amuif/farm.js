@@ -142,6 +142,8 @@ export interface PersistentPreviewRelayObserver {
   }): void | Promise<void>;
   request?(event: {
     sessionId: string;
+    /** The session's owner, so an observer can skip previews that aren't its own. */
+    ownerId?: string;
     method: string;
     path: string;
     status: number;
@@ -167,6 +169,8 @@ export type PersistentPreviewRelayFallbackHandler = (
 export interface PersistentPreviewRelayCoordinatorSession {
   id: string;
   name: string;
+  /** Stored with the claim so another relay instance can attribute forwarded requests. */
+  ownerId?: string;
 }
 
 export interface PersistentPreviewRelayCoordinator {
@@ -339,6 +343,9 @@ export function createPersistentPreviewRelay(options: PersistentPreviewRelayOpti
           observe(() =>
             options.observer!.request!({
               sessionId: (activeLocalSession || coordinatedSession)!.id,
+              ...((activeLocalSession || coordinatedSession)!.ownerId
+                ? { ownerId: (activeLocalSession || coordinatedSession)!.ownerId }
+                : {}),
               method: request.method || "GET",
               path: route.path.split(/[?#]/, 1)[0].slice(0, 2048),
               status: response.writableFinished ? response.statusCode : 499,

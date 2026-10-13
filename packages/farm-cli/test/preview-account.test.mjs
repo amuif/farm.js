@@ -218,3 +218,35 @@ test("farm whoami and farm logout run end to end against a gateway", async () =>
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("whoami shows when a GitHub gateway also takes Infrastructure keys", async () => {
+  const dual = {
+    ...github,
+    infrastructure: {
+      issuer: "https://infra.example.com/api/auth",
+      dashboardUrl: "https://infra.example.com/dashboard/previews",
+    },
+  };
+  const status = (env) => previewSignInStatus(gatewayUrl, runtime({ config: dual }), env);
+  const optedIn = await status({
+    FARMJS_API_KEY: key,
+    FARMJS_API_URL: "https://infra.example.com",
+  });
+  assert.equal(optedIn.mode, "github");
+  assert.equal(optedIn.acceptsInfrastructureKeys, true);
+  assert.deepEqual(optedIn.using, { source: "FARMJS_API_KEY", hint: "farmjs_secr…" });
+  const plain = await status({});
+  assert.equal(plain.acceptsInfrastructureKeys, true);
+  assert.equal(plain.using, undefined);
+  const elsewhere = await status({ FARMJS_API_KEY: key });
+  assert.match(
+    elsewhere.ignoredKey,
+    /but this gateway signs in through https:\/\/infra\.example\.com/,
+  );
+  // A plain GitHub gateway still says it takes no keys.
+  const githubOnly = await previewSignInStatus(gatewayUrl, runtime({ config: github }), {
+    FARMJS_API_KEY: key,
+  });
+  assert.equal(githubOnly.acceptsInfrastructureKeys, undefined);
+  assert.match(githubOnly.ignoredKey, /doesn't accept API keys/);
+});

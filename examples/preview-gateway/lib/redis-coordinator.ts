@@ -14,6 +14,7 @@ const QUEUE_TTL_MS = 60_000;
 
 const TOUCH_SESSION_SCRIPT = `
   if redis.call("GET", KEYS[1]) == ARGV[1] then
+    redis.call("PEXPIRE", KEYS[2], ARGV[2])
     return redis.call("PEXPIRE", KEYS[1], ARGV[2])
   end
   return 0
@@ -21,7 +22,7 @@ const TOUCH_SESSION_SCRIPT = `
 
 const RELEASE_SESSION_SCRIPT = `
   if redis.call("GET", KEYS[1]) == ARGV[1] then
-    return redis.call("DEL", KEYS[1])
+    return redis.call("DEL", KEYS[1], KEYS[2])
   end
   return 0
 `;
@@ -42,19 +43,27 @@ export class RedisPreviewRelayCoordinator implements PersistentPreviewRelayCoord
 
   async claimSession(session: PersistentPreviewRelayCoordinatorSession, ttlMs: number) {
     const result = await this.redis.set(this.nameKey(session.name), session.id, "PX", ttlMs, "NX");
-    return result === "OK";
+    if (result !== "OK") return false;
+    // The owner lets another instance attribute forwarded requests. It is only
+    // observability metadata, so failing to store it never fails the claim.
+    await (session.ownerId
+      ? this.redis.set(this.ownerKey(session.name), session.ownerId, "PX", ttlMs)
+      : this.redis.del(this.ownerKey(session.name))
+    ).catch(() => undefined);
+    return true;
   }
 
   async findSession(name: string) {
-    const id = await this.redis.get(this.nameKey(name));
-    return id ? { id, name } : undefined;
+    const [id, ownerId] = await this.redis.mget(this.nameKey(name), this.ownerKey(name));
+    return id ? { id, name, ...(ownerId ? { ownerId } : {}) } : undefined;
   }
 
   async touchSession(session: PersistentPreviewRelayCoordinatorSession, ttlMs: number) {
     const result = await this.redis.eval(
       TOUCH_SESSION_SCRIPT,
-      1,
+      2,
       this.nameKey(session.name),
+      this.ownerKey(session.name),
       session.id,
       ttlMs,
     );
@@ -62,7 +71,13 @@ export class RedisPreviewRelayCoordinator implements PersistentPreviewRelayCoord
   }
 
   async releaseSession(session: PersistentPreviewRelayCoordinatorSession) {
-    await this.redis.eval(RELEASE_SESSION_SCRIPT, 1, this.nameKey(session.name), session.id);
+    await this.redis.eval(
+      RELEASE_SESSION_SCRIPT,
+      2,
+      this.nameKey(session.name),
+      this.ownerKey(session.name),
+      session.id,
+    );
   }
 
   async publishRequest(
@@ -115,6 +130,10 @@ export class RedisPreviewRelayCoordinator implements PersistentPreviewRelayCoord
 
   private nameKey(name: string) {
     return `${KEY_PREFIX}:names:${name}`;
+  }
+
+  private ownerKey(name: string) {
+    return `${KEY_PREFIX}:owners:${name}`;
   }
 
   private requestKey(sessionId: string) {

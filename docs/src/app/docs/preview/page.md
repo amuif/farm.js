@@ -61,26 +61,33 @@ developer to sign in again. Pass `--login`, or run `farm login`, to replace that
 omitting `--expires` prompts for a duration and defaults to one hour. In CI and other
 non-interactive terminals, the hosted default is used.
 
-### Farm.js Infrastructure authentication and dashboard
+### Farm.js Infrastructure: opt-in observability
 
-Gateways configured with `FARM_INFRA_URL` use your Farm.js Infrastructure account instead of the
-legacy GitHub device flow. You do not need to link GitHub in the dashboard.
+`farm preview` works on its own. The native tunnel and GitHub sign-in need no Farm.js
+Infrastructure account, and nothing about those previews is sent to Infrastructure.
 
-1. With a Farm.js Infrastructure API key in `FARMJS_API_KEY`, the same key analytics uses,
-   the CLI signs in with it and never opens a browser. It reads the key from your shell or
-   your CI secrets, and from the app's `.env` files the way `farm dev` does. Set
-   `FARMJS_API_URL` too if Infrastructure isn't at `https://infra.farmjs.dev`: the key is
-   only sent to a gateway that signs in through that Infrastructure.
-2. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
+Infrastructure is an opt-in for teams that want a dashboard of their previews: request
+activity, project grouping, revocable API keys for CI, and **Stop preview**. To opt in, create
+an API key at [app.farmjs.dev](https://app.farmjs.dev) and set it as `FARMJS_API_KEY`, the same
+key analytics uses, in your shell, your CI secrets, or the app's `.env` files (read the way
+`farm dev` reads them). The CLI then signs previews in with the key, never opens a browser, and
+prints a dashboard link for each one. It only sends the key to a gateway that accepts keys from
+that Infrastructure, and `farm whoami` shows whether yours does. Set `FARMJS_API_URL` too if
+Infrastructure isn't at `https://app.farmjs.dev`.
+
+A self-hosted gateway configured with only `FARM_INFRA_URL` uses Infrastructure as its sign-in
+instead of GitHub:
+
+1. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
    for you to confirm the matching code and explicitly authorize your terminal.
-3. Return to the CLI. Choose the preview duration when prompted, or pass `--expires`.
-4. Once the tunnel is ready, the CLI prints its public URL and a dashboard link.
+2. Return to the CLI. Choose the preview duration when prompted, or pass `--expires`.
+3. Once the tunnel is ready, the CLI prints its public URL and a dashboard link.
 
 CI never waits for browser approval: set `FARMJS_API_KEY`, otherwise the command fails
 with instructions. For CI, create a key restricted to the preview's project, with an
 expiry, rather than an account-wide key. `FARM_PREVIEW_TOKEN` is deprecated: it still works
-and prints a warning, and `FARMJS_API_KEY` replaces it. The hosted gateway still uses GitHub
-sign-in, which doesn't accept API keys. Device approval signs the first-party CLI into your Infra account;
+and prints a warning, and `FARMJS_API_KEY` replaces it. A gateway that only uses GitHub
+sign-in ignores the key and signs in with GitHub as usual. Device approval signs the first-party CLI into your Infra account;
 the saved credential is a Better Auth session token, not a third-party OAuth access token.
 The gateway verifies that credential or API key whenever it issues a new, name-scoped
 grant. A grant cannot outlive the verified account session or API key expiry. API keys
@@ -390,8 +397,11 @@ not the GitHub client secret and must never be placed on developer machines. Set
 or neither; a partial setup fails during gateway startup. `FARM_PREVIEW_DEFAULT_TTL_MS` and
 `FARM_PREVIEW_MAX_TTL_MS` optionally control the default and maximum hosted durations.
 
-Alternatively, connect a Farm.js Infrastructure installation with `FARM_INFRA_URL` and
-`FARM_PREVIEW_GATEWAY_SECRET` on the gateway. Set the same backchannel secret on Infra,
+To connect a Farm.js Infrastructure installation, set `FARM_INFRA_URL` and
+`FARM_PREVIEW_GATEWAY_SECRET` on the gateway. With `FARM_PREVIEW_GITHUB_CLIENT_ID` also set,
+GitHub stays the sign-in and Infrastructure API keys are accepted as an opt-in: previews
+started with GitHub are never checked by or reported to Infrastructure. Without it,
+Infrastructure replaces GitHub sign-in. Set the same backchannel secret on Infra,
 and keep `FARM_PREVIEW_AUTH_SECRET` only on the gateway. Infra must have its auth,
 API-key, and preview-activity migrations applied before switching the gateway's provider.
 See the gateway example README for the deployment order and activity cleanup contract.

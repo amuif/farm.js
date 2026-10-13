@@ -118,3 +118,38 @@ test("activity delivery stays ordered, throttles heartbeats, and retries session
   assert.equal(payloads[1].id, payloads[2].id);
   assert.ok(!JSON.stringify(payloads).includes(env.FARM_PREVIEW_GATEWAY_SECRET));
 });
+
+test("beside GitHub sign-in, only Infrastructure-owned previews are checked or reported", async () => {
+  const calls: { path: string; body: Record<string, unknown> }[] = [];
+  const work: Promise<unknown>[] = [];
+  const integration = createInfraPreviewIntegration(
+    { ...env, FARM_PREVIEW_GITHUB_CLIENT_ID: "github-client" },
+    (async (url, init) => {
+      calls.push({ path: new URL(String(url)).pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ allowed: true });
+    }) as typeof fetch,
+    (promise) => work.push(promise),
+  )!;
+  const expiresAt = Date.now() + 60_000;
+  const session = { id: "s", name: "docs", grantId: "g", expiresAt };
+  // A GitHub preview is the gateway's own to authorize, without asking Infrastructure.
+  assert.equal(await integration.authorizeSession({ ...session, ownerId: "github:42" }), true);
+  assert.equal(calls.length, 0);
+  assert.equal(await integration.authorizeSession({ ...session, ownerId: "device:owner" }), true);
+  assert.equal(calls[0].path, "/api/previews/access");
+
+  const observer = integration.observer("polling");
+  const request = { sessionId: "s", method: "GET", path: "/x", status: 200, durationMs: 1, at: expiresAt };
+  observer.session?.({ ...session, ownerId: "github:42", publicUrl: "https://docs.example.com", state: "connected", at: expiresAt });
+  observer.request?.({ ...request, ownerId: "github:42" });
+  // Without an owner it can't be told apart from a GitHub preview, so it isn't sent.
+  observer.request?.(request);
+  observer.request?.({ ...request, ownerId: "device:owner" });
+  await Promise.all(work);
+  assert.deepEqual(
+    calls.map((call) => call.path),
+    ["/api/previews/access", "/api/previews/events"],
+  );
+  assert.equal(calls[1].body.type, "request");
+  assert.equal(calls[1].body.ownerId, undefined);
+});

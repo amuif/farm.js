@@ -565,6 +565,50 @@ test("coordinates requests across separate relay instances", async () => {
   }
 });
 
+test("attributes requests to the session owner on every relay instance", async () => {
+  const coordinator = new MemoryRelayCoordinator();
+  const activity = [];
+  const relay = () =>
+    createPersistentPreviewRelay({
+      publicBaseUrl: "https://preview.example.com",
+      publicDomain: "preview.example.com",
+      coordinator,
+      requestTimeoutMs: 2_000,
+      authorizeAgent: ({ token }) => token === RELAY_TOKEN && { ownerId: "device:owner-1" },
+      observer: { request: (event) => activity.push(event) },
+    });
+  const [relayA, relayB] = [relay(), relay()];
+  const [addressA, addressB] = await Promise.all([relayA.listen(), relayB.listen()]);
+  const target = createServer((_request, response) => response.end("owned"));
+  await listen(target);
+  const agent = await startTypeScriptPreviewAgent({
+    relayUrl: addressA.websocketUrl,
+    token: RELAY_TOKEN,
+    name: "owned-agent",
+    targetUrl: `http://127.0.0.1:${target.address().port}`,
+  });
+
+  try {
+    for (const address of [addressA, addressB]) {
+      const response = await requestWithHost(
+        `${address.httpUrl}/page`,
+        "owned-agent.preview.example.com",
+      );
+      assert.equal(response.status, 200);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The local relay knows the owner; the other one learns it from the coordinator.
+    assert.deepEqual(
+      activity.map((event) => event.ownerId),
+      ["device:owner-1", "device:owner-1"],
+    );
+  } finally {
+    await agent.close();
+    await Promise.all([relayA.close(), relayB.close()]);
+    await close(target);
+  }
+});
+
 test("rejects preview paths that could replace the local target authority", async () => {
   let sensitiveRequests = 0;
   const sensitive = createServer((_request, response) => {
@@ -1039,7 +1083,11 @@ class MemoryRelayCoordinator {
       this.sessions.delete(name);
       return undefined;
     }
-    return { id: session.id, name: session.name };
+    return {
+      id: session.id,
+      name: session.name,
+      ...(session.ownerId ? { ownerId: session.ownerId } : {}),
+    };
   }
 
   async touchSession(session, ttlMs) {

@@ -146,6 +146,8 @@ export interface PreviewGatewayObserver {
   }): void | Promise<void>;
   request?(event: {
     sessionId: string;
+    /** The session's owner, so an observer can skip previews that aren't its own. */
+    ownerId?: string;
     method: string;
     path: string;
     status: number;
@@ -1029,6 +1031,7 @@ async function proxyPublicRequest(
       observe(() =>
         config.observer!.request!({
           sessionId: session.id,
+          ...(session.ownerId ? { ownerId: session.ownerId } : {}),
           method: request.method,
           path: route.path.split(/[?#]/, 1)[0].slice(0, 2048),
           status,
