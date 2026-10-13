@@ -44,7 +44,7 @@ export interface PreviewCredentialStore {
 }
 
 /** Where Farm.js Infrastructure lives unless FARMJS_API_URL says otherwise, as for analytics. */
-const DEFAULT_INFRA_URL = "https://infra.farmjs.dev";
+const DEFAULT_INFRA_URL = "https://app.farmjs.dev";
 
 export interface PreviewEnvironmentCredential {
   token: string;
@@ -393,7 +393,7 @@ async function loginWithPreviewDeviceFlow(
   if (runtime.interactive === false)
     throw new Error(
       config.provider === "device"
-        ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://infra.farmjs.dev), or sign in once from an interactive terminal."
+        ? "Farm Preview needs a credential in CI or a non-interactive terminal. Set FARMJS_API_KEY to a Farm.js Infrastructure API key (and FARMJS_API_URL if it isn't at https://app.farmjs.dev), or sign in once from an interactive terminal."
         : "This preview gateway only supports browser sign-in, so it can't start a preview from CI or a non-interactive terminal. Run farm preview from an interactive terminal.",
     );
   if (config.provider === "github") return loginWithGitHubDeviceFlow(gatewayUrl, config, runtime);

@@ -57,7 +57,7 @@ type Env = Record<string, string | undefined>;
 /** Set while `farm build` prerenders pages, whose requests aren't real traffic. */
 export const FARM_PRERENDER_ENV = "FARM_PRERENDER";
 
-const DEFAULT_URL = "https://infra.farmjs.dev";
+const DEFAULT_URL = "https://app.farmjs.dev";
 const EVENTS_PATH = "/api/telemetry/v1/events";
 const INGESTION_KEY = /^fti_[A-Za-z0-9_-]{43}$/;
 const API_KEY = /^farmjs_[A-Za-z0-9_-]{32}$/;

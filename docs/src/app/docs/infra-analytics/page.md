@@ -6,7 +6,7 @@ section: "Runtime"
 
 # Farm Infra analytics
 
-Farm reports request and MCP tool activity to your [Farm Infra](https://infra.farmjs.dev) project
+Farm reports request and MCP tool activity to your [Farm Infra](https://app.farmjs.dev) project
 when the server's environment links the app to one. There's no package to install and nothing to
 add to `farm.config.ts`.
 
@@ -42,7 +42,7 @@ A write-only key names its own project and environment, so `FARMJS_PROJECT_ID` i
 | `FARMJS_API_KEY`     | An account API key (`farmjs_…`) or a project's write-only key (`fti_…`).                                          |
 | `FARMJS_PROJECT_ID`  | The Farm Infra project to report to. Needed with an account API key.                                              |
 | `FARMJS_ENVIRONMENT` | `production`, `staging` or `development`. Defaults to Vercel's environment (preview is staging), then `NODE_ENV`. |
-| `FARMJS_API_URL`     | Farm Infra's address, if it isn't `https://infra.farmjs.dev`. Must be HTTPS, except for localhost.                |
+| `FARMJS_API_URL`     | Farm Infra's address, if it isn't `https://app.farmjs.dev`. Must be HTTPS, except for localhost.                  |
 
 A value Farm can't use, such as a malformed key or project ID, leaves analytics off and prints one
 warning when the server starts. It never stops the app. If Farm Infra later rejects the key, Farm
