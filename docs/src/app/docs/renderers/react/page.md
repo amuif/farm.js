@@ -829,6 +829,12 @@ longest increasing subsequence (LIS) of the old row positions. Rows in that subs
 place; only the other surviving rows move. LIS is a runtime move planner over compiler-prepared
 rows, not a claim that the future contents of an array are known at build time.
 
+When an update keeps every row and changes only a few positions, such as swapping two rows, Farm
+compares the new keys with the committed order position by position, confirms that the changed
+positions only trade rows among themselves, and plans moves over those positions alone. A swap moves
+two rows without building a set of every key. Every row's bindings are still reread, as React would
+rerender them.
+
 #### Key-directed selection updates
 
 A separate state or primitive prop often identifies one active row while the collection itself
