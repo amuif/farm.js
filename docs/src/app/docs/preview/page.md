@@ -69,7 +69,7 @@ legacy GitHub device flow. You do not need to link GitHub in the dashboard.
 1. With a Farm.js Infrastructure API key in `FARMJS_API_KEY`, the same key analytics uses,
    the CLI signs in with it and never opens a browser. It reads the key from your shell or
    your CI secrets, and from the app's `.env` files the way `farm dev` does. Set
-   `FARMJS_API_URL` too if Infrastructure isn't at `https://infra.farmjs.dev`: the key is
+   `FARMJS_API_URL` too if Infrastructure isn't at `https://app.farmjs.dev`: the key is
    only sent to a gateway that signs in through that Infrastructure.
 2. Without a key or saved login, the CLI opens Farm.js Infrastructure, displays a code, and waits
    for you to confirm the matching code and explicitly authorize your terminal.
@@ -432,7 +432,7 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 | `FARM_PREVIEW_PROVIDER`         | Select `farm` or `local`.                                                                                       |
 | `FARM_PREVIEW_TUNNEL_COMMAND`   | Command template for a custom local tunnel provider.                                                            |
 | `FARMJS_API_KEY`                | Farm.js Infrastructure API key. Signs previews in without a browser on a gateway that uses that Infrastructure. |
-| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://infra.farmjs.dev`.                                       |
+| `FARMJS_API_URL`                | Farm.js Infrastructure's address, if it isn't `https://app.farmjs.dev`.                                         |
 | `FARM_PREVIEW_TOKEN`            | Deprecated. Use `FARMJS_API_KEY`. Still accepted, with a warning.                                               |
 | `FARM_PREVIEW_CREDENTIALS_PATH` | Override the local managed-preview credential file.                                                             |
 

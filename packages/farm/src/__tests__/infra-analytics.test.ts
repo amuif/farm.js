@@ -64,7 +64,7 @@ describe("Farm Infra link from the environment", () => {
       }),
     ).toEqual({
       options: {
-        endpoint: "https://infra.farmjs.dev/api/telemetry/v1/events",
+        endpoint: "https://app.farmjs.dev/api/telemetry/v1/events",
         key: apiKey,
         projectId,
         environment: "staging",

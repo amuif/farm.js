@@ -148,9 +148,18 @@ function createDevDependencyStubsPlugin() {
 }
 
 /**
+ * A --port flag outranks the app's config. It goes into the config, not only
+ * listen(), because Vite rebuilds the server from config when it restarts (an
+ * edited .env does that) and would otherwise move to the configured port.
+ */
+function withPortFlag(vite: FarmConfig["vite"], port: number | undefined): FarmConfig["vite"] {
+  return port === undefined ? vite : { ...vite, server: { ...vite?.server, port } };
+}
+
+/**
  * Create a Vite development server with Farm.js integration
  */
-export async function createServer(config: FarmConfig = {}) {
+export async function createServer(config: FarmConfig = {}, options: { port?: number } = {}) {
   let pluginManager: PluginManager | null = null;
   let instrumentation: FarmInstrumentationLifecycle | null = null;
   try {
@@ -321,7 +330,7 @@ export async function createServer(config: FarmConfig = {}) {
             hasWarned: false,
           },
         },
-        finalConfig.vite,
+        withPortFlag(finalConfig.vite, options.port),
       ),
     );
 
@@ -473,7 +482,7 @@ export function noticeSchemaChangesInBackground(
  * Start the development server
  */
 export async function startDevServer(config: FarmConfig = {}, port?: number) {
-  const server = await createServer(config);
+  const server = await createServer(config, { port });
 
   try {
     await server.listen(port);
