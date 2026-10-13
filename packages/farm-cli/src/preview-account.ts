@@ -64,7 +64,8 @@ export async function whoamiFarmPreview(options: PreviewAccountOptions = {}): Pr
     logger.info("Previews here don't need an account.");
   } else if (!using) {
     logger.info(
-      `Not signed in. Run farm login${status.mode === "infrastructure" || status.acceptsInfrastructureKeys ? ", or set FARMJS_API_KEY" : ""}.`,
+      // When a key is set but unusable, the line below says why instead.
+      `Not signed in. Run farm login${(status.mode === "infrastructure" || status.acceptsInfrastructureKeys) && !status.ignoredKey ? ", or set FARMJS_API_KEY" : ""}.`,
     );
   } else if (using.source === "FARMJS_API_KEY") {
     logger.info(`Using FARMJS_API_KEY (${using.hint}).`);
