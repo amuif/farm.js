@@ -34,7 +34,7 @@ describe("React AOT keyed list compiler", () => {
     expect(result.diagnostics).toEqual([]);
     expect(result.optimizations.keyedArrayAppendHints).toBe(1);
     expect(result.code).toContain("createCompilerKeyedArrayAppend");
-    expect(result.code).toContain("keyedRowsHintedRuntimeFeature");
+    expect(result.code).toContain("keyedRowsAppendOnlyRuntimeFeature");
     expect(result.code).not.toContain("keyedRowsConditionalRuntimeFeature");
     expect(result.code).not.toContain("keyedRowsHostRuntimeFeature");
     expect(result.code).toContain("farmBlocks.KeyedRows");

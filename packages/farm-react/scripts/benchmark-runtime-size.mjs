@@ -190,9 +190,14 @@ if (!keyedOn.code.includes('"set-add"') || !keyedOn.code.includes('"map-set"')) 
 }
 if (
   !keyedAppendOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedAppendOn.code.includes("keyed-rows:hinted")
+  !keyedAppendOn.code.includes("keyed-rows:append-only")
 ) {
-  throw new Error("Keyed append fixture did not retain its optional hinted runtime.");
+  throw new Error("Keyed append fixture did not retain its isolated append-only runtime.");
+}
+for (const marker of ["Set.prototype.has", "Map.prototype.get", "keyed-rows:hinted"]) {
+  if (keyedAppendOn.code.includes(marker)) {
+    throw new Error(`Append-only fixture unexpectedly retained ${marker}.`);
+  }
 }
 if (
   !keyedFilterOn.code.includes("FarmCompiledKeyedRows") ||

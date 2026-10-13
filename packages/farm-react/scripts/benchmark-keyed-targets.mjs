@@ -23,7 +23,7 @@ async function bundle(kind, controlFeature) {
         transform(code, id) {
           if (!controlFeature || !id.endsWith(`keyed-${kind}.tsx`)) return;
           const control = code.replace(
-            /keyedRows(?:IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
+            /keyedRows(?:AppendOnly|IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
             () => {
               replaced = true;
               return controlFeature;
@@ -50,24 +50,35 @@ async function bundle(kind, controlFeature) {
 }
 
 const results = [];
-for (const kind of ["identity", "membership", "map-lookup", "identity-filter"]) {
+for (const kind of ["identity", "membership", "map-lookup", "identity-filter", "append"]) {
   const full = await bundle(
     kind,
-    kind === "identity-filter" ? "keyedRowsFilterHintedRuntimeFeature" : "keyedRowsRuntimeFeature",
+    kind === "append"
+      ? "keyedRowsHintedRuntimeFeature"
+      : kind === "identity-filter"
+        ? "keyedRowsFilterHintedRuntimeFeature"
+        : "keyedRowsRuntimeFeature",
   );
   const specialized = await bundle(kind);
   assert.ok(
     specialized.code.includes(
-      `keyed-rows:${kind === "identity-filter" ? "identity-filter-only" : kind}`,
+      `keyed-rows:${kind === "append" ? "append-only" : kind === "identity-filter" ? "identity-filter-only" : kind}`,
     ),
   );
-  if (kind === "identity") {
+  if (kind === "identity" || kind === "append") {
     for (const marker of ["Set.prototype.has", "Map.prototype.get"]) {
       assert.ok(full.code.includes(marker), `control must retain ${marker}`);
-      assert.ok(!specialized.code.includes(marker), `identity runtime must not retain ${marker}`);
+      assert.ok(!specialized.code.includes(marker), `${kind} runtime must not retain ${marker}`);
     }
   }
   assert.ok(specialized.gzip < full.gzip, `${kind} specialization must reduce gzip payload`);
+  if (kind === "append") {
+    assert.ok(full.code.includes("keyed-rows:hinted"));
+    assert.ok(
+      full.gzip - specialized.gzip >= 1024,
+      "append-only runtime must save at least 1 KiB gzip",
+    );
+  }
   if (kind === "identity-filter") {
     assert.ok(full.code.includes("keyed-rows:filter-hinted"), "control must keep filter hints");
     assert.ok(

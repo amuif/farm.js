@@ -12,6 +12,8 @@ import {
   createCompilerKeyedArrayPrepend,
   createCompilerKeyedArrayRollingWindow,
   createCompilerKeyedArraySlice,
+  keyedRowsAppendOnlyRuntimeFeature,
+  keyedRowsHintedRuntimeFeature,
   keyedRowsMappedRollingWindowHintedRuntimeFeature,
   type CompiledComponentDefinition,
 } from "../compiler-runtime";
@@ -171,11 +173,15 @@ async function change(fn: () => void) {
 describe("keyed-row delegated element index", () => {
   for (const reactivity of ["static", "hybrid"] as const) {
     for (const lifecycle of ["mount", "hydrate"] as const) {
-      it.each(["none", "delegated"] as const)(
-        `${reactivity}/${lifecycle}: appends without copying retained rows or reindexing them in %s mode`,
-        async (mode) => {
+      it.each(
+        [keyedRowsHintedRuntimeFeature, keyedRowsAppendOnlyRuntimeFeature].flatMap((feature) =>
+          (["none", "delegated"] as const).map((mode) => ({ feature, mode })),
+        ),
+      )(
+        `${reactivity}/${lifecycle}: $feature.name appends without copying retained rows or reindexing them in $mode mode`,
+        async ({ feature, mode }) => {
           const h = harness(reactivity);
-          const Table = createCompiledComponent(h.definition(mode));
+          const Table = createCompiledComponentWithFeatures(h.definition(mode), [feature]);
           const container = document.createElement("div");
           document.body.append(container);
           const content = (
@@ -242,6 +248,31 @@ describe("keyed-row delegated element index", () => {
               container.querySelector<HTMLButtonElement>('[data-key="later"]')!.click(),
             );
             expect(h.calls.at(-1)).toBe("Later:66:later");
+          }
+          // A smaller hint runtime is not an append-only state contract: opaque
+          // replacement, mapping, removal and reorder still fully reconcile.
+          await change(() => {
+            h.update((items) =>
+              items.slice(1).map((item) => ({ ...item, label: item.label + "!" })),
+            );
+            h.update(
+              (items) =>
+                createCompilerKeyedArrayAppend(items, [
+                  ...items,
+                  { id: "opaque", label: "Opaque" },
+                ]) as Item[],
+            );
+          });
+          expect(container.querySelector('[data-key="0"]')).toBeNull();
+          expect(container.querySelector('[data-key="32"]')).toBe(retained[32]);
+          expect(retained[32].textContent).toBe("Row 32!");
+          expect(container.querySelector("button:last-child")?.textContent).toBe("Opaque");
+          await change(() => h.update((items) => items.toReversed()));
+          expect(container.querySelector("button")?.textContent).toBe("Opaque");
+          expect(container.querySelector('[data-key="32"]')).toBe(retained[32]);
+          if (mode === "delegated") {
+            await change(() => retained[32].click());
+            expect(h.calls.at(-1)).toBe("Row 32!:35:32");
           }
         },
       );
@@ -395,63 +426,66 @@ describe("keyed-row delegated element index", () => {
       );
     }
 
-    it(`${reactivity}: rebuilds when Fast Refresh changes event ownership`, async () => {
-      const h = harness(reactivity);
-      const Table = createCompiledComponent(h.definition("none"));
-      const container = document.createElement("div");
-      document.body.append(container);
-      const root = createRoot(container);
-      roots.push(root);
-      await act(async () => root.render(<Table />));
-      let retained = container.querySelector('[data-key="32"]');
-      const writes = trackRowIndexWrites();
-      let staleReactRows = false;
-      let refreshIndex = 0;
-      for (const mode of ["delegated", "direct", "empty", "delegated"] as const) {
-        writes.count = 0;
-        await change(() => {
-          expect(createCompiledComponent(h.definition(mode))).toBe(Table);
-        });
-        const adopted = container.querySelector('[data-key="32"]');
-        // The ownership fix resets stale React fibers once at the handoff,
-        // but the following compiler/React update must retain the adopted row.
-        if (staleReactRows) expect(adopted).not.toBe(retained);
-        else expect(adopted).toBe(retained);
-        retained = adopted;
-        if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
-        else expect(writes.count).toBe(0);
-        writes.count = 0;
-        const appendedId = `refresh-${refreshIndex++}`;
-        await change(() =>
-          h.update(
-            (items) =>
-              createCompilerKeyedArrayAppend(items, [
-                ...items,
-                { id: appendedId, label: "After refresh" },
-              ]) as Item[],
-          ),
-        );
-        expect(writes.count).toBe(mode === "delegated" ? 1 : 0);
-        if (mode !== "empty") {
+    it.each([keyedRowsHintedRuntimeFeature, keyedRowsAppendOnlyRuntimeFeature])(
+      `${reactivity}: $name rebuilds when Fast Refresh changes event ownership`,
+      async (feature) => {
+        const h = harness(reactivity);
+        const Table = createCompiledComponentWithFeatures(h.definition("none"), [feature]);
+        const container = document.createElement("div");
+        document.body.append(container);
+        const root = createRoot(container);
+        roots.push(root);
+        await act(async () => root.render(<Table />));
+        let retained = container.querySelector('[data-key="32"]');
+        const writes = trackRowIndexWrites();
+        let staleReactRows = false;
+        let refreshIndex = 0;
+        for (const mode of ["delegated", "direct", "empty", "delegated"] as const) {
+          writes.count = 0;
+          await change(() => {
+            expect(createCompiledComponentWithFeatures(h.definition(mode), [feature])).toBe(Table);
+          });
+          const adopted = container.querySelector('[data-key="32"]');
+          // The ownership fix resets stale React fibers once at the handoff,
+          // but the following compiler/React update must retain the adopted row.
+          if (staleReactRows) expect(adopted).not.toBe(retained);
+          else expect(adopted).toBe(retained);
+          retained = adopted;
+          if (mode === "delegated") expect(writes.count).toBeGreaterThan(0);
+          else expect(writes.count).toBe(0);
+          writes.count = 0;
+          const appendedId = `refresh-${refreshIndex++}`;
           await change(() =>
-            container.querySelector<HTMLButtonElement>(`[data-key="${appendedId}"]`)!.click(),
+            h.update(
+              (items) =>
+                createCompilerKeyedArrayAppend(items, [
+                  ...items,
+                  { id: appendedId, label: "After refresh" },
+                ]) as Item[],
+            ),
           );
-          expect(h.calls.at(-1)).toBe(
-            `After refresh:${container.querySelectorAll("button").length - 1}:${appendedId}`,
-          );
+          expect(writes.count).toBe(mode === "delegated" ? 1 : 0);
+          if (mode !== "empty") {
+            await change(() =>
+              container.querySelector<HTMLButtonElement>(`[data-key="${appendedId}"]`)!.click(),
+            );
+            expect(h.calls.at(-1)).toBe(
+              `After refresh:${container.querySelectorAll("button").length - 1}:${appendedId}`,
+            );
+          }
+          writes.count = 0;
+          await change(() => h.update((items) => items.slice(1)));
+          expect(container.querySelector('[data-key="32"]')).toBe(retained);
+          if (mode !== "delegated") expect(writes.count).toBe(0);
+          staleReactRows = mode !== "direct";
+          const row = container.querySelector<HTMLButtonElement>("button")!;
+          if (mode !== "empty") {
+            await change(() => row.click());
+            expect(h.calls.at(-1)).toBe(`${row.textContent}:0:${row.dataset.key}`);
+          }
         }
-        writes.count = 0;
-        await change(() => h.update((items) => items.slice(1)));
-        expect(container.querySelector('[data-key="32"]')).toBe(retained);
-        if (mode !== "delegated") expect(writes.count).toBe(0);
-        staleReactRows = mode !== "direct";
-        const row = container.querySelector<HTMLButtonElement>("button")!;
-        if (mode !== "empty") {
-          await change(() => row.click());
-          expect(h.calls.at(-1)).toBe(`${row.textContent}:0:${row.dataset.key}`);
-        }
-      }
-    });
+      },
+    );
 
     it(`${reactivity}: re-adopts ordinary callbacks when delegation toggles through props`, async () => {
       const h = harness(reactivity);

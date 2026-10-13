@@ -289,6 +289,12 @@ itself, and failed runtime checks use complete keyed reconciliation. A key that 
 collection prevents hint emission entirely. The compiler report exposes the emitted-site count as
 `keyedArrayAppendHints`.
 
+When all keyed-row plans in a component are plain, target-free rows and the only emitted update
+hints are appends, the compiler selects a smaller append-only runtime. This omits unused map-update
+and keyed-target fast paths, not support for other state changes: opaque updates and rejected hints
+still use complete keyed reconciliation. Mixed hints, targeted bindings, conditional rows, and host
+blocks keep their existing runtime. No additional option is required.
+
 Adjacent removal and append setters can share the same committed-row proof:
 
 ```tsx

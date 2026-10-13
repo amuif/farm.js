@@ -6953,6 +6953,14 @@ const keyedUpdateRuntime: KeyedUpdateRuntime = {
   reconcile: reconcileCompilerKeyedMapUpdate,
 };
 
+// Compiler-proven append-only hints do not need the map-update fast path.
+// Unhinted and rejected updates retain the complete keyed reconciliation path.
+const keyedAppendOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: reconcileCompilerKeyedArrayAppend,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
+};
+
 const keyedFilterUpdateRuntime: KeyedUpdateRuntime = {
   ...keyedUpdateRuntime,
   filter: reconcileCompilerKeyedArrayFilter,
@@ -10990,6 +10998,15 @@ export const keyedRowsHintedRuntimeFeature: CompilerRuntimeFeature = {
   create: (owner) => ({
     KeyedRows: createKeyedRowsBlockComponent(owner, {
       keyedUpdates: keyedUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsAppendOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:append-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedUpdates: keyedAppendOnlyUpdateRuntime,
     }),
   }),
 };

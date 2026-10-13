@@ -85,6 +85,8 @@ const testSource = String.raw`
     createCompilerKeyedMapUpdate,
     finalizeCompilerKeyedArrayMappedStructuralUpdate,
     keyedRowsMappedRollingWindowHintedRuntimeFeature,
+    keyedRowsAppendOnlyRuntimeFeature,
+    keyedRowsHintedRuntimeFeature,
     keyedRowsStructuralAppendMapHintedRuntimeFeature,
     keyedRowsIdentityRuntimeFeature,
     keyedRowsIdentityFilterHintedRuntimeFeature,
@@ -3005,13 +3007,17 @@ const testSource = String.raw`
   assert.deepEqual(interactiveCalls, ["Alpha:0:0", "Alpha!:0:0", "Alpha!!:1:1"]);
   flushSync(() => interactiveRoot.unmount());
 
+  assert.equal(createRequire(import.meta.url)("@farm.js/react/compiler-runtime").keyedRowsAppendOnlyRuntimeFeature.name, "keyed-rows:append-only");
+  for (const appendFeature of [keyedRowsHintedRuntimeFeature, keyedRowsAppendOnlyRuntimeFeature]) {
   let appendRows = () => undefined;
+  let replaceAppendRows = () => undefined;
   let appendKeyReads = 0;
-  const AppendRows = createCompiledComponent({
+  const AppendRows = createCompiledComponentWithFeatures({
     displayName: "CompatibilityAppendRows",
     initialize: () => [[{ id: "a", label: "Alpha" }]],
     render(_props, state, blocks) {
       const items = () => state[0].get();
+      replaceAppendRows = (next) => state[0].set(next);
       appendRows = (addition) =>
         state[0].set((previous) =>
           createCompilerKeyedArrayAppend(
@@ -3052,7 +3058,7 @@ const testSource = String.raw`
       );
     },
     bindings: [{ kind: "block", id: 0, dependencies: [0] }],
-  });
+  }, [appendFeature]);
   const appendContainer = document.createElement("div");
   document.body.append(appendContainer);
   const appendRoot = createRoot(appendContainer);
@@ -3066,7 +3072,13 @@ const testSource = String.raw`
   assert.equal(appendContainer.textContent, "AlphaBetaGamma");
   assert.equal(appendContainer.querySelector("[data-key='a']"), appendAlpha);
   assert.equal(appendKeyReads, 2);
+  replaceAppendRows((rows) => rows.slice(1).map((row) => ({...row, label: row.label + "!"})));
+  appendRows({id: "d", label: "Delta"});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(appendContainer.textContent, "Beta!Gamma!Delta");
   flushSync(() => appendRoot.unmount());
+  }
 
   let filterRows = () => undefined;
   let filterKeyReads = 0;

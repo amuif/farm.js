@@ -174,6 +174,32 @@ Regression coverage includes hybrid/static compiler selection, same-list and sib
 hints, queued map/filter and append/filter updates, legacy exports, HMR capability changes,
 hydration, Strict Mode, randomized removals, and unexpected map/append updates followed by removals.
 
+## Target-free append-only runtime
+
+Plain keyed rows whose only accepted update hints are appends now omit the unused map-update and
+keyed-target fast paths. All keyed plans in the component participate in selection. Mixed hints,
+targeted bindings, host blocks, and conditional rows retain their existing runtime; opaque updates
+and rejected append hints retain complete reconciliation. The legacy hinted export is unchanged.
+
+`pnpm --filter @farm.js/react test:runtime-size` builds the same `keyed-append.tsx` fixture twice,
+substituting the legacy hinted export only for the control. With Node 24.21.0, React 19.2.8, and
+Vite 5.4.20 on macOS arm64, the legacy control is **239,210 B raw / 73,526 B gzip** and the
+append-only runtime is **231,660 B raw / 71,661 B gzip**: **1,865 B gzip saved**. Compiler-off output
+is unchanged at 60,145 B gzip, so compiler-added gzip overhead falls from 13,381 B to 11,516 B
+(13.9%). The paired gate requires at least 1 KiB gzip savings and rejects retained Set-membership
+and Map-lookup guards. Every other runtime-size fixture has unchanged raw, gzip, and Brotli counts
+against commit `9d43ca34607cdedba839005d09a867de84e1d92c`.
+
+These are production payload measurements, not browser CPU, first-paint, or framework-ranking
+claims. No compiler option, public app API, or release version changes.
+
+The production-browser row-event-index diagnostic also passes against that commit with 10,000
+rows, 35 alternating pairs, five warm-ups, and Chrome 155.0.8059.40. Both append modes preserve DOM
+identity, focus, and delegated clicks; the no-event append median remains 0.30 ms. The existing
+mixed-operation dashboard produces byte-identical JavaScript (70,829 B gzip) and passes create,
+update, select, swap, append, remove, and clear controls on both builds and uncompiled React.
+Shared-host load makes the timing results diagnostic only.
+
 ## Committed row membership during cleanup
 
 Keyed-row cleanup now checks the already-committed row Map directly. It no longer snapshots all

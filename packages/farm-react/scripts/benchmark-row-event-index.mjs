@@ -41,6 +41,9 @@ const baselineCommit = git("rev-parse", "--verify", `${values["baseline-ref"]}^{
 const baseline = git("show", `${baselineCommit}:packages/farm-react/src/compiler-runtime.tsx`);
 const candidate = readFileSync(runtime, "utf8");
 assert.notEqual(candidate.trim(), baseline, "baseline and candidate runtime must differ");
+// Both variants use the current compiler. Older baselines need the equivalent
+// broad runtime export for append hints, before append-only selection existed.
+const legacyAppendControl = !baseline.includes("export const keyedRowsAppendOnlyRuntimeFeature");
 const bundles = new Map();
 const sizes = {};
 
@@ -50,6 +53,7 @@ for (const operation of ["append", "prepend"]) {
       const key = `${operation}-${delegated}-${variant}`;
       const entry = `${packageRoot}/fixtures/runtime-size/keyed-${operation}.tsx`;
       const original = readFileSync(entry, "utf8");
+      let replacedAppendFeature = false;
       assert.ok(original.includes("length: 1_000"));
       let fixture = original.replace("length: 1_000", `length: ${rowCount}`);
       if (delegated) {
@@ -79,6 +83,24 @@ for (const operation of ["append", "prepend"]) {
               experimental: { compiler: variant === "react" ? false : { onUnsupported: "error" } },
             },
           }),
+          {
+            name: "legacy-append-runtime-control",
+            enforce: "post",
+            transform(code, id) {
+              if (
+                variant !== "base" ||
+                !legacyAppendControl ||
+                operation !== "append" ||
+                id !== entry
+              )
+                return;
+              const control = code.replace(/keyedRowsAppendOnlyRuntimeFeature/g, () => {
+                replacedAppendFeature = true;
+                return "keyedRowsHintedRuntimeFeature";
+              });
+              return { code: control, map: null };
+            },
+          },
         ],
         build: { write: false, minify: "esbuild", rollupOptions: { input: entry } },
       });
@@ -88,10 +110,19 @@ for (const operation of ["append", "prepend"]) {
         .filter((part) => part.type === "chunk");
       assert.equal(chunks.length, 1);
       const code = chunks[0].code;
+      if (variant === "base" && legacyAppendControl && operation === "append") {
+        assert.ok(replacedAppendFeature, "legacy control must replace the append-only feature");
+      }
       if (variant !== "react") {
         assert.ok(code.includes("FarmCompiledKeyedRows"));
         assert.ok(
-          code.includes(operation === "append" ? "keyed-rows:hinted" : "keyed-rows:prepend-hinted"),
+          code.includes(
+            operation === "append"
+              ? variant === "base" && legacyAppendControl
+                ? "keyed-rows:hinted"
+                : "keyed-rows:append-only"
+              : "keyed-rows:prepend-hinted",
+          ),
         );
         if (delegated) assert.match(code, /delegateEvents:!0/);
       }
@@ -219,6 +250,9 @@ try {
         baselineCommit,
         candidateHeadCommit: git("rev-parse", "HEAD"),
         candidateRuntimeSource: "working tree",
+        compilerControl:
+          "current compiler for both; legacy append feature substituted only when absent from baseline",
+        legacyAppendControl,
         baselineRuntimeSha256: createHash("sha256").update(baseline).digest("hex"),
         candidateRuntimeSha256: createHash("sha256").update(candidate).digest("hex"),
         node: process.version,

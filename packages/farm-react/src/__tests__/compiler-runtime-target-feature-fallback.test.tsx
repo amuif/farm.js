@@ -4,6 +4,8 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import {
   createCompiledComponentWithFeatures,
+  keyedRowsAppendOnlyRuntimeFeature,
+  keyedRowsHintedRuntimeFeature,
   keyedRowsIdentityRuntimeFeature,
   keyedRowsIdentityFilterHintedRuntimeFeature,
   keyedRowsIdentityFilterOnlyRuntimeFeature,
@@ -14,6 +16,7 @@ import {
 } from "../compiler-runtime";
 
 it.each([
+  [keyedRowsAppendOnlyRuntimeFeature, keyedRowsHintedRuntimeFeature],
   [keyedRowsIdentityFilterHintedRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
   [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsFilterHintedRuntimeFeature],
   [keyedRowsIdentityFilterOnlyRuntimeFeature, keyedRowsIdentityFilterHintedRuntimeFeature],
