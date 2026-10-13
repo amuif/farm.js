@@ -1,6 +1,7 @@
 import { logger } from "@farm.js/core";
 import { loadPreviewEnvironment } from "./preview";
 import {
+  PreviewApiKeyDeclinedError,
   formatPreviewExpiration,
   previewSignInStatus,
   signInToPreviewGateway,
@@ -23,8 +24,14 @@ const MODE_LABELS = {
 /** farm login */
 export async function loginToFarmPreview(options: PreviewAccountOptions = {}) {
   await loadPreviewEnvironment(options.root, options.configPath);
-  const { login } = await signInToPreviewGateway(resolvePreviewGatewayUrl(options.gatewayUrl));
-  logger.success(`Signed in to Farm Preview as ${login}.`);
+  try {
+    const { login } = await signInToPreviewGateway(resolvePreviewGatewayUrl(options.gatewayUrl));
+    logger.success(`Signed in to Farm Preview as ${login}.`);
+  } catch (error) {
+    // Saying no is a choice, not a failure.
+    if (!(error instanceof PreviewApiKeyDeclinedError)) throw error;
+    logger.info(error.message);
+  }
 }
 
 /** farm logout. Only this machine forgets the key; it stays valid in Farm.js Infrastructure. */

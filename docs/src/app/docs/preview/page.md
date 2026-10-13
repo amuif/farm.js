@@ -40,7 +40,8 @@ farm preview --port 4324 --name checkout-test --expires 2h
 
 Previews use a Farm.js Infrastructure API key. Without one, the first preview opens
 [app.farmjs.dev](https://app.farmjs.dev): sign in or create an account (email and password, or
-GitHub) and confirm the code. The CLI then saves a new API key for your account and carries on:
+GitHub) and confirm the code. The CLI then asks whether to create an API key for this machine;
+answer yes and it saves the key and carries on:
 
 ```txt
 Creating public preview for the running app...
@@ -48,6 +49,7 @@ Local:  http://localhost:4324
 Confirm this code in Farm.js Infrastructure: W7KDQ2PL
 Open: https://app.farmjs.dev/device?user_code=W7KDQ2PL
 After approving this device, return here.
+Create an API key for this machine? (Y/n) y
 Signed in to Farm Preview as your Farm.js Infrastructure account.
 Relay: wss://preview.farmjs.dev/agent
 Opening native Farm preview tunnel...
@@ -68,8 +70,9 @@ non-interactive terminals, the hosted default is used.
 
 - If `FARMJS_API_KEY` is set, in your shell, your CI secrets, or the app's `.env` files, it is
   used and there is no sign-in.
-- Otherwise `farm login`, or the first `farm preview`, signs you in at app.farmjs.dev and saves
-  a new API key for your account in a file only your user can read.
+- Otherwise `farm login`, or the first `farm preview`, signs you in at app.farmjs.dev and asks
+  whether to create an API key for this machine. Yes saves it in a file only your user can read;
+  no creates nothing.
 - `farm logout` forgets that saved key on this machine. The key itself stays valid until you
   revoke it in Farm.js Infrastructure.
 

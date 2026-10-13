@@ -35,12 +35,19 @@ function runtime({
   config,
   saved,
   keyResponse = () => Response.json({ key: savedKey }, { status: 201 }),
+  answer = true,
 } = {}) {
   const store = new Map(saved ? [[gatewayUrl, saved]] : []);
   const keyRequests = [];
+  const questions = [];
   return {
     store,
     keyRequests,
+    questions,
+    async confirm(question) {
+      questions.push(question);
+      return answer;
+    },
     interactive: true,
     credentials: {
       async get(url) {
@@ -129,6 +136,8 @@ test("login saves an API key from Infrastructure, and logout only forgets it her
   assert.deepEqual(await signInToPreviewGateway(gatewayUrl, r), {
     login: "your Farm.js Infrastructure account",
   });
+  // After signing in, the developer is asked before a key is made for this machine.
+  assert.deepEqual(r.questions, ["Create an API key for this machine? (Y/n) "]);
   // The approved device sign-in is exchanged once for a key, and only the key is kept.
   assert.equal(r.keyRequests.length, 1);
   assert.equal(r.keyRequests[0].authorization, "Bearer device-session");
@@ -144,6 +153,18 @@ test("login saves an API key from Infrastructure, and logout only forgets it her
   assert.equal(r.keyRequests.length, 1);
   assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), false);
   await assert.rejects(signInToPreviewGateway(gatewayUrl, runtime()), /doesn't use sign-in/);
+});
+
+test("answering no creates and saves nothing", async () => {
+  const r = runtime({ config: infra, answer: false });
+  await assert.rejects(signInToPreviewGateway(gatewayUrl, r), (error) => {
+    assert.equal(error.name, "PreviewApiKeyDeclinedError");
+    assert.match(error.message, /No API key was created\. Run farm login when you want one/);
+    return true;
+  });
+  assert.equal(r.questions.length, 1);
+  assert.deepEqual(r.keyRequests, []);
+  assert.equal(r.store.size, 0);
 });
 
 test("login saves nothing when Infrastructure can't make a key", async () => {

@@ -44,6 +44,9 @@ function fixture(options = {}) {
       opened.push(url);
       return true;
     },
+    async confirm() {
+      return true;
+    },
     async promptDuration() {
       assert.ok(options.cached || saved.length);
       return 7200_000;

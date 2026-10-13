@@ -35,6 +35,18 @@ export interface PreviewAuthRuntime {
   wait(ms: number): Promise<void>;
   credentials: PreviewCredentialStore;
   promptDuration(config: PreviewAuthPublicConfig): Promise<number | undefined>;
+  /** A yes/no question; Enter means yes. */
+  confirm(question: string): Promise<boolean>;
+}
+
+/** The developer chose not to create an API key after signing in. */
+export class PreviewApiKeyDeclinedError extends Error {
+  constructor() {
+    super(
+      "No API key was created. Run farm login when you want one, or set FARMJS_API_KEY to a key from Farm.js Infrastructure.",
+    );
+    this.name = "PreviewApiKeyDeclinedError";
+  }
 }
 
 export interface PreviewCredentialStore {
@@ -427,12 +439,17 @@ async function loginWithPreviewDeviceFlow(
       result.access_token &&
       Number.isSafeInteger(result.expires_in) &&
       result.expires_in! > 0
-    )
+    ) {
+      const deviceToken = result.access_token;
+      const expiresAt = Date.now() + result.expires_in! * 1000;
+      if (!(await runtime.confirm("Create an API key for this machine? (Y/n) ")))
+        throw new PreviewApiKeyDeclinedError();
       return {
-        token: await createPreviewApiKey(issuer.origin, result.access_token, runtime.fetch),
-        expiresAt: Date.now() + result.expires_in! * 1000,
+        token: await createPreviewApiKey(issuer.origin, deviceToken, runtime.fetch),
+        expiresAt,
         user: { login: "your Farm.js Infrastructure account" },
       };
+    }
     if (poll.status === 400 && result.error === "authorization_pending") continue;
     if (poll.status === 400 && result.error === "slow_down") {
       interval += 5000;
@@ -639,6 +656,7 @@ function createDefaultPreviewAuthRuntime(): PreviewAuthRuntime {
     wait: (ms) => delay(ms),
     credentials: new FilePreviewCredentialStore(),
     promptDuration: promptPreviewDuration,
+    confirm: confirmInTerminal,
   };
 }
 
@@ -673,6 +691,16 @@ async function promptPreviewDuration(config: PreviewAuthPublicConfig) {
   try {
     const answer = await prompt.question(`Preview duration (${defaultDuration}): `);
     return answer.trim() ? parsePreviewDuration(answer) : config.defaultSessionTtlMs;
+  } finally {
+    prompt.close();
+  }
+}
+
+async function confirmInTerminal(question: string) {
+  if (!process.stdin.isTTY) return false;
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return !/^\s*n/i.test(await prompt.question(question));
   } finally {
     prompt.close();
   }
