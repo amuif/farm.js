@@ -319,7 +319,9 @@ export async function signInToPreviewGateway(
 /**
  * farm logout: forget this machine's saved sign-in for the gateway. A Farm.js
  * Infrastructure sign-in is a session, so it is ended there too; a GitHub sign-in
- * is a token the gateway signed, with no session to end.
+ * is a token the gateway signed, with no session to end. Infrastructure has no
+ * Better Auth bearer plugin, so its own /sign-out would answer 200 and end nothing:
+ * the session is ended through Infrastructure's preview sign-out endpoint instead.
  */
 export async function signOutOfPreviewGateway(
   gatewayUrl: string,
@@ -332,18 +334,17 @@ export async function signOutOfPreviewGateway(
   try {
     const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
     if (config.enabled && config.provider === "device" && !accountClaims(token)) {
-      const response = await runtime.fetch(`${deviceIssuer(config).base}/sign-out`, {
+      const response = await runtime.fetch(`${deviceIssuer(config).origin}/api/previews/sign-out`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-          accept: "application/json",
-        },
-        body: "{}",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
         signal: AbortSignal.timeout(10_000),
         redirect: "error",
       });
       if (!response.ok) throw new Error(`Farm.js Infrastructure answered ${response.status}`);
+      // Only an explicit answer counts, never a 200 from some other page.
+      const body = (await response.json().catch(() => undefined)) as { signedOut?: unknown };
+      if (body?.signedOut !== true)
+        throw new Error("Farm.js Infrastructure didn't confirm the sign-out");
       ended = true;
     }
   } catch (cause) {

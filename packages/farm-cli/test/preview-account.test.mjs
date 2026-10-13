@@ -30,7 +30,7 @@ function accountToken(claims) {
   return `fp1.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
 }
 
-function runtime({ config, saved, signOutStatus = 200 } = {}) {
+function runtime({ config, saved, signOut = () => Response.json({ signedOut: true }) } = {}) {
   const store = new Map(saved ? [[gatewayUrl, saved]] : []);
   const signOuts = [];
   return {
@@ -56,9 +56,9 @@ function runtime({ config, saved, signOutStatus = 200 } = {}) {
       return undefined;
     },
     async fetch(url, init) {
-      if (url === "https://infra.example.com/api/auth/sign-out") {
+      if (url === "https://infra.example.com/api/previews/sign-out") {
         signOuts.push(init.headers.authorization);
-        return Response.json({ success: signOutStatus === 200 }, { status: signOutStatus });
+        return signOut();
       }
       if (url.endsWith("/api/auth/config"))
         return config ? Response.json(config) : new Response(null, { status: 404 });
@@ -146,13 +146,22 @@ test("logout forgets a sign-in the server can't end", async () => {
   });
   assert.deepEqual(switched.signOuts, []);
 
-  const failing = runtime({ config: infra, saved: "device-session", signOutStatus: 503 });
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, failing), {
-    removed: true,
-    ended: false,
-    error: "Farm.js Infrastructure answered 503",
-  });
-  assert.equal(failing.store.has(gatewayUrl), false);
+  for (const [signOut, error] of [
+    [() => new Response(null, { status: 503 }), "Farm.js Infrastructure answered 503"],
+    // An Infrastructure from before the sign-out endpoint.
+    [() => new Response("Not found", { status: 404 }), "Farm.js Infrastructure answered 404"],
+    // What Better Auth's own /sign-out says for a token it can't see.
+    [() => Response.json({ success: true }), "Farm.js Infrastructure didn't confirm the sign-out"],
+    [() => new Response("<!doctype html>"), "Farm.js Infrastructure didn't confirm the sign-out"],
+  ]) {
+    const failing = runtime({ config: infra, saved: "device-session", signOut });
+    assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, failing), {
+      removed: true,
+      ended: false,
+      error,
+    });
+    assert.equal(failing.store.has(gatewayUrl), false);
+  }
 
   const offline = runtime({ saved: "device-session" });
   offline.fetch = async () => {
