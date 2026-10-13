@@ -8724,31 +8724,46 @@ function analyzePropsParameter(
     };
   }
   if (!t.isObjectPattern(parameter)) {
-    return "components must use zero parameters, one props identifier, or flat object props destructuring";
+    return "components must use zero parameters, one props identifier, or object props destructuring";
   }
 
+  // The original parameter stays on the wrapper, which destructures (and
+  // applies defaults) exactly as React would and passes every bound name on.
   const localNames = new Set<string>();
-  for (const property of parameter.properties) {
-    if (t.isRestElement(property)) {
-      return "rest properties in component props destructuring are not supported yet";
+  const collect = (pattern: t.LVal | t.PatternLike | null): string | undefined => {
+    if (!pattern) return undefined;
+    if (t.isIdentifier(pattern)) {
+      if (localNames.has(pattern.name)) {
+        return "component props destructuring local names must be unique";
+      }
+      localNames.add(pattern.name);
+      return undefined;
     }
-    if (property.computed) {
-      return "computed component props destructuring is not supported yet";
+    if (t.isAssignmentPattern(pattern)) return collect(pattern.left);
+    if (t.isRestElement(pattern)) return collect(pattern.argument);
+    if (t.isArrayPattern(pattern)) {
+      for (const element of pattern.elements) {
+        const reason = collect(element);
+        if (reason) return reason;
+      }
+      return undefined;
     }
-    let local: t.Identifier | undefined;
-    if (t.isIdentifier(property.value)) {
-      local = property.value;
-    } else if (t.isAssignmentPattern(property.value) && t.isIdentifier(property.value.left)) {
-      local = property.value.left;
+    if (t.isObjectPattern(pattern)) {
+      for (const property of pattern.properties) {
+        if (t.isObjectProperty(property) && property.computed) {
+          return "computed component props destructuring is not supported yet";
+        }
+        const reason = collect(
+          t.isRestElement(property) ? property : (property.value as t.PatternLike),
+        );
+        if (reason) return reason;
+      }
+      return undefined;
     }
-    if (!local) {
-      return "nested component props destructuring is not supported yet";
-    }
-    if (localNames.has(local.name)) {
-      return "component props destructuring local names must be unique";
-    }
-    localNames.add(local.name);
-  }
+    return "components must use zero parameters, one props identifier, or object props destructuring";
+  };
+  const reason = collect(parameter);
+  if (reason) return reason;
 
   const definitionParameter = path.scope.generateUidIdentifier("props");
   return {

@@ -217,24 +217,19 @@ describe("React AOT compiler safety boundaries", () => {
 
   it.each([
     {
-      name: "nested props",
-      parameter: "{ user: { name } }",
-      reason: /nested component props destructuring/i,
-    },
-    {
-      name: "rest props",
-      parameter: "{ initial, ...rest }",
-      reason: /rest properties in component props destructuring/i,
-    },
-    {
       name: "computed props",
       parameter: '{ ["initial"]: initial }',
       reason: /computed component props destructuring/i,
     },
     {
+      name: "nested computed props",
+      parameter: '{ initial, options: { ["mode"]: mode } }',
+      reason: /computed component props destructuring/i,
+    },
+    {
       name: "a defaulted props object",
       parameter: "{ initial } = { initial: 0 }",
-      reason: /zero parameters, one props identifier, or flat object props destructuring/i,
+      reason: /zero parameters, one props identifier, or object props destructuring/i,
     },
   ])("falls back for $name", async ({ parameter, reason }) => {
     const result = await compile(`

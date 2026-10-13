@@ -23,7 +23,7 @@ export default function HomePage() {
           <p className="playground-lede">
             A product-integrated full-stack framework on Vite: typesafe APIs
             and server functions, integrations as typed modules, and an
-            opt-in compiler that turns component updates into direct DOM
+            experimental compiler that turns component updates into direct DOM
             patches. This page rendered on the server at{" "}
             <code>{renderedAt}</code>. Edit <code>src/app/page.tsx</code> and
             watch it hot-reload.

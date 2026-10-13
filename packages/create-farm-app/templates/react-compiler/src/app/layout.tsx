@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "FARMJS React Compiler Starter",
-  description: "Start a FARMJS app with the opt-in React AOT compiler.",
+  description: "Start a FARMJS app with the experimental React AOT compiler.",
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml", sizes: "any" }],
   },

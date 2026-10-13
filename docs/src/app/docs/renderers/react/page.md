@@ -1,6 +1,6 @@
 ---
 title: "React Renderer"
-description: "Use FARMJS with the default React renderer, including client hooks, streaming SSR, and the opt-in AOT compiler."
+description: "Use FARMJS with the default React renderer, including client hooks, streaming SSR, and the experimental AOT compiler."
 section: "Core"
 ---
 
@@ -99,10 +99,13 @@ persist data or serialize symbol keys across server/client boundaries.
 
 ## AOT compiler
 
-Farm's opt-in React compiler moves a narrow class of local state-update work from React's
-runtime render-and-reconcile path into build-time binding metadata. It is disabled by default and
-only affects the React renderer that enables it. Preact, Solid, Vue, Svelte, and custom renderers do
-not receive this transform.
+Farm's experimental React compiler moves a narrow class of local state-update work from React's
+runtime render-and-reconcile path into build-time binding metadata. It is opt-in, disabled by
+default, and only affects the React renderer that enables it. Preact, Solid, Vue, Svelte, and
+custom renderers do not receive this transform.
+
+> The compiler is experimental. `@farm.js/react` is still a beta, and eligibility, generated
+> output, and options can change between releases. Unsupported components always stay on React.
 
 The compiler is intentionally conservative. It only transforms a component when it can prove that
 the component has one stable host-element tree and that each supported state value maps to known
@@ -172,19 +175,20 @@ Omitting `compiler` or setting it to `false` disables the transform.
 
 ### Experimental AOT compiler
 
-Upgrading from the experimental compiler? The option used to live at
+Upgrading from an earlier beta? The option used to live at
 `react({ experimental: { compiler } })`. That form still works as a
 deprecated alias: it logs a one-time deprecation warning and behaves exactly like the top-level
-option. Setting both keys is an error. This migration heading preserves existing links to the
-experimental compiler guide; use the [AOT compiler](#aot-compiler) section for new links.
+option. Setting both keys is an error. This heading preserves existing links to the compiler
+guide; use the [AOT compiler](#aot-compiler) section for new links.
 
 ### Compatibility and release status
 
 `@farm.js/react` is versioned independently from core. A `-beta.N` package version is still a beta;
-moving the configuration option does not by itself publish a stable package. The first stable
-release covers `react({ compiler })`, the documented compiler options, and the public `List`
-component. Inference and annotation mode, hybrid and static reactivity, diagnostics, and reporting
-all remain supported; the advanced options do not require an experimental flag.
+moving the configuration option does not by itself publish a stable package, and the compiler stays
+experimental until that happens. The first stable release covers `react({ compiler })`, the
+documented compiler options, and the public `List` component. Inference and annotation mode, hybrid
+and static reactivity, diagnostics, and reporting all remain supported; the advanced options do not
+require an experimental flag.
 
 The compiler and `@farm.js/react/compiler-runtime` must come from the same installed package
 version. Generated definitions are an implementation protocol, not a cross-version format.
@@ -496,8 +500,8 @@ satisfy all of these rules:
 | Area                | Current supported shape                                                                                                                                                                     |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                                                                     |
-| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or flat object props destructuring.                                                          |
-| Props               | Flat object destructuring supports shorthand names, aliases, and defaults. Referenced primitive values join the dependency graph after mount.                                               |
+| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or object props destructuring without computed keys.                                         |
+| Props               | Object destructuring supports shorthand names, aliases, defaults, nested object and array patterns, and rest. Referenced primitive values join the dependency graph after mount.            |
 | Body                | Top-level `useState` declarations, compiler-safe derived values and synchronous named handlers in any order (a derived value cannot read a later state), then one unconditional JSX return. |
 | State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                                                                  |
 | Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                                                                      |
