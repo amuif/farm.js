@@ -1,9 +1,9 @@
 // Handling for a root layout that returns a full `<html>…</html>` document.
 //
-// Farm owns the document shell — a layout is expected to return a fragment (its
-// children), like the docs example does. When a layout instead returns a whole
-// document, the dev renderer must compose that document as the response rather
-// than nesting it inside the generated shell, which would emit invalid nested
+// A root layout may return its children (Farm then renders the document shell)
+// or a whole document, as the create-app templates do. A whole document is
+// composed as the response, with Farm's assets merged into it, rather than
+// nested inside the generated shell, which would emit invalid nested
 // `<html>`/`<head>`/`<body>`. This mirrors the production (Nitro) build's
 // `hasFullDocument` path so dev and prod agree.
 

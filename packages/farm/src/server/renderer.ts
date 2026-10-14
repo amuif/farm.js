@@ -14,7 +14,7 @@ import type {
 } from "../types";
 import type { MatchedRouteSlot, RouteManager } from "../routing/route-manager";
 import { logger, toViteModuleId } from "../utils";
-import { collectDevStylesheetUrls } from "./dev-styles";
+import { collectDevStylesheetUrls, resolveDevGlobalStylesheetHref } from "./dev-styles";
 import {
   composeFarmFullDocument,
   extractFarmFullDocument,
@@ -281,20 +281,6 @@ function warnSuppressedAsyncHydrationOnce(modulePath: string, reason?: string): 
 // route is seen to be full-document it is served through the buffered path
 // (which composes the document correctly) on every subsequent request.
 const fullDocumentRoutes = new Set<string>();
-
-let warnedFullDocumentLayout = false;
-
-function warnFarmFullDocumentLayout(): void {
-  if (warnedFullDocumentLayout) return;
-  warnedFullDocumentLayout = true;
-  logger.warn(
-    `A root layout returned a full <html> document. Farm.js owns the document ` +
-      `shell, so a layout should return a fragment (its children) — like the docs ` +
-      `example — and let the framework provide <html>/<head>/<body>. The document ` +
-      `has been composed into the response, but returning a fragment avoids the ` +
-      `ambiguity and keeps dev and production identical.`,
-  );
-}
 
 function hasRequestHeader(req: FarmRequest, name: string): boolean {
   const value = req.headers[name.toLowerCase()];
@@ -648,12 +634,35 @@ export class ServerRenderer {
     );
   }
 
+  /// The app's `<srcDir>/app/globals.css`, linked only when it exists, as the
+  /// production build imports it only when it exists. An app without one gets
+  /// no stylesheet link rather than a failing request.
+  private devGlobalStylesheetHref(): string | null {
+    return (
+      resolveDevGlobalStylesheetHref(this.config.root || process.cwd(), this.config.srcDir) ?? null
+    );
+  }
+
+  private devGlobalStylesheetLink(selfClosing = false): string {
+    const href = this.devGlobalStylesheetHref();
+    if (!href) return "";
+    return `<link rel="stylesheet" href="${escapeHtmlAttribute(href)}"${selfClosing ? " /" : ""}>`;
+  }
+
+  private devGlobalStylesheetAssets(): Array<{ tag: string; attrs: Record<string, string> }> {
+    const href = this.devGlobalStylesheetHref();
+    return href ? [{ tag: "link", attrs: { rel: "stylesheet", href } }] : [];
+  }
+
   /// Stylesheets the app imported through JS (fontsource packages, component
   /// CSS) that the document must link alongside globals.css — see #658.
   private collectDevStyleHrefs(): string[] {
     const graph = this.viteServer?.moduleGraph;
     if (!graph) return [];
-    return collectDevStylesheetUrls(graph.idToModuleMap.values());
+    return collectDevStylesheetUrls(
+      graph.idToModuleMap.values(),
+      this.devGlobalStylesheetHref() ?? undefined,
+    );
   }
 
   private collectDevStyleLinks(): string[] {
@@ -2588,10 +2597,7 @@ export class ServerRenderer {
         layouts: {} as Record<string, any>,
         slots: [] as Array<Record<string, any>>,
         sharedAssets: [
-          {
-            tag: "link",
-            attrs: { rel: "stylesheet", href: "/src/app/globals.css" },
-          },
+          ...this.devGlobalStylesheetAssets(),
           ...this.collectDevStyleHrefs().map((href) => ({
             tag: "link",
             attrs: { rel: "stylesheet", href },
@@ -2709,7 +2715,6 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
       const fullDocument = extractFarmFullDocument(content);
       let html: string;
       if (fullDocument) {
-        warnFarmFullDocumentLayout();
         const shouldReplaceLayoutTitle = hasExplicitTitle || rendererHasTitle;
         const documentHtml = shouldReplaceLayoutTitle
           ? removeFarmDocumentTitles(fullDocument)
@@ -2735,7 +2740,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
             alternateTags,
             effectiveRendererHead,
             renderFarmFontDevHead(this.config.root || process.cwd()),
-            `<link rel="stylesheet" href="/src/app/globals.css">`,
+            this.devGlobalStylesheetLink(),
             ...this.collectDevStyleLinks(),
             `<script type="module" src="/@vite/client"></script>`,
             rendererHydrationScript,
@@ -2760,7 +2765,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
   ${hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   ${documentTitleTag}${metaTags}${alternateTags}${rendererHead ? `\n  ${rendererHead}` : ""}
   ${renderFarmFontDevHead(this.config.root || process.cwd())}
-  <link rel="stylesheet" href="/src/app/globals.css">${this.collectDevStyleLinks()
+  ${this.devGlobalStylesheetLink()}${this.collectDevStyleLinks()
     .map((l) => `\n  ${l}`)
     .join("")}
   <script type="module" src="/@vite/client"></script>
@@ -2873,10 +2878,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
         layouts: {} as Record<string, any>,
         slots: [] as Array<Record<string, any>>,
         sharedAssets: [
-          {
-            tag: "link",
-            attrs: { rel: "stylesheet", href: "/src/app/globals.css" },
-          },
+          ...this.devGlobalStylesheetAssets(),
           ...this.collectDevStyleHrefs().map((href) => ({
             tag: "link",
             attrs: { rel: "stylesheet", href },
@@ -2999,6 +3001,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
           ? element
           : this.rendererRuntime.createElement("div", { style: { display: "contents" } }, element);
       const devStyleLinks = this.collectDevStyleLinks();
+      const globalStylesheetLink = this.devGlobalStylesheetLink(true);
       const cspNonce = this.getCspNonce(req);
       const secureDocumentHTML = (html: string) =>
         cspNonce ? addFarmCspNonceToScriptTags(html, cspNonce) : html;
@@ -3037,9 +3040,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
   ${hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   <title>${title}</title>${metaTags}${i18nAlternateTags}
   ${fontHead}
-  <link rel="stylesheet" href="/src/app/globals.css" />${devStyleLinks
-    .map((l) => `\n  ${l}`)
-    .join("")}
+  ${globalStylesheetLink}${devStyleLinks.map((l) => `\n  ${l}`).join("")}
   <script type="module" src="/@vite/client"></script>
   ${propsScript}
   ${hydrationClickQueueScript}
@@ -3060,7 +3061,6 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
               checkedFullDocument = true;
               if (opensFarmFullDocument(chunkText)) {
                 fullDocumentRoutes.add(fullDocumentRouteKey);
-                warnFarmFullDocumentLayout();
               }
             }
             htmlParts.push(chunkText);
@@ -3515,7 +3515,6 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
     // the production build's `hasFullDocument` path.
     const fullDocument = extractFarmFullDocument(content);
     if (fullDocument) {
-      warnFarmFullDocumentLayout();
       return composeFarmFullDocument(
         metadataHead ? removeFarmDocumentTitles(fullDocument) : fullDocument,
         {
@@ -3534,7 +3533,7 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
             metadataHead,
             alternateLinks,
             fontHead,
-            `<link rel="stylesheet" href="/src/app/globals.css" />`,
+            this.devGlobalStylesheetLink(true),
             ...this.collectDevStyleLinks(),
             `<script type="module" src="/@vite/client"></script>`,
             rendererHydrationScript,
@@ -3558,7 +3557,7 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
   <meta name="farm-deployment-id" content="${escapeHtmlAttribute(this.getDeploymentId())}">
   ${metadataHead ?? '<link rel="icon" href="data:,">\n  <title>Farm.js App</title>'}${alternateLinks}
   ${fontHead}
-  <link rel="stylesheet" href="/src/app/globals.css" />${this.collectDevStyleLinks()
+  ${this.devGlobalStylesheetLink(true)}${this.collectDevStyleLinks()
     .map((l) => `\n  ${l}`)
     .join("")}
   <script type="module" src="/@vite/client"></script>

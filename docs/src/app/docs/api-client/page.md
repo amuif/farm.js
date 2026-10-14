@@ -274,8 +274,9 @@ need its native ordering, duplicate-key, and encoding semantics.
 
 ## Scoped dynamic routes
 
-`farm generate`, development startup, and production builds emit `apiRoutes` alongside
-`APIRouter` in `src/lib/api.generated.ts`. Pass that manifest to enable parameter resolution:
+Once an app has API routes, `farm generate`, development startup, and production builds emit
+`apiRoutes` alongside `APIRouter` in `src/lib/api.generated.ts`. An app without API routes gets no
+such file. Pass that manifest to enable parameter resolution:
 
 ```ts
 import { createApiClients } from "@farm.js/core/client";

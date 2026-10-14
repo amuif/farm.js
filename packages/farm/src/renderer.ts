@@ -425,15 +425,36 @@ export function resolveFarmRendererModule(root: string, specifier: string): stri
   return requireFromApp.resolve(specifier);
 }
 
+/**
+ * Compile React JSX with the automatic runtime even when the app has no tsconfig.json.
+ * esbuild only picks the runtime up from `compilerOptions.jsx`, so a hand-written app
+ * without one fell back to `React.createElement` and failed with "React is not defined".
+ * JSX settings in the app's own Vite config still win; a tsconfig's `jsxImportSource`
+ * still applies. Rolldown-based Vite compiles with oxc, which already defaults to the
+ * automatic runtime, so this leaves it alone.
+ */
+function createFarmReactJsxPlugin() {
+  return {
+    name: "farm:react-jsx",
+    config(
+      this: { meta?: { rolldownVersion?: string } } | void,
+      config: { esbuild?: false | { jsx?: unknown } },
+    ) {
+      if (this && this.meta?.rolldownVersion) return;
+      if (config.esbuild === false || config.esbuild?.jsx !== undefined) return;
+      return { esbuild: { jsx: "automatic" as const } };
+    },
+  };
+}
+
 export async function loadFarmRendererVitePlugins(
   renderer: FarmRenderer,
   root: string,
   options: { ssr?: boolean } = {},
 ): Promise<unknown[]> {
-  // React uses Vite's default automatic JSX transform today. Keep the legacy
-  // path dependency-free and avoid resolving Farm's own built package while
-  // running directly from source in the monorepo.
-  if (renderer.vite === REACT_RENDERER.vite) return [];
+  // React needs no renderer package. Keep this path dependency-free and avoid
+  // resolving Farm's own built package while running from source in the monorepo.
+  if (renderer.vite === REACT_RENDERER.vite) return [createFarmReactJsxPlugin()];
 
   const modulePath = resolveFarmRendererModule(root, renderer.vite);
   const rendererModule = (await import(pathToFileURL(modulePath).href)) as FarmRendererViteModule;
