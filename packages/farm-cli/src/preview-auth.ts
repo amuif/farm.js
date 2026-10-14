@@ -460,6 +460,13 @@ async function loginWithPreviewDeviceFlow(
       device_code: device.device_code,
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     });
+    // Infra rate-limits polling. The person may be approving right now, so wait as long as
+    // it asks (capped at a minute) and keep polling until the code expires.
+    if (poll.status === 429) {
+      const retryAfter = Number(poll.headers.get("retry-after"));
+      await runtime.wait(retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : interval);
+      continue;
+    }
     const result = (await poll.json()) as {
       access_token?: string;
       expires_in?: number;
