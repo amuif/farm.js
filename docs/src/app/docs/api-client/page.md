@@ -1361,6 +1361,12 @@ message, stack, or custom properties.
 
 Action references identify which function to execute; they are not authorization tokens. Check authentication, roles, tenant ownership, and resource access inside every action that reads or changes private data.
 
+### Call server functions from agents
+
+Add `mcp: { name: "..." }` to a server function or query and list it in `mcp.tools` to make it an
+[MCP tool](/docs/plugins/mcp#server-functions-and-queries). Agents then call the same function as
+your UI, through its own schema and middleware, without the browser action transport.
+
 ## Production notes
 
 - Keep generated API types committed or generated during CI.

@@ -220,6 +220,7 @@ export type {
 export type {
   FarmMCPAuthorization,
   FarmMCPEndpoint,
+  FarmMCPServerFunction,
   FarmMCPToolDefinition,
   FarmMCPStandaloneTool,
   FarmMCPExecuteContext,
