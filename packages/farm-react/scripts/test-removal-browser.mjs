@@ -1,5 +1,6 @@
-// Development-browser correctness check for the maintained removal fixtures.
+// Development-browser correctness check for maintained target-free keyed fixtures.
 // Build @farm.js/react first. Optionally pass --executable-path /path/to/chrome.
+// Use --operations prepend to check the prepend-only runtime; defaults to filter,slice.
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -10,7 +11,17 @@ import { parseArgs } from "node:util";
 import { createServer } from "vite";
 import { createFarmRendererPlugin } from "../dist/vite.mjs";
 
-const { values } = parseArgs({ options: { "executable-path": { type: "string" } } });
+const { values } = parseArgs({
+  options: {
+    "executable-path": { type: "string" },
+    operations: { type: "string", default: "filter,slice" },
+  },
+});
+const operations = values.operations.split(",");
+assert.ok(
+  operations.length > 0 &&
+    operations.every((value) => ["filter", "slice", "prepend"].includes(value)),
+);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(packageRoot, "../..");
 const { chromium } = createRequire(`${repo}/package.json`)("@playwright/test");
@@ -37,7 +48,7 @@ try {
             name: "removal-browser-fixtures",
             enforce: "pre",
             async load(id) {
-              if (!/\/fixtures\/runtime-size\/keyed-(filter|slice)\.tsx$/.test(id)) return;
+              if (!/\/fixtures\/runtime-size\/keyed-(filter|slice|prepend)\.tsx$/.test(id)) return;
               const source = await readFile(id, "utf8");
               return source
                 .replace(
@@ -52,7 +63,7 @@ try {
             configureServer(vite) {
               vite.middlewares.use((req, res, next) => {
                 const operation = new URL(req.url, "http://localhost").pathname.slice(1);
-                if (!["filter", "slice"].includes(operation)) return next();
+                if (!operations.includes(operation)) return next();
                 res.setHeader("content-type", "text/html");
                 res.end(
                   `<!doctype html><html><head><link rel="icon" href="data:,"></head><body><script>window.__rowClicks=[]</script><script type="module" src="/@vite/client"></script><script type="module" src="/fixtures/runtime-size/keyed-${operation}.tsx"></script></body></html>`,
@@ -69,11 +80,18 @@ try {
       });
       try {
         await server.listen();
-        for (const operation of ["filter", "slice"]) {
+        for (const operation of operations) {
           const transformed = await server.transformRequest(
             `/fixtures/runtime-size/keyed-${operation}.tsx`,
           );
-          assert.equal(transformed.code.includes("keyedRowsFilterOnlyRuntimeFeature"), compiled);
+          assert.equal(
+            transformed.code.includes(
+              operation === "prepend"
+                ? "keyedRowsPrependOnlyRuntimeFeature"
+                : "keyedRowsFilterOnlyRuntimeFeature",
+            ),
+            compiled,
+          );
           if (compiled) assert.match(transformed.code, /delegateEvents: true/);
           const page = await browser.newPage();
           const errors = [];
@@ -91,23 +109,31 @@ try {
               document.querySelector("button").focus();
               document.querySelector("button").click();
             });
-            await page.waitForFunction(() => document.querySelectorAll("li").length === 999);
+            await page.waitForFunction(
+              (count) => document.querySelectorAll("li").length === count,
+              operation === "prepend" ? 1001 : 999,
+            );
             const result = await page.evaluate((operation) => {
-              const expected = [...Array(1000).keys()].filter(
-                (id) => id !== (operation === "filter" ? 500 : 0),
-              );
+              const expected =
+                operation === "prepend"
+                  ? [1000, ...Array(1000).keys()]
+                  : [...Array(1000).keys()].filter(
+                      (id) => id !== (operation === "filter" ? 500 : 0),
+                    );
               const rows = [...document.querySelectorAll("li")];
-              for (const index of [0, 499, 998]) rows[index].click();
+              for (const index of [0, 499, rows.length - 1]) rows[index].click();
               const result = {
                 content: rows.every(
                   (row, index) =>
                     row.dataset.id === String(expected[index]) &&
                     row.textContent === `Row ${expected[index]}`,
                 ),
-                identity: rows.every((row) => window.__before.get(row.dataset.id) === row),
+                identity: rows.every(
+                  (row) => row.dataset.id === "1000" || window.__before.get(row.dataset.id) === row,
+                ),
                 focus: document.activeElement === document.querySelector("button"),
                 calls: [...window.__rowClicks],
-                expectedCalls: [expected[0], expected[499], expected[998]],
+                expectedCalls: [expected[0], expected[499], expected.at(-1)],
               };
               window.__unmount();
               for (const row of rows) row.click();

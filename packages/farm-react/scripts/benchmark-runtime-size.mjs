@@ -239,7 +239,7 @@ if (
 }
 if (
   !keyedPrependOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedPrependOn.code.includes("keyed-rows:prepend-hinted") ||
+  !keyedPrependOn.code.includes("keyed-rows:prepend-only") ||
   !keyedPrependOn.code.includes("prependIndexIndependent")
 ) {
   throw new Error("Keyed prepend fixture did not retain its optional prepend-hint runtime.");

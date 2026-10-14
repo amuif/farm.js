@@ -14,6 +14,8 @@ import {
   createCompilerKeyedArraySlice,
   keyedRowsAppendOnlyRuntimeFeature,
   keyedRowsHintedRuntimeFeature,
+  keyedRowsPrependHintedRuntimeFeature,
+  keyedRowsPrependOnlyRuntimeFeature,
   keyedRowsMappedRollingWindowHintedRuntimeFeature,
   type CompiledComponentDefinition,
 } from "../compiler-runtime";
@@ -330,11 +332,17 @@ describe("keyed-row delegated element index", () => {
         },
       );
 
-      it.each(["none", "empty", "direct", "missing-path", "delegated"] as const)(
-        `${reactivity}/${lifecycle}: indexes only delegated rows in %s mode`,
-        async (mode) => {
+      it.each(
+        (["none", "empty", "direct", "missing-path", "delegated"] as const).flatMap((mode) =>
+          [undefined, keyedRowsPrependOnlyRuntimeFeature].map((feature) => ({ mode, feature })),
+        ),
+      )(
+        `${reactivity}/${lifecycle}: indexes only delegated rows in $mode mode ($feature.name)`,
+        async ({ mode, feature }) => {
           const h = harness(reactivity);
-          const Table = createCompiledComponent(h.definition(mode));
+          const Table = feature
+            ? createCompiledComponentWithFeatures(h.definition(mode), [feature])
+            : createCompiledComponent(h.definition(mode));
           const container = document.createElement("div");
           document.body.append(container);
           const content = (
@@ -426,9 +434,17 @@ describe("keyed-row delegated element index", () => {
       );
     }
 
-    it.each([keyedRowsHintedRuntimeFeature, keyedRowsAppendOnlyRuntimeFeature])(
+    it.each([
+      keyedRowsHintedRuntimeFeature,
+      keyedRowsAppendOnlyRuntimeFeature,
+      keyedRowsPrependHintedRuntimeFeature,
+      keyedRowsPrependOnlyRuntimeFeature,
+    ])(
       `${reactivity}: $name rebuilds when Fast Refresh changes event ownership`,
       async (feature) => {
+        const prepend =
+          feature === keyedRowsPrependOnlyRuntimeFeature ||
+          feature === keyedRowsPrependHintedRuntimeFeature;
         const h = harness(reactivity);
         const Table = createCompiledComponentWithFeatures(h.definition("none"), [feature]);
         const container = document.createElement("div");
@@ -458,26 +474,35 @@ describe("keyed-row delegated element index", () => {
           await change(() =>
             h.update(
               (items) =>
-                createCompilerKeyedArrayAppend(items, [
-                  ...items,
-                  { id: appendedId, label: "After refresh" },
-                ]) as Item[],
+                (prepend
+                  ? createCompilerKeyedArrayPrepend(items, [
+                      { id: appendedId, label: "After refresh" },
+                      ...items,
+                    ])
+                  : createCompilerKeyedArrayAppend(items, [
+                      ...items,
+                      { id: appendedId, label: "After refresh" },
+                    ])) as Item[],
             ),
           );
-          expect(writes.count).toBe(mode === "delegated" ? 1 : 0);
+          expect(writes.count).toBe(
+            mode === "delegated" ? (prepend ? container.querySelectorAll("button").length : 1) : 0,
+          );
           if (mode !== "empty") {
             await change(() =>
               container.querySelector<HTMLButtonElement>(`[data-key="${appendedId}"]`)!.click(),
             );
             expect(h.calls.at(-1)).toBe(
-              `After refresh:${container.querySelectorAll("button").length - 1}:${appendedId}`,
+              `After refresh:${prepend ? 0 : container.querySelectorAll("button").length - 1}:${appendedId}`,
             );
           }
           writes.count = 0;
           await change(() => h.update((items) => items.slice(1)));
           expect(container.querySelector('[data-key="32"]')).toBe(retained);
           if (mode !== "delegated") expect(writes.count).toBe(0);
-          staleReactRows = mode !== "direct";
+          // Removing the just-prepended row leaves all original React fibers live.
+          // Appending then removing the first original row does invalidate them.
+          staleReactRows = mode !== "direct" && !prepend;
           const row = container.querySelector<HTMLButtonElement>("button")!;
           if (mode !== "empty") {
             await change(() => row.click());

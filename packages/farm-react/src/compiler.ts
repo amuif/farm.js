@@ -394,6 +394,7 @@ type CompilerRuntimeFeatureName =
   | "keyed-rows-structural-prepend-hinted"
   | "keyed-rows-structural-prepend-map-hinted"
   | "keyed-rows-prepend-hinted"
+  | "keyed-rows-prepend-only"
   | "keyed-rows-filter-prepend-hinted"
   | "keyed-rows-conditional"
   | "keyed-rows-conditional-hinted"
@@ -484,6 +485,7 @@ const COMPILER_RUNTIME_FEATURE_EXPORTS: Record<CompilerRuntimeFeatureName, strin
   "keyed-rows-structural-prepend-hinted": "keyedRowsStructuralPrependHintedRuntimeFeature",
   "keyed-rows-structural-prepend-map-hinted": "keyedRowsStructuralPrependMapHintedRuntimeFeature",
   "keyed-rows-prepend-hinted": "keyedRowsPrependHintedRuntimeFeature",
+  "keyed-rows-prepend-only": "keyedRowsPrependOnlyRuntimeFeature",
   "keyed-rows-filter-prepend-hinted": "keyedRowsFilterPrependHintedRuntimeFeature",
   "keyed-rows-conditional": "keyedRowsConditionalRuntimeFeature",
   "keyed-rows-conditional-hinted": "keyedRowsConditionalHintedRuntimeFeature",
@@ -676,6 +678,15 @@ function runtimeFeaturesForPlans(
       // Filter and slice share removal hints. Every keyed plan must be plain
       // and target-free; opaque updates still use complete reconciliation.
       features.add("keyed-rows-filter-only");
+    } else if (
+      keyedRowsFeature === "keyed-rows" &&
+      hintSuffix === "-prepend-hinted" &&
+      keyedTargetKinds.size === 0 &&
+      !keyedMapOrAppendHints
+    ) {
+      // All keyed plans must be plain and target-free. Mixed/structural hints
+      // retain their broader runtime; opaque updates still fully reconcile.
+      features.add("keyed-rows-prepend-only");
     } else if (
       keyedRowsFeature === "keyed-rows" &&
       hintSuffix === "-filter-hinted" &&

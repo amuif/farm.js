@@ -23,7 +23,7 @@ async function bundle(kind, controlFeature) {
         transform(code, id) {
           if (!controlFeature || !id.endsWith(`keyed-${kind}.tsx`)) return;
           const control = code.replace(
-            /keyedRows(?:FilterOnly|AppendOnly|IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
+            /keyedRows(?:PrependOnly|FilterOnly|AppendOnly|IdentityFilterOnly|Identity|Membership|MapLookup)RuntimeFeature/g,
             () => {
               replaced = true;
               return controlFeature;
@@ -61,6 +61,7 @@ for (const kind of [
   "map-lookup",
   "identity-filter",
   "append",
+  "prepend",
   "filter",
   "slice",
 ]) {
@@ -69,17 +70,19 @@ for (const kind of [
     kind,
     kind === "append"
       ? "keyedRowsHintedRuntimeFeature"
-      : kind === "identity-filter" || removalOnly
-        ? "keyedRowsFilterHintedRuntimeFeature"
-        : "keyedRowsRuntimeFeature",
+      : kind === "prepend"
+        ? "keyedRowsPrependHintedRuntimeFeature"
+        : kind === "identity-filter" || removalOnly
+          ? "keyedRowsFilterHintedRuntimeFeature"
+          : "keyedRowsRuntimeFeature",
   );
   const specialized = await bundle(kind);
   assert.ok(
     specialized.code.includes(
-      `keyed-rows:${kind === "append" ? "append-only" : removalOnly ? "filter-only" : kind === "identity-filter" ? "identity-filter-only" : kind}`,
+      `keyed-rows:${kind === "append" ? "append-only" : kind === "prepend" ? "prepend-only" : removalOnly ? "filter-only" : kind === "identity-filter" ? "identity-filter-only" : kind}`,
     ),
   );
-  if (kind === "identity" || kind === "append" || removalOnly) {
+  if (kind === "identity" || kind === "append" || kind === "prepend" || removalOnly) {
     for (const marker of ["Set.prototype.has", "Map.prototype.get"]) {
       assert.ok(full.code.includes(marker), `control must retain ${marker}`);
       assert.ok(!specialized.code.includes(marker), `${kind} runtime must not retain ${marker}`);
@@ -93,8 +96,8 @@ for (const kind of [
       "append-only runtime must save at least 1 KiB gzip",
     );
   }
-  if (removalOnly) {
-    assert.ok(full.code.includes("keyed-rows:filter-hinted"));
+  if (removalOnly || kind === "prepend") {
+    assert.ok(full.code.includes(`keyed-rows:${kind === "prepend" ? "prepend" : "filter"}-hinted`));
     assert.ok(
       full.gzip - specialized.gzip >= 1024,
       `${kind}-only runtime must save at least 1 KiB gzip`,

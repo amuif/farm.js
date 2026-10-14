@@ -51,9 +51,10 @@ const baseline = git("show", `${baselineCommit}:packages/farm-react/src/compiler
 const candidate = readFileSync(runtime, "utf8");
 assert.notEqual(candidate.trim(), baseline, "baseline and candidate runtime must differ");
 // Both variants use the current compiler. Older baselines need the equivalent
-// broad runtime exports before append-only or filter-only selection existed.
+// broad runtime exports before append/filter/prepend-only selection existed.
 const legacyAppendControl = !baseline.includes("export const keyedRowsAppendOnlyRuntimeFeature");
 const legacyFilterControl = !baseline.includes("export const keyedRowsFilterOnlyRuntimeFeature");
+const legacyPrependControl = !baseline.includes("export const keyedRowsPrependOnlyRuntimeFeature");
 const bundles = new Map();
 const sizes = {};
 
@@ -68,7 +69,9 @@ for (const operation of operations) {
           ? ["keyedRowsAppendOnlyRuntimeFeature", "keyedRowsHintedRuntimeFeature"]
           : ["filter", "slice"].includes(operation) && legacyFilterControl
             ? ["keyedRowsFilterOnlyRuntimeFeature", "keyedRowsFilterHintedRuntimeFeature"]
-            : undefined;
+            : operation === "prepend" && legacyPrependControl
+              ? ["keyedRowsPrependOnlyRuntimeFeature", "keyedRowsPrependHintedRuntimeFeature"]
+              : undefined;
       let replacedFeature = false;
       assert.ok(original.includes("length: 1_000"));
       let fixture = original.replace("length: 1_000", `length: ${rowCount}`);
@@ -141,7 +144,9 @@ for (const operation of operations) {
                 ? "keyed-rows:hinted"
                 : "keyed-rows:append-only"
               : operation === "prepend"
-                ? "keyed-rows:prepend-hinted"
+                ? variant === "base" && legacyPrependControl
+                  ? "keyed-rows:prepend-hinted"
+                  : "keyed-rows:prepend-only"
                 : variant === "base" && legacyFilterControl
                   ? "keyed-rows:filter-hinted"
                   : "keyed-rows:filter-only",
@@ -283,6 +288,7 @@ try {
           "current compiler for both; equivalent broad feature substituted only when absent from baseline",
         legacyAppendControl,
         legacyFilterControl,
+        legacyPrependControl,
         operations,
         reactivity: values.reactivity,
         baselineRuntimeSha256: createHash("sha256").update(baseline).digest("hex"),

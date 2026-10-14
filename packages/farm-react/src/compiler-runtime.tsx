@@ -7019,6 +7019,14 @@ const keyedPrependUpdateRuntime: KeyedUpdateRuntime = {
   prepend: reconcileCompilerKeyedArrayPrepend,
 };
 
+// Compiler-proven prepend-only hints omit map/append fast paths, not fallback.
+const keyedPrependOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: () => undefined,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
+  prepend: reconcileCompilerKeyedArrayPrepend,
+};
+
 const keyedFilterPrependUpdateRuntime: KeyedUpdateRuntime = {
   ...keyedFilterUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrepend,
@@ -11319,6 +11327,15 @@ export const keyedRowsPrependHintedRuntimeFeature: CompilerRuntimeFeature = {
   create: (owner) => ({
     KeyedRows: createKeyedRowsBlockComponent(owner, {
       keyedUpdates: keyedPrependUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsPrependOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:prepend-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedUpdates: keyedPrependOnlyUpdateRuntime,
     }),
   }),
 };

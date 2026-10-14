@@ -386,6 +386,13 @@ positions into the prepend. The runtime removes only rejected rows, preserves ev
 node, and creates only the final prefix instead of rescanning and rebinding the whole result.
 Multiple adjacent prepends share the same proof.
 
+When every keyed list in a component is plain and has no targeted bindings, and prepend is
+the only emitted update hint, Farm selects a smaller prepend-only runtime. It omits unused
+target and map/append fast paths, but keeps the same prepend validation and complete keyed
+reconciliation for opaque or rejected updates. Mixed hints, conditional/host rows, and targeted
+bindings on any sibling list keep their existing runtime. This changes bundle size, not the
+supported update semantics or the prepend algorithm.
+
 The setter may be concise or use a block containing exactly one direct value-returning `return`.
 Extra statements, conditional returns, and missing returns keep complete keyed reconciliation.
 

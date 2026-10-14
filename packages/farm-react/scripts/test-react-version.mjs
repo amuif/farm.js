@@ -88,6 +88,7 @@ const testSource = String.raw`
     keyedRowsAppendOnlyRuntimeFeature,
     keyedRowsFilterHintedRuntimeFeature,
     keyedRowsFilterOnlyRuntimeFeature,
+    keyedRowsPrependOnlyRuntimeFeature,
     keyedRowsHintedRuntimeFeature,
     keyedRowsStructuralAppendMapHintedRuntimeFeature,
     keyedRowsIdentityRuntimeFeature,
@@ -3250,11 +3251,16 @@ const testSource = String.raw`
   flushSync(() => sliceRoot.unmount());
   }
 
+  assert.equal(createRequire(import.meta.url)("@farm.js/react/compiler-runtime").keyedRowsPrependOnlyRuntimeFeature.name, "keyed-rows:prepend-only");
+  for (const prependFeature of [undefined, keyedRowsPrependOnlyRuntimeFeature]) {
+  const createPrependComponent = prependFeature
+    ? (definition) => createCompiledComponentWithFeatures(definition, [prependFeature])
+    : createCompiledComponent;
   let prependRows = () => undefined;
   let refreshPrependRows = () => undefined;
   let prependKeyReads = 0;
   let prependBindingReads = 0;
-  const PrependRows = createCompiledComponent({
+  const PrependRows = createPrependComponent({
     displayName: "CompatibilityPrependRows",
     initialize: () => [[
       { id: "a", label: "Alpha" },
@@ -3348,8 +3354,10 @@ const testSource = String.raw`
   assert.equal(prependContainer.querySelector("[data-key='a']"), null);
   assert.equal(prependContainer.querySelector("[data-key='b']"), prependBeta);
   assert.equal(prependKeyReads, 4);
-  assert.equal(prependBindingReads, 1);
+  // A hand-authored mixed hint uses complete reconciliation in the narrow runtime.
+  assert.equal(prependBindingReads, prependFeature ? 4 : 1);
   flushSync(() => prependRoot.unmount());
+  }
 
   let editableRowExecutions = 0;
   let editableListRenders = 0;

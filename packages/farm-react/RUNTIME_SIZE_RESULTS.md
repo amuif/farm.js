@@ -351,6 +351,89 @@ remove 0.90/0.90, clear 2.30/2.20. Recorded one-minute load averages are 28.62 b
 after. Since the JavaScript is identical, these small timing differences are diagnostic noise,
 not a benefit attributed to this specialization. No existing framework benchmark headline changes.
 
+## Target-free prepend-only runtime
+
+Plain target-free keyed lists whose accepted hints require only prepend now select
+`keyedRowsPrependOnlyRuntimeFeature`. The compiler aggregates requirements across all sibling
+lists. Map/append/filter/structural hints, target bindings, conditionals, and host blocks keep
+their existing features. The new export uses the existing core wrapper and prepend validator;
+it removes unused target and map/append capabilities without changing the prepend algorithm,
+event-index maintenance, or complete reconciliation fallback. Legacy exports remain intact.
+
+Measured against main `00dfae77ed7fe32ae66637dbc3b8f7b654f915b2` with Node 24.21.0,
+React/React DOM 19.2.8, Vite 5.4.20, esbuild 0.21.5, Babel 7.28.4, macOS 26.2 arm64 / Apple M1.
+Both builds use the maintained `keyed-prepend.tsx` fixture, identical dependencies and compiler
+settings, Vite/esbuild production minification, gzip level 9, and Node's default Brotli:
+
+| Prepend fixture |       Raw |     Gzip |   Brotli |
+| --------------- | --------: | -------: | -------: |
+| Before          | 241,888 B | 74,280 B | 63,605 B |
+| After           | 233,262 B | 72,267 B | 61,814 B |
+| Saved           |   8,626 B |  2,013 B |  1,791 B |
+
+The compiler gzip premium drops from 14,134 B to 12,121 B (14.2%); total fixture gzip falls
+2.7%. All other maintained fixture results and every compiler-disabled result remain unchanged
+in raw/gzip/Brotli. Persisted budgets are not rewritten. The paired gate substitutes the legacy
+prepend feature only for the control, requires at least 1 KiB gzip savings and a Brotli reduction,
+and rejects retained Set/Map target guards.
+
+The component-wide selector regression fails in four positive cases on the baseline and passes
+with the specialization. Static/hybrid runtime coverage includes duplicate and numeric/string
+equivalent keys, empty/queued prefixes, atomic key/descriptor/binding failures, sparse/subclassed
+arrays, custom iterators, and a proxy that rejects metadata inspection after adoption. Opaque
+and hand-authored mixed updates still reconcile. Lifecycle checks cover focus/selection, ordinary
+and delegated events/indexes, disposal, hydration, Strict Mode, and Fast Refresh. Packaged React
+18.3.1 and 19.2.8 checks exercise the new ESM feature and its CJS export.
+
+Reproduce after building the package:
+
+```bash
+pnpm --filter @farm.js/react test:runtime-size
+node packages/farm-react/scripts/test-removal-browser.mjs --operations prepend
+node packages/farm-react/scripts/benchmark-row-event-index.mjs --baseline-ref 00dfae77ed7fe32ae66637dbc3b8f7b654f915b2 --operations append,prepend
+node packages/farm-react/scripts/benchmark-row-event-index.mjs --baseline-ref 00dfae77ed7fe32ae66637dbc3b8f7b654f915b2 --operations append,prepend --reactivity static
+```
+
+Browser commands accept `--executable-path` for installed Chrome. The development check uses
+both scheduling modes and an uncompiled React control, checking content, retained DOM identity,
+focus, delegated events, and disposal. The production diagnostic uses 10,000 rows, five warm-ups,
+35 alternating paired samples, ordinary/delegated event variants, and React correctness controls.
+It measures programmatic click to mutation observer, not layout, paint, startup, or an official
+cross-framework benchmark. Payload savings alone do not establish faster browser operations.
+
+Chrome 155.0.8059.40 passed all production correctness controls with no page/console errors.
+Before/after median and interquartile milliseconds from the paired runs:
+
+| Mode   | Operation      | Delegated events | Before median [Q1–Q3] | After median [Q1–Q3] |
+| ------ | -------------- | ---------------- | --------------------: | -------------------: |
+| Hybrid | Append control | No               |      0.30 [0.30–0.40] |     0.30 [0.30–0.40] |
+| Hybrid | Append control | Yes              |      0.30 [0.30–0.40] |     0.30 [0.30–0.40] |
+| Hybrid | Prepend        | No               |      1.80 [1.60–1.90] |     1.70 [1.50–1.80] |
+| Hybrid | Prepend        | Yes              |      2.40 [2.30–2.60] |     2.50 [2.40–2.70] |
+| Static | Append control | No               |      0.30 [0.20–0.30] |     0.30 [0.30–0.30] |
+| Static | Append control | Yes              |      0.40 [0.30–0.40] |     0.40 [0.30–0.40] |
+| Static | Prepend        | No               |      2.20 [1.80–2.50] |     2.10 [1.80–2.30] |
+| Static | Prepend        | Yes              |      3.10 [2.50–3.40] |     2.80 [2.40–3.40] |
+
+The shared host was heavily loaded: recorded one-minute load averages span 6.89–75.34. The
+distributions overlap and small deltas differ by event/mode; these data neither establish a CPU
+improvement nor rule out small regressions. The confirmed improvement is payload. The hybrid run
+emitted its full results but stalled during cleanup after Chrome had exited; its owned diagnostic
+process was stopped. The static run completed and exited normally. No framework timeout or
+correctness assertion was relaxed.
+
+The maintained `benchmarks/react-optimizer` mixed dashboard remains byte-identical before/after:
+233,473 B raw / 71,327 B gzip / 61,796 B Brotli. Build its `src/main.tsx` with the same current
+compiler and Vite/esbuild automatic JSX settings, alias `virtual:bench-component` to `src/bench.tsx`,
+and alias the runtime to baseline/current source for the pair. Both builds and uncompiled React
+pass the maintained runner's correctness functions (including input focus/selection and identity)
+for create, update, select, swap, append, remove, and clear, with no page errors. Five alternating
+paired trials using its `runTrial` function, five warm-up cycles, and 20 measured cycles per trial
+give median milliseconds before/after: create 3.70/3.80, update 0.50/0.50, select 0.20/0.20,
+swap 0.40/0.50, append 0.80/0.80, remove 0.90/1.00, clear 2.30/2.40. Start/end one-minute loads
+were 28.13/35.91. Since the emitted JavaScript is identical, these timing differences are noise,
+not a change attributable to prepend specialization. Existing cross-framework headlines are unchanged.
+
 ## Existing production benchmark audit
 
 The existing js-framework-benchmark application was also rebuilt before and after runtime
