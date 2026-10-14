@@ -2411,6 +2411,11 @@ is a Babel AST transform, not a Rust compiler pass. It parses application TSX/JS
 JSX lowering, discovers candidate components, validates the full supported contract, and emits
 source maps with the transformed module.
 
+Local state, setters, derived values, props, and handlers retain JavaScript's lexical scoping,
+including names that shadow globals such as `Math`, `Map`, or `NaN`. Nested callback parameters
+still shadow outer bindings. A shadowed global is not treated as a whitelisted built-in call;
+unsupported usage retains the ordinary React fallback.
+
 For each eligible component, the transform conceptually emits a definition like this:
 
 ```ts

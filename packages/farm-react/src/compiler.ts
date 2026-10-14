@@ -753,6 +753,9 @@ function cloneExpression<T extends t.Expression>(expression: T): T {
   return t.cloneNode(expression, true) as T;
 }
 
+// These detached trees omit the enclosing component's bindings. When resolving
+// a known component local, only bindings inside the expression can shadow it;
+// Babel's implicit globals (Math, NaN, undefined, etc.) must not count as locals.
 function expressionFile(expression: t.Expression): t.File {
   return t.file(t.program([t.expressionStatement(expression)]));
 }
@@ -766,7 +769,8 @@ function collectStateDependencies(
   traverse(file, {
     ReferencedIdentifier(path) {
       const state = statesByValue.get(path.node.name);
-      if (state && !path.scope.hasBinding(path.node.name)) dependencies.add(state.index);
+      if (state && !path.scope.hasBinding(path.node.name, { noGlobals: true }))
+        dependencies.add(state.index);
     },
   });
   return [...dependencies].sort((left, right) => left - right);
@@ -776,7 +780,7 @@ function referencesIdentifier(expression: t.Expression, name: string): boolean {
   let referenced = false;
   traverse(expressionFile(cloneExpression(expression)), {
     ReferencedIdentifier(path) {
-      if (path.node.name === name && !path.scope.hasBinding(name)) {
+      if (path.node.name === name && !path.scope.hasBinding(name, { noGlobals: true })) {
         referenced = true;
       }
     },
@@ -792,7 +796,7 @@ function rewriteFreeIdentifierNames<T extends t.Expression>(
   const file = expressionFile(cloneExpression(expression));
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (path.scope.hasBinding(path.node.name)) return;
+      if (path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const replacement = replacements.get(path.node.name);
       if (!replacement) return;
       path.replaceWith(t.cloneNode(replacement));
@@ -829,7 +833,7 @@ function keyedIdentityTarget(
   let comparisons = 0;
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (!valid || path.scope.hasBinding(path.node.name)) return;
+      if (!valid || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const reactive = reactiveByValue.get(path.node.name);
       if (!reactive) return;
       if (reactive.index !== dependencies[0] || (target && target !== reactive)) {
@@ -954,7 +958,7 @@ function keyedMembershipTarget(
   let calls = 0;
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (!valid || path.scope.hasBinding(path.node.name)) return;
+      if (!valid || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const reactive = reactiveByValue.get(path.node.name);
       if (!reactive) return;
       const member = path.parentPath;
@@ -1014,7 +1018,7 @@ function keyedMapLookupTarget(
   let calls = 0;
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (!valid || path.scope.hasBinding(path.node.name)) return;
+      if (!valid || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const reactive = reactiveByValue.get(path.node.name);
       if (!reactive) return;
       const member = path.parentPath;
@@ -1051,7 +1055,10 @@ function collectReferencedLocals(expression: t.Expression, names: ReadonlySet<st
   const references = new Set<string>();
   traverse(expressionFile(cloneExpression(expression)), {
     ReferencedIdentifier(path) {
-      if (names.has(path.node.name) && !path.scope.hasBinding(path.node.name)) {
+      if (
+        names.has(path.node.name) &&
+        !path.scope.hasBinding(path.node.name, { noGlobals: true })
+      ) {
         references.add(path.node.name);
       }
     },
@@ -1066,7 +1073,7 @@ function rewriteDerivedAccess<T extends t.Expression>(
   const file = expressionFile(cloneExpression(expression));
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (path.scope.hasBinding(path.node.name)) return;
+      if (path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const derived = derivedByName.get(path.node.name);
       if (!derived) return;
       path.replaceWith(cloneExpression(derived));
@@ -1085,7 +1092,8 @@ function rewriteDestructuredPropAccess<T extends t.Expression>(
   const file = expressionFile(cloneExpression(expression));
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (!names.has(path.node.name) || path.scope.hasBinding(path.node.name)) return;
+      if (!names.has(path.node.name) || path.scope.hasBinding(path.node.name, { noGlobals: true }))
+        return;
       if (path.parentPath.isJSXOpeningElement() || path.parentPath.isJSXClosingElement()) return;
       path.replaceWith(
         t.memberExpression(t.cloneNode(propsParameter), t.identifier(path.node.name)),
@@ -1155,7 +1163,7 @@ function rewriteHandlerAccess(
   let reason: string | undefined;
   traverse(file, {
     ReferencedIdentifier(path) {
-      if (reason || path.scope.hasBinding(path.node.name)) return;
+      if (reason || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const handler = handlersByName.get(path.node.name);
       if (!handler) return;
       const container = path.parentPath;
@@ -1271,7 +1279,7 @@ function validateSetterUsage(
     ReferencedIdentifier(path) {
       if (reason) return;
       const state = statesBySetter.get(path.node.name);
-      if (!state || path.scope.hasBinding(path.node.name)) return;
+      if (!state || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       const parent = path.parentPath;
       if (
         !parent.isCallExpression() ||
@@ -1495,7 +1503,8 @@ function rewriteKeyedMapUpdateHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -1580,7 +1589,8 @@ function rewriteKeyedArrayAppendHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -1684,7 +1694,8 @@ function rewriteKeyedArrayPrependHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -1794,7 +1805,8 @@ function rewriteKeyedArrayRollingWindowHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -1983,7 +1995,8 @@ function rewriteKeyedArrayPositionHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -2149,7 +2162,8 @@ function rewriteKeyedArrayReorderHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -2408,7 +2422,8 @@ function rewriteKeyedArrayReorderPipelineHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -2682,7 +2697,7 @@ function rewriteQueuedKeyedArrayReorderMapHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           queuedReorderState = undefined;
@@ -2845,7 +2860,7 @@ function rewriteQueuedKeyedArrayMappedStructuralHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           mappedStructuralState = undefined;
@@ -3001,7 +3016,7 @@ function rewriteQueuedKeyedArrayStructuralMapHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           structuralState = undefined;
@@ -3172,7 +3187,7 @@ function rewriteQueuedKeyedArrayStructuralPrependMapHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           structuralState = undefined;
@@ -3444,7 +3459,7 @@ function rewriteQueuedKeyedArrayRollingWindowMapHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           flushSegment();
@@ -3542,7 +3557,7 @@ function rewriteQueuedKeyedArrayStructuralReorderHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           structuralState = undefined;
@@ -3724,7 +3739,7 @@ function rewriteQueuedKeyedArrayMapReorderHints(
         const setterCall = statement.expression;
         if (
           !t.isIdentifier(setterCall.callee) ||
-          statementPath.scope.hasBinding(setterCall.callee.name) ||
+          statementPath.scope.hasBinding(setterCall.callee.name, { noGlobals: true }) ||
           setterCall.arguments.length !== 1
         ) {
           mappedReorderState = undefined;
@@ -3866,7 +3881,8 @@ function rewriteKeyedArraySortHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -3952,7 +3968,8 @@ function rewriteKeyedArraySliceHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -4036,7 +4053,8 @@ function rewriteKeyedArrayFilterHints(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state || !hintedStateIndices.has(state.index) || path.node.arguments.length !== 1) {
         return;
@@ -4163,7 +4181,7 @@ function collectionStateHasOnlyOwnedReads(
         !valid ||
         !t.isIdentifier(path.node) ||
         path.node.name !== state.valueName ||
-        path.scope.hasBinding(path.node.name)
+        path.scope.hasBinding(path.node.name, { noGlobals: true })
       ) {
         return;
       }
@@ -4503,7 +4521,7 @@ function rewriteKeyedCollectionUpdateHints(
         const callee = path.get("callee");
         if (
           !callee.isIdentifier({ name: state.setterName }) ||
-          callee.scope.hasBinding(callee.node.name) ||
+          callee.scope.hasBinding(callee.node.name, { noGlobals: true }) ||
           statesBySetter.get(callee.node.name)?.index !== stateIndex
         ) {
           return;
@@ -4585,7 +4603,8 @@ function snapshotDeferredHandlerReads(
       handler.traverse({
         ReferencedIdentifier(reference) {
           const name = reference.node.name;
-          if (!reactiveNames.has(name) || reference.scope.hasBinding(name)) return;
+          if (!reactiveNames.has(name) || reference.scope.hasBinding(name, { noGlobals: true }))
+            return;
           let snapshot = snapshots.get(name);
           if (!snapshot) {
             snapshot = handler.scope.generateUidIdentifier(name);
@@ -4620,7 +4639,8 @@ function rewriteStateAccess(
   traverse(file, {
     CallExpression(path) {
       const callee = path.get("callee");
-      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name)) return;
+      if (!callee.isIdentifier() || callee.scope.hasBinding(callee.node.name, { noGlobals: true }))
+        return;
       const state = statesBySetter.get(callee.node.name);
       if (!state) return;
       callee.replaceWith(
@@ -4632,7 +4652,7 @@ function rewriteStateAccess(
     },
     ReferencedIdentifier(path) {
       const state = statesByValue.get(path.node.name);
-      if (!state || path.scope.hasBinding(path.node.name)) return;
+      if (!state || path.scope.hasBinding(path.node.name, { noGlobals: true })) return;
       path.replaceWith(
         t.callExpression(
           t.memberExpression(
