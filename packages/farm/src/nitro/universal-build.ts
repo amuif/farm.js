@@ -190,6 +190,41 @@ function preloadFarmNitroBuilder(): Promise<PromiseSettledResult<FarmNitroBuilde
 // Get __dirname equivalent for ESM
 const _filename = typeof import.meta.url !== "undefined" ? fileURLToPath(import.meta.url) : "";
 const _dirname = path.dirname(_filename);
+
+/** The installed @farm.js/core package directory, found from this module's own file. */
+function findFarmCoreRoot(from: string): string | null {
+  let dir = path.dirname(from);
+  while (dir !== path.dirname(dir)) {
+    const manifest = path.join(dir, "package.json");
+    if (existsSync(manifest)) {
+      try {
+        if (JSON.parse(readFileSync(manifest, "utf8")).name === "@farm.js/core") return dir;
+      } catch {}
+    }
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+const farmCoreRoot = _filename ? findFarmCoreRoot(_filename)?.split("\\").join("/") : undefined;
+
+/**
+ * Tree-shaking for the server bundle. Farm's own modules have no import side effects, so
+ * unused ones (including build-time helpers reachable from the package root) are dropped.
+ * Every other module keeps its top-level code unless its package declares `sideEffects`:
+ * SDKs register defaults on import (the OpenAI Agents default model provider, LangGraph's
+ * AsyncLocalStorage), and dropping that code broke them and crashed Rolldown on LangGraph.
+ *
+ * `undefined` defers to the package: Rolldown reads its `sideEffects` field, and Rollup
+ * keeps the module unless the resolved package marked it side-effect free.
+ */
+function farmServerModuleSideEffects(id: string): false | undefined {
+  const file = id.split("\\").join("/");
+  if (file.includes("/node_modules/@farm.js/")) return false;
+  if (farmCoreRoot && file.startsWith(`${farmCoreRoot}/`)) return false;
+  return undefined;
+}
+
 const NODE_BUILTIN_MODULES = new Set([
   ...builtinModules,
   ...builtinModules.map((moduleName) => `node:${moduleName}`),
@@ -4374,9 +4409,9 @@ async function buildSSRInMemory(
             /\.node$/,
             /^node:/,
           ],
-          // Optimize tree-shaking
           treeshake: {
-            moduleSideEffects: false,
+            // Rollup's type wants a boolean; both bundlers accept `undefined` (see the hook).
+            moduleSideEffects: farmServerModuleSideEffects as Rollup.HasModuleSideEffects,
           },
         },
       },
