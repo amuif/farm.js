@@ -167,7 +167,11 @@ export function farmFontImportsPlugin(
 
     load(id) {
       if (id === FONT_RUNTIME_ID) {
-        return `export const farmFontPreloadHeader = decodeURIComponent(${JSON.stringify(PRELOAD_HEADER_MARKER)});`;
+        // The marker is replaced after bundling, possibly with "". Read it
+        // through JSON.parse so the bundler cannot treat the non-empty marker
+        // as the value and fold `farmFontPreloadHeader ? ... : ...` guards.
+        const marker = JSON.stringify(JSON.stringify(PRELOAD_HEADER_MARKER));
+        return `export const farmFontPreloadHeader = decodeURIComponent(JSON.parse(${marker}));`;
       }
       if (!id.startsWith(FONT_CSS_PREFIX)) return null;
       return registry.renderFontCss(
