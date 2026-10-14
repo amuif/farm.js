@@ -8,7 +8,7 @@ import {
   logger,
   migrateSchemaTables,
   resolveConfig,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
 import { detectOrmSchemaOwners, renderSchemaExtensionForOrm } from "./generate";
 
 export interface MigrateSchemaOptions {

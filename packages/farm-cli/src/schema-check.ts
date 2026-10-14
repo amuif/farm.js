@@ -1,7 +1,8 @@
 import path from "path";
-import { checkSchema, loadConfig, resolveConfig, type FarmSchemaCheckReport } from "@farm.js/core";
+import { checkSchema, loadConfig, resolveConfig } from "@farm.js/core/internal/cli-runtime";
+import type { FarmSchemaCheckReport } from "@farm.js/core";
 
-export { formatSchemaCheck } from "@farm.js/core";
+export { formatSchemaCheck } from "@farm.js/core/internal/cli-runtime";
 
 export interface CheckSchemaOptions {
   root?: string;

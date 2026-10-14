@@ -199,6 +199,9 @@
       "internal/production-node-env": [
         "./dist/internal/production-node-env.d.ts"
       ],
+      "internal/cli-runtime": [
+        "./dist/internal/cli-runtime.d.ts"
+      ],
       "internal/request-cookies": [
         "./dist/internal/request-cookies.d.ts"
       ],
@@ -655,6 +658,11 @@
       "types": "./dist/internal/production-node-env.d.ts",
       "import": "./dist/internal/production-node-env.mjs",
       "require": "./dist/internal/production-node-env.cjs"
+    },
+    "./internal/cli-runtime": {
+      "types": "./dist/internal/cli-runtime.d.ts",
+      "import": "./dist/internal/cli-runtime.mjs",
+      "require": "./dist/internal/cli-runtime.cjs"
     },
     "./internal/request-cookies": {
       "types": "./dist/internal/request-cookies.d.ts",

@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { logger } from "@farm.js/core";
+import { logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewFarmOptions, PreviewTarget } from "./preview";
 import { formatCompactPreviewDuration } from "./preview-duration";
 

@@ -11,7 +11,7 @@ import {
   resolveConfig,
   resolveDeployConfig,
   resolveDeployOutputPath,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
 import { buildFarm } from "./build";
 
 export interface DeployFarmOptions {

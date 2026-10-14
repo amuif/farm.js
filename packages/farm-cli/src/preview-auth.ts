@@ -4,7 +4,7 @@ import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
-import { logger } from "@farm.js/core";
+import { logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewGatewayPlan } from "./preview-gateway";
 import { formatCompactPreviewDuration } from "./preview-duration";
 

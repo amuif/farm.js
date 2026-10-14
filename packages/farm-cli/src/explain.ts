@@ -10,9 +10,8 @@ import {
   resolveFarmRouteRuntimeConfig,
   resolveRouteRenderingConfig,
   scanProgrammaticPagePaths,
-  type FarmRouteRule,
-  type FarmRouteRuntimeConfig,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
+import type { FarmRouteRule, FarmRouteRuntimeConfig } from "@farm.js/core";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import pc from "picocolors";

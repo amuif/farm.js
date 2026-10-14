@@ -1,10 +1,5 @@
-import {
-  loadConfig,
-  logger,
-  resolveConfig,
-  type FarmCronJob,
-  type FarmCronResolvedConfig,
-} from "@farm.js/core";
+import { loadConfig, logger, resolveConfig } from "@farm.js/core/internal/cli-runtime";
+import type { FarmCronJob, FarmCronResolvedConfig } from "@farm.js/core";
 import { Cron } from "croner";
 import path from "node:path";
 import { createHttpLocalUrl } from "./local-url";

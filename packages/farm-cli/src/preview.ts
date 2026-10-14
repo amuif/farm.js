@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, logger } from "@farm.js/core";
+import { loadConfig, logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewAgentSession } from "@farm.js/tunnel";
 import {
   createPreviewGatewayPlan,

@@ -4,9 +4,8 @@ import {
   getFarmDocsRouteTypeEntries,
   loadConfig,
   resolveConfig,
-  type FarmCronJob,
-  type ResolvedFarmConfig,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
+import type { FarmCronJob, ResolvedFarmConfig } from "@farm.js/core";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
