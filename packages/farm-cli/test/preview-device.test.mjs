@@ -44,6 +44,12 @@ function fixture(options = {}) {
       opened.push(url);
       return true;
     },
+    async confirm() {
+      return true;
+    },
+    async chooseProject() {
+      return undefined;
+    },
     async promptDuration() {
       assert.ok(options.cached || saved.length);
       return 7200_000;
@@ -69,6 +75,8 @@ function fixture(options = {}) {
         if (error) return Response.json({ error }, { status: 400 });
         return Response.json({ access_token: "device-session", expires_in: 86400 });
       }
+      if (url.endsWith("/api/previews/key"))
+        return Response.json({ key: "farmjs_cli_key_fixture" }, { status: 201 });
       if (url.endsWith("/api/tunnel/grants"))
         return options.reject
           ? Response.json({ error: "unauthorized" }, { status: 401 })
@@ -82,12 +90,14 @@ test("Farm.js Infrastructure device sign-in handles pending/slow-down and return
   const f = fixture();
   const result = await authorizePreviewGatewayPlan(plan, { runtime: f.runtime, forceLogin: true });
   assert.deepEqual(f.waits, [5000, 5000, 10000]);
-  assert.deepEqual(f.saved, ["device-session"]);
+  // The approved sign-in becomes an API key; only the key is saved and sent.
+  assert.deepEqual(f.saved, ["farmjs_cli_key_fixture"]);
   assert.equal(result.relayToken, "scoped-grant");
   assert.equal(result.dashboardUrl, "https://infra.example.com/dashboard/previews");
   assert.equal(result.expiresInMs, 7200_000);
-  assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer device-session");
+  assert.equal(f.calls.at(-1).init.headers.authorization, "Bearer farmjs_cli_key_fixture");
   assert.ok(!JSON.stringify(result).includes("device-session"));
+  assert.ok(!JSON.stringify(result).includes("farmjs_cli_key_fixture"));
 });
 test("Farm.js Infrastructure API keys skip browser approval in CI and do not get persisted", async () => {
   const previous = process.env.FARM_PREVIEW_TOKEN;

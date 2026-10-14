@@ -3795,6 +3795,9 @@ interface CompilerKeyedMapLookupValue {
 
 const UNSET_KEYED_ROW_BINDING = Symbol("unset interactive keyed-row binding");
 
+// Beyond this many changed positions a reorder takes the complete reconcile.
+const KEYED_ROWS_MAX_MOVED = 64;
+
 /**
  * The identity a keyed row is stored under. React compares keys as strings, so `1` and `"1"` are
  * the same key; numbers stay numbers here, and a string that is exactly a number's canonical
@@ -9325,21 +9328,58 @@ function createKeyedRowsBlockComponentCore(
       keySet?: Set<KeyedRowKey>;
       /** Set when the keys are the committed keys followed by new ones. */
       appended?: boolean;
+      /**
+       * Set when the keys are the committed keys reordered among these
+       * ascending positions only, such as a swap. A moved row's committed
+       * position is also a moved position; `sources` holds its index here.
+       */
+      moved?: { positions: number[]; sources: number[] };
     } | null {
       const items = materializeIterable(props.items());
       const keys: KeyedRowKey[] = [];
       const committedSize = this.instances.size;
       let prefix = 0;
+      // A same-length update keeps comparing past the first difference, so a
+      // few moved rows can be recognized without a set of every key.
+      let tracking = true;
+      let moved: number[] | undefined;
+      let displaced: KeyedRowKey[] | undefined;
       const committed = this.instances.keys();
       for (let index = 0; index < items.length; index += 1) {
         const key = keyedRowIdentity(props.rowKey(items[index], index));
         keys.push(key);
-        if (prefix === index && index < committedSize && committed.next().value === key) {
-          prefix += 1;
+        if (!tracking || index >= committedSize) continue;
+        const committedKey = committed.next().value as KeyedRowKey;
+        if (committedKey === key) {
+          if (prefix === index) prefix += 1;
+          continue;
         }
+        if (items.length !== committedSize || (moved && moved.length === KEYED_ROWS_MAX_MOVED)) {
+          tracking = false;
+          moved = displaced = undefined;
+          continue;
+        }
+        (moved ??= []).push(index);
+        (displaced ??= []).push(committedKey);
       }
       // The committed keys are unique, so the same sequence needs no recheck.
       if (prefix === committedSize && keys.length === committedSize) return { items, keys };
+      if (moved && displaced) {
+        // Every other position holds its committed key, so the keys are the
+        // committed (unique) keys in a new order exactly when the moved
+        // positions hold the displaced keys, each once.
+        const pending = new Map<KeyedRowKey, number>();
+        for (let index = 0; index < moved.length; index += 1) pending.set(displaced[index], index);
+        const sources: number[] = [];
+        for (const position of moved) {
+          const source = pending.get(keys[position]);
+          if (source === undefined) break;
+          pending.delete(keys[position]);
+          sources.push(source);
+        }
+        if (sources.length === moved.length)
+          return { items, keys, moved: { positions: moved, sources } };
+      }
       if (prefix === committedSize && committedSize > 0) {
         // Only the new tail needs checking, against itself and the committed rows.
         const tail = new Set<KeyedRowKey>();
@@ -9769,36 +9809,49 @@ function createKeyedRowsBlockComponentCore(
         index += 1;
       }
 
+      // Keys match the committed order, so instances line up with rows.
+      const conditionalChanges = this.patchOrderedRows(
+        rows,
+        [...this.instances.values()],
+        afterCommit,
+      );
+      if (!conditionalChanges) return true;
+      this.commitCurrentCollection(dirtyState);
+      this.notifyConditionalChanges(conditionalChanges, afterCommit);
+      return true;
+    }
+
+    // Rereads and patches every row as React would rerender it. `ordered` holds
+    // the existing instance for each row. Returns undefined after activating
+    // the fallback.
+    private patchOrderedRows(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
+      ordered: CompilerKeyedRowInstance[],
+      afterCommit?: () => void,
+    ): RowConditionalChange[] | undefined {
       // Host scopes can replace binding targets during their update, so only
       // static row structures can safely resolve the whole row set up front.
       const shouldPrepareBindings =
         rows.items.length > 1 &&
         this.currentProps.bindings.length > 0 &&
         !this.currentProps.hostBlocks;
-      // Keys match the committed order, so instances line up with rows.
-      const ordered = [...this.instances.values()];
       const preparedBindings = shouldPrepareBindings
         ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows, ordered)
         : undefined;
       if (shouldPrepareBindings && !preparedBindings) {
         this.activateFallback(afterCommit);
-        return true;
+        return undefined;
       }
 
-      const conditionalChanges: Array<{
-        key: KeyedRowKey;
-        id: number;
-        item: unknown;
-        index: number;
-      }> = [];
-      for (index = 0; index < rows.items.length; index += 1) {
+      const conditionalChanges: RowConditionalChange[] = [];
+      for (let index = 0; index < rows.items.length; index += 1) {
         const key = rows.keys[index];
         const existing = ordered[index];
         if (this.currentProps.hostBlocks) {
           const descriptor = this.currentProps.create(rows.items[index], index);
           if (!existing.scope?.update(descriptor)) {
             this.activateFallback(afterCommit);
-            return true;
+            return undefined;
           }
         }
         const bindingUpdates = preparedBindings?.[index];
@@ -9826,9 +9879,47 @@ function createKeyedRowsBlockComponentCore(
         existing.item = rows.items[index];
         existing.index = index;
       }
+      return conditionalChanges;
+    }
+
+    // The same rows in a new order that differs only at the ascending `moved`
+    // positions: patch every row, then move only moved rows outside a stable
+    // subsequence. A moved row may stay put only when every position between
+    // its committed and final place also moved; otherwise an unmoved row lies
+    // between them and the order would be wrong. Inserting the rest from the
+    // last position down puts each before its final next sibling.
+    private reconcileMovedRows(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
+      moved: readonly number[],
+      sources: readonly number[],
+      afterCommit?: () => void,
+      dirtyState?: ReadonlySet<number>,
+    ): void {
+      const ordered = [...this.instances.values()];
+      for (const position of moved) ordered[position] = this.instances.get(rows.keys[position])!;
+      const conditionalChanges = this.patchOrderedRows(rows, ordered, afterCommit);
+      if (!conditionalChanges) return;
+      // Moved positions are ascending and distinct, so every position between
+      // two of them moved exactly when their index distance is their distance.
+      const sequence = sources.map((source, index) =>
+        Math.abs(moved[source] - moved[index]) === Math.abs(source - index) ? source : -1,
+      );
+      const stays = longestIncreasingSubsequencePositions(sequence);
+      const root = this.root!;
+      const activeElement = compilerFocusedElement(root);
+      for (let index = moved.length - 1; index >= 0; index -= 1) {
+        if (stays[index]) continue;
+        const position = moved[index];
+        const element = ordered[position].element;
+        const anchor = position + 1 < ordered.length ? ordered[position + 1].element : null;
+        if (element.nextSibling !== anchor) root.insertBefore(element, anchor);
+      }
+      restoreCompilerFocus(activeElement);
+      // The same elements stay mounted, so the element index and handlers
+      // are unchanged; only the key order moves.
+      this.instances = keyedRowInstancesByKey(ordered);
       this.commitCurrentCollection(dirtyState);
       this.notifyConditionalChanges(conditionalChanges, afterCommit);
-      return true;
     }
 
     // Keys are the committed keys plus new ones: patch every existing row like
@@ -10015,6 +10106,16 @@ function createKeyedRowsBlockComponentCore(
       }
 
       if (this.reconcileStableRows(rows, afterCommit, dirtyState)) return;
+      if (rows.moved && !this.currentProps.hostBlocks) {
+        this.reconcileMovedRows(
+          rows,
+          rows.moved.positions,
+          rows.moved.sources,
+          afterCommit,
+          dirtyState,
+        );
+        return;
+      }
       if (this.reconcileRemovals(rows, afterCommit, dirtyState)) return;
       if (rows.appended && !this.currentProps.hostBlocks) {
         this.reconcileAppendedRows(rows, afterCommit, dirtyState);

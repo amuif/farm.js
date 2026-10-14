@@ -24,18 +24,37 @@ const infra = {
 };
 const github = { ...infra, provider: "github", issuer: undefined, clientId: "github-client" };
 const key = "farmjs_secretsecretsecretsecretsecret00";
+const savedKey = "farmjs_saved_key_0123456789abcdef0123";
 
 /** The shape the gateway signs after a GitHub sign-in: prefix.payload.signature. */
 function accountToken(claims) {
   return `fp1.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
 }
 
-function runtime({ config, saved, signOut = () => Response.json({ signedOut: true }) } = {}) {
+function runtime({
+  config,
+  saved,
+  keyResponse = () => Response.json({ key: savedKey }, { status: 201 }),
+  answer = true,
+  pick,
+} = {}) {
   const store = new Map(saved ? [[gatewayUrl, saved]] : []);
-  const signOuts = [];
+  const keyRequests = [];
+  const questions = [];
+  const offered = [];
   return {
+    offered,
+    async chooseProject(projects) {
+      offered.push(projects);
+      return pick === undefined ? undefined : projects[pick];
+    },
     store,
-    signOuts,
+    keyRequests,
+    questions,
+    async confirm(question) {
+      questions.push(question);
+      return answer;
+    },
     interactive: true,
     credentials: {
       async get(url) {
@@ -56,9 +75,12 @@ function runtime({ config, saved, signOut = () => Response.json({ signedOut: tru
       return undefined;
     },
     async fetch(url, init) {
-      if (url === "https://infra.example.com/api/previews/sign-out") {
-        signOuts.push(init.headers.authorization);
-        return signOut();
+      if (url === "https://infra.example.com/api/previews/key") {
+        keyRequests.push({
+          authorization: init.headers.authorization,
+          body: JSON.parse(init.body),
+        });
+        return keyResponse();
       }
       if (url.endsWith("/api/auth/config"))
         return config ? Response.json(config) : new Response(null, { status: 404 });
@@ -116,63 +138,112 @@ test("whoami reports the credential farm preview would use, never a whole key", 
   assert.deepEqual(legacy.using, { source: "FARM_PREVIEW_TOKEN" });
 });
 
-test("login saves a sign-in without starting a preview, and logout ends it", async () => {
+test("login saves an API key from Infrastructure, and logout only forgets it here", async () => {
   const r = runtime({ config: infra });
   assert.deepEqual(await signInToPreviewGateway(gatewayUrl, r), {
     login: "your Farm.js Infrastructure account",
   });
-  assert.equal(r.store.get(gatewayUrl), "device-session");
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, r), { removed: true, ended: true });
-  assert.deepEqual(r.signOuts, ["Bearer device-session"]);
+  // After signing in, the developer is asked before a key is made for this machine.
+  assert.deepEqual(r.questions, ["Create an API key for this machine? (Y/n) "]);
+  // The approved device sign-in is exchanged once for a key, and only the key is kept.
+  assert.equal(r.keyRequests.length, 1);
+  assert.equal(r.keyRequests[0].authorization, "Bearer device-session");
+  assert.match(r.keyRequests[0].body.name, /^Farm CLI on /);
+  assert.equal(r.store.get(gatewayUrl), savedKey);
+  assert.deepEqual((await previewSignInStatus(gatewayUrl, r, {})).using, {
+    source: "saved",
+    hint: "farmjs_save…",
+  });
+  // Logging out asks Infrastructure for nothing: the key stays valid there.
+  assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), true);
   assert.equal(r.store.has(gatewayUrl), false);
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, r), { removed: false, ended: false });
-  assert.equal(r.signOuts.length, 1);
+  assert.equal(r.keyRequests.length, 1);
+  assert.equal(await signOutOfPreviewGateway(gatewayUrl, r), false);
   await assert.rejects(signInToPreviewGateway(gatewayUrl, runtime()), /doesn't use sign-in/);
 });
 
-test("logout forgets a sign-in the server can't end", async () => {
-  // A GitHub sign-in is signed by the gateway, so there is no session to end anywhere.
-  const saved = accountToken({ kind: "account", provider: "github", login: "sam" });
-  const githubRuntime = runtime({ config: github, saved });
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, githubRuntime), {
-    removed: true,
-    ended: false,
-  });
-  // Nor is one sent to Infrastructure after the gateway switches to it.
-  const switched = runtime({ config: infra, saved });
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, switched), {
-    removed: true,
-    ended: false,
-  });
-  assert.deepEqual(switched.signOuts, []);
-
-  for (const [signOut, error] of [
-    [() => new Response(null, { status: 503 }), "Farm.js Infrastructure answered 503"],
-    // An Infrastructure from before the sign-out endpoint.
-    [() => new Response("Not found", { status: 404 }), "Farm.js Infrastructure answered 404"],
-    // What Better Auth's own /sign-out says for a token it can't see.
-    [() => Response.json({ success: true }), "Farm.js Infrastructure didn't confirm the sign-out"],
-    [() => new Response("<!doctype html>"), "Farm.js Infrastructure didn't confirm the sign-out"],
-  ]) {
-    const failing = runtime({ config: infra, saved: "device-session", signOut });
-    assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, failing), {
-      removed: true,
-      ended: false,
-      error,
-    });
-    assert.equal(failing.store.has(gatewayUrl), false);
-  }
-
-  const offline = runtime({ saved: "device-session" });
-  offline.fetch = async () => {
-    throw new Error("fetch failed");
+test("after signing in, a picked project is saved to the app's .env", async () => {
+  const previous = process.env.FARMJS_PROJECT_ID;
+  delete process.env.FARMJS_PROJECT_ID;
+  const roots = [];
+  const tempRoot = async () => {
+    roots.push(await fs.mkdtemp(path.join(os.tmpdir(), "farm-login-project-")));
+    return roots.at(-1);
   };
-  assert.deepEqual(await signOutOfPreviewGateway(gatewayUrl, offline), {
-    removed: true,
-    ended: false,
-    error: "fetch failed",
+  const projects = [
+    { id: "project_1", name: "Storefront", organization: "Acme" },
+    { id: "project_2", name: "Docs", organization: "Acme" },
+  ];
+  // A malformed id is never offered: it would be written into .env.
+  const keyResponse = () =>
+    Response.json(
+      { key: savedKey, projects: [...projects, { id: "bad\nX=1", name: "Injected" }] },
+      { status: 201 },
+    );
+  try {
+    const root = await tempRoot();
+    await fs.writeFile(path.join(root, ".env"), "OTHER=1");
+    const picked = runtime({ config: infra, keyResponse, pick: 1 });
+    await signInToPreviewGateway(gatewayUrl, picked, { root });
+    assert.deepEqual(picked.offered, [projects]);
+    assert.equal(
+      await fs.readFile(path.join(root, ".env"), "utf8"),
+      "OTHER=1\nFARMJS_PROJECT_ID=project_2\n",
+    );
+    // An app that already names its project isn't asked again.
+    const again = runtime({ config: infra, keyResponse, pick: 0 });
+    await signInToPreviewGateway(gatewayUrl, again, { root });
+    assert.deepEqual(again.offered, []);
+
+    // Skipping writes nothing.
+    delete process.env.FARMJS_PROJECT_ID;
+    const skipped = await tempRoot();
+    const skip = runtime({ config: infra, keyResponse });
+    await signInToPreviewGateway(gatewayUrl, skip, { root: skipped });
+    assert.equal(skip.offered.length, 1);
+    await assert.rejects(fs.readFile(path.join(skipped, ".env")), { code: "ENOENT" });
+  } finally {
+    if (previous === undefined) delete process.env.FARMJS_PROJECT_ID;
+    else process.env.FARMJS_PROJECT_ID = previous;
+    await Promise.all(roots.map((root) => fs.rm(root, { recursive: true, force: true })));
+  }
+});
+
+test("answering no creates and saves nothing", async () => {
+  const r = runtime({ config: infra, answer: false });
+  await assert.rejects(signInToPreviewGateway(gatewayUrl, r), (error) => {
+    assert.equal(error.name, "PreviewApiKeyDeclinedError");
+    assert.match(error.message, /No API key was created\. Run farm login when you want one/);
+    return true;
   });
-  assert.equal(offline.store.has(gatewayUrl), false);
+  assert.equal(r.questions.length, 1);
+  assert.deepEqual(r.keyRequests, []);
+  assert.equal(r.store.size, 0);
+});
+
+test("login saves nothing when Infrastructure can't make a key", async () => {
+  const full = runtime({
+    config: infra,
+    keyResponse: () =>
+      Response.json(
+        { message: "Revoke one in Farm.js Infrastructure, then run farm login again." },
+        { status: 409 },
+      ),
+  });
+  await assert.rejects(
+    signInToPreviewGateway(gatewayUrl, full),
+    /Revoke one in Farm\.js Infrastructure/,
+  );
+  assert.equal(full.store.size, 0);
+  const older = runtime({
+    config: infra,
+    keyResponse: () => new Response("Not found", { status: 404 }),
+  });
+  await assert.rejects(
+    signInToPreviewGateway(gatewayUrl, older),
+    /couldn't create an API key \(404\)/,
+  );
+  assert.equal(older.store.size, 0);
 });
 
 test("farm whoami and farm logout run end to end against a gateway", async () => {

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createInterface } from "node:readline/promises";
@@ -26,6 +26,15 @@ export interface AuthorizePreviewPlanOptions {
   expiresInMs?: number;
   forceLogin?: boolean;
   runtime?: PreviewAuthRuntime;
+  /** The app whose .env gets the project picked after a new sign-in. */
+  root?: string;
+}
+
+/** An existing Farm.js Infrastructure project, offered after signing in. */
+export interface PreviewProject {
+  id: string;
+  name: string;
+  organization: string;
 }
 
 export interface PreviewAuthRuntime {
@@ -35,6 +44,20 @@ export interface PreviewAuthRuntime {
   wait(ms: number): Promise<void>;
   credentials: PreviewCredentialStore;
   promptDuration(config: PreviewAuthPublicConfig): Promise<number | undefined>;
+  /** A yes/no question; Enter means yes. */
+  confirm(question: string): Promise<boolean>;
+  /** Pick one of the account's projects for this app, or none. */
+  chooseProject(projects: PreviewProject[]): Promise<PreviewProject | undefined>;
+}
+
+/** The developer chose not to create an API key after signing in. */
+export class PreviewApiKeyDeclinedError extends Error {
+  constructor() {
+    super(
+      "No API key was created. Run farm login when you want one, or set FARMJS_API_KEY to a key from Farm.js Infrastructure.",
+    );
+    this.name = "PreviewApiKeyDeclinedError";
+  }
 }
 
 export interface PreviewCredentialStore {
@@ -107,6 +130,7 @@ interface PreviewAccountExchange {
   token: string;
   expiresAt: number;
   user: { login: string };
+  projects?: PreviewProject[];
 }
 
 export async function authorizePreviewGatewayPlan(
@@ -134,8 +158,7 @@ export async function authorizePreviewGatewayPlan(
   if (!accountToken) {
     const account = await loginWithPreviewDeviceFlow(plan.gatewayUrl, config, runtime);
     accountToken = account.token;
-    await runtime.credentials.set(plan.gatewayUrl, accountToken);
-    logger.success(`Signed in to Farm Preview as ${account.user.login}.`);
+    await finishPreviewSignIn(plan.gatewayUrl, account, runtime, options.root);
   }
 
   const expiresInMs =
@@ -151,8 +174,7 @@ export async function authorizePreviewGatewayPlan(
     await runtime.credentials.delete(plan.gatewayUrl);
     const account = await loginWithPreviewDeviceFlow(plan.gatewayUrl, config, runtime);
     accountToken = account.token;
-    await runtime.credentials.set(plan.gatewayUrl, accountToken);
-    logger.success(`Signed in to Farm Preview as ${account.user.login}.`);
+    await finishPreviewSignIn(plan.gatewayUrl, account, runtime, options.root);
     grant = await requestTunnelGrant(plan, accountToken, expiresInMs, runtime.fetch);
   }
 
@@ -296,7 +318,10 @@ export async function previewSignInStatus(
         : {}),
     };
   } else if (saved) {
-    status.using = { source: "saved", ...accountClaims(saved) };
+    status.using = {
+      source: "saved",
+      ...(saved.startsWith("farmjs_") ? { hint: `${saved.slice(0, 11)}…` } : accountClaims(saved)),
+    };
   }
   return status;
 }
@@ -305,6 +330,7 @@ export async function previewSignInStatus(
 export async function signInToPreviewGateway(
   gatewayUrl: string,
   runtime: PreviewAuthRuntime = createDefaultPreviewAuthRuntime(),
+  options: { root?: string } = {},
 ): Promise<{ login: string }> {
   const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
   if (!config.enabled) throw new Error("This preview gateway doesn't use sign-in.");
@@ -312,47 +338,39 @@ export async function signInToPreviewGateway(
     throw new Error("The Farm Preview gateway returned an unsupported login configuration.");
   }
   const account = await loginWithPreviewDeviceFlow(gatewayUrl, config, runtime);
-  await runtime.credentials.set(gatewayUrl, account.token);
+  await finishPreviewSignIn(gatewayUrl, account, runtime, options.root);
   return { login: account.user.login };
 }
 
-/**
- * farm logout: forget this machine's saved sign-in for the gateway. A Farm.js
- * Infrastructure sign-in is a session, so it is ended there too; a GitHub sign-in
- * is a token the gateway signed, with no session to end. Infrastructure has no
- * Better Auth bearer plugin, so its own /sign-out would answer 200 and end nothing:
- * the session is ended through Infrastructure's preview sign-out endpoint instead.
- */
+/** Saves a new sign-in, then offers the account's projects for this app. */
+async function finishPreviewSignIn(
+  gatewayUrl: string,
+  account: PreviewAccountExchange,
+  runtime: PreviewAuthRuntime,
+  root = process.cwd(),
+) {
+  await runtime.credentials.set(gatewayUrl, account.token);
+  logger.success(`Signed in to Farm Preview as ${account.user.login}.`);
+  // An app that already names its project keeps it.
+  if (!account.projects?.length || process.env.FARMJS_PROJECT_ID?.trim()) return;
+  const project = await runtime.chooseProject(account.projects);
+  if (!project) return;
+  const file = join(root, ".env");
+  const existing = await readFile(file, "utf8").catch(() => "");
+  const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+  await writeFile(file, `${existing}${separator}FARMJS_PROJECT_ID=${project.id}\n`);
+  process.env.FARMJS_PROJECT_ID = project.id;
+  logger.success(`Saved FARMJS_PROJECT_ID for ${project.name} to .env.`);
+}
+
+/** farm logout: forget this machine's saved sign-in. A saved API key stays valid in Infrastructure. */
 export async function signOutOfPreviewGateway(
   gatewayUrl: string,
-  runtime: Pick<PreviewAuthRuntime, "credentials" | "fetch"> = createDefaultPreviewAuthRuntime(),
-): Promise<{ removed: boolean; ended: boolean; error?: string }> {
-  const token = await runtime.credentials.get(gatewayUrl);
-  if (!token) return { removed: false, ended: false };
-  let ended = false;
-  let error: string | undefined;
-  try {
-    const config = await loadPreviewAuthConfig(gatewayUrl, runtime.fetch);
-    if (config.enabled && config.provider === "device" && !accountClaims(token)) {
-      const response = await runtime.fetch(`${deviceIssuer(config).origin}/api/previews/sign-out`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-        signal: AbortSignal.timeout(10_000),
-        redirect: "error",
-      });
-      if (!response.ok) throw new Error(`Farm.js Infrastructure answered ${response.status}`);
-      // Only an explicit answer counts, never a 200 from some other page.
-      const body = (await response.json().catch(() => undefined)) as { signedOut?: unknown };
-      if (body?.signedOut !== true)
-        throw new Error("Farm.js Infrastructure didn't confirm the sign-out");
-      ended = true;
-    }
-  } catch (cause) {
-    error = cause instanceof Error ? cause.message : String(cause);
-  }
-  // Forgotten either way: a sign-in the server couldn't end still leaves this machine.
+  runtime: Pick<PreviewAuthRuntime, "credentials"> = createDefaultPreviewAuthRuntime(),
+): Promise<boolean> {
+  if (!(await runtime.credentials.get(gatewayUrl))) return false;
   await runtime.credentials.delete(gatewayUrl);
-  return { removed: true, ended, ...(error ? { error } : {}) };
+  return true;
 }
 
 /** The login and expiry inside a GitHub sign-in account token, or undefined for any other token. */
@@ -365,7 +383,7 @@ function accountClaims(token: string): { login?: string; expiresAt?: number } | 
       ...(Number.isSafeInteger(claims.expiresAt) ? { expiresAt: claims.expiresAt } : {}),
     };
   } catch {
-    // An Infrastructure sign-in is an opaque session token.
+    // A Farm.js Infrastructure API key carries no claims.
     return undefined;
   }
 }
@@ -453,12 +471,23 @@ async function loginWithPreviewDeviceFlow(
       result.access_token &&
       Number.isSafeInteger(result.expires_in) &&
       result.expires_in! > 0
-    )
+    ) {
+      const deviceToken = result.access_token;
+      const expiresAt = Date.now() + result.expires_in! * 1000;
+      if (!(await runtime.confirm("Create an API key for this machine? (Y/n) ")))
+        throw new PreviewApiKeyDeclinedError();
+      const { key, projects } = await createPreviewApiKey(
+        issuer.origin,
+        deviceToken,
+        runtime.fetch,
+      );
       return {
-        token: result.access_token,
-        expiresAt: Date.now() + result.expires_in! * 1000,
+        token: key,
+        expiresAt,
         user: { login: "your Farm.js Infrastructure account" },
+        projects,
       };
+    }
     if (poll.status === 400 && result.error === "authorization_pending") continue;
     if (poll.status === 400 && result.error === "slow_down") {
       interval += 5000;
@@ -470,6 +499,54 @@ async function loginWithPreviewDeviceFlow(
     throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
   }
   throw new Error("Farm.js Infrastructure sign-in expired. Try again to get a new code.");
+}
+
+/** Infrastructure turns the approved sign-in into an API key, the one credential the CLI keeps. */
+async function createPreviewApiKey(origin: string, deviceToken: string, request: typeof fetch) {
+  const response = await request(`${origin}/api/previews/key`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${deviceToken}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({ name: `Farm CLI on ${hostname()}`.slice(0, 64) }),
+    signal: AbortSignal.timeout(10_000),
+    redirect: "error",
+  });
+  const body = (await response.json().catch(() => ({}))) as {
+    key?: unknown;
+    message?: unknown;
+    projects?: unknown;
+  };
+  if (response.status === 201 && typeof body.key === "string" && body.key.startsWith("farmjs_"))
+    return { key: body.key, projects: previewProjects(body.projects) };
+  throw new Error(
+    response.status === 409 && typeof body.message === "string"
+      ? body.message
+      : `Farm.js Infrastructure couldn't create an API key (${response.status}). Run farm login again.`,
+  );
+}
+
+/** Only well-formed projects: the id is written into the app's .env. */
+function previewProjects(value: unknown): PreviewProject[] {
+  if (!Array.isArray(value)) return [];
+  const text = (field: unknown) =>
+    typeof field === "string" ? field.replace(/\p{Cc}/gu, "").slice(0, 120) : "";
+  return value
+    .filter(
+      (project): project is Record<string, unknown> =>
+        !!project &&
+        typeof project.id === "string" &&
+        /^[\w-]{1,128}$/.test(project.id) &&
+        !!text(project.name),
+    )
+    .slice(0, 100)
+    .map((project) => ({
+      id: project.id as string,
+      name: text(project.name),
+      organization: text(project.organization),
+    }));
 }
 
 export function parsePreviewDuration(value: string | number | undefined): number | undefined {
@@ -642,6 +719,8 @@ function createDefaultPreviewAuthRuntime(): PreviewAuthRuntime {
     wait: (ms) => delay(ms),
     credentials: new FilePreviewCredentialStore(),
     promptDuration: promptPreviewDuration,
+    confirm: confirmInTerminal,
+    chooseProject: chooseProjectInTerminal,
   };
 }
 
@@ -676,6 +755,32 @@ async function promptPreviewDuration(config: PreviewAuthPublicConfig) {
   try {
     const answer = await prompt.question(`Preview duration (${defaultDuration}): `);
     return answer.trim() ? parsePreviewDuration(answer) : config.defaultSessionTtlMs;
+  } finally {
+    prompt.close();
+  }
+}
+
+async function confirmInTerminal(question: string) {
+  if (!process.stdin.isTTY) return false;
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return !/^\s*n/i.test(await prompt.question(question));
+  } finally {
+    prompt.close();
+  }
+}
+
+async function chooseProjectInTerminal(projects: PreviewProject[]) {
+  if (!process.stdin.isTTY) return undefined;
+  logger.info("Use one of your Farm.js Infrastructure projects for this app?");
+  for (const [index, project] of projects.entries())
+    process.stdout.write(
+      `  ${index + 1}) ${project.name}${project.organization ? ` (${project.organization})` : ""}\n`,
+    );
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const choice = Number((await prompt.question("Project number, or Enter to skip: ")).trim());
+    return Number.isInteger(choice) && choice >= 1 ? projects[choice - 1] : undefined;
   } finally {
     prompt.close();
   }

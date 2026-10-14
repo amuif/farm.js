@@ -68,6 +68,7 @@ export {
   type AuthorizePreviewPlanOptions,
   type PreviewSignInMode,
   type PreviewSignInStatus,
+  type PreviewProject,
   type PreviewEnvironmentCredential,
   type PreviewAuthPublicConfig,
   type PreviewAuthRuntime,

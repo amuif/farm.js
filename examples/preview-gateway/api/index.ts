@@ -212,7 +212,10 @@ export const config = {
 
 const domain = process.env.FARM_PREVIEW_DOMAIN || "preview.farmjs.dev";
 const coordinator = createRedisPreviewRelayCoordinator();
-const infra = createInfraPreviewIntegration(process.env, fetch, waitUntil);
+// Managed sign-in is Farm.js Infrastructure: developers sign in there and preview with an API key.
+const infra = process.env.FARM_PREVIEW_AUTH_SECRET
+  ? createInfraPreviewIntegration(process.env, fetch, waitUntil)
+  : undefined;
 const auth = createManagedPreviewAuth();
 const pollingGateway = createNodePreviewGatewayHandler({
   domain,
@@ -266,13 +269,7 @@ const persistentRelay = createPersistentPreviewRelay({
 
 function createManagedPreviewAuth(): PreviewManagedAuthOptions | undefined {
   const signingSecret = process.env.FARM_PREVIEW_AUTH_SECRET;
-  const githubClientId = process.env.FARM_PREVIEW_GITHUB_CLIENT_ID;
-  if (!signingSecret && !githubClientId && !infra) return undefined;
-  if (!signingSecret || (!githubClientId && !infra)) {
-    throw new Error(
-      "Managed preview auth requires FARM_PREVIEW_AUTH_SECRET and either FARM_INFRA_URL or FARM_PREVIEW_GITHUB_CLIENT_ID.",
-    );
-  }
+  if (!signingSecret || !infra) return undefined;
   const rateLimitExchange = createRedisPreviewAuthExchangeRateLimiter();
   if (!rateLimitExchange && process.env.VERCEL_ENV === "production") {
     throw new Error(
@@ -281,8 +278,8 @@ function createManagedPreviewAuth(): PreviewManagedAuthOptions | undefined {
   }
   return {
     signingSecret,
-    githubClientId,
-    ...(infra ? { deviceAuth: infra.deviceAuth, dashboardUrl: infra.dashboardUrl } : {}),
+    deviceAuth: infra.deviceAuth,
+    dashboardUrl: infra.dashboardUrl,
     rateLimitExchange,
     defaultSessionTtlMs: readDuration("FARM_PREVIEW_DEFAULT_TTL_MS", 1000 * 60 * 60),
     maxSessionTtlMs: readDuration("FARM_PREVIEW_MAX_TTL_MS", 1000 * 60 * 60 * 24),

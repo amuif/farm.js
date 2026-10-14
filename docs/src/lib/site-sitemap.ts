@@ -22,6 +22,7 @@ export function getSiteSitemap(): MetadataRoute.Sitemap {
     { url: `${SITE_URL}/agents` },
     { url: `${SITE_URL}/agents/check` },
     { url: `${SITE_URL}/blog` },
+    { url: `${SITE_URL}/design` },
     ...posts.map((post) => ({ url: `${SITE_URL}${post.href}`, lastModified: post.dateTime })),
   ];
 }

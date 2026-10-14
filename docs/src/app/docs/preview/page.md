@@ -38,16 +38,24 @@ Open a preview in another terminal:
 farm preview --port 4324 --name checkout-test --expires 2h
 ```
 
-The first managed preview opens GitHub's device sign-in page. The CLI resumes automatically after
-authorization:
+Previews use a Farm.js Infrastructure API key. Without one, the first preview opens
+[app.farmjs.dev](https://app.farmjs.dev): sign in or create an account (email and password, or
+GitHub) and confirm the code. The CLI then asks whether to create an API key for this machine;
+answer yes and it saves the key. If your account already has projects, it offers them, and the
+one you pick is saved to the app's `.env` as `FARMJS_PROJECT_ID`:
 
 ```txt
 Creating public preview for the running app...
 Local:  http://localhost:4324
-Sign in to Farm Preview in your browser.
-Code: FARM-W7KD
-Open: https://github.com/login/device
-Signed in to Farm Preview as sam.
+Confirm this code in Farm.js Infrastructure: W7KDQ2PL
+Open: https://app.farmjs.dev/device?user_code=W7KDQ2PL
+After approving this device, return here.
+Create an API key for this machine? (Y/n) y
+Signed in to Farm Preview as your Farm.js Infrastructure account.
+Use one of your Farm.js Infrastructure projects for this app?
+  1) Storefront (Acme)
+Project number, or Enter to skip: 1
+Saved FARMJS_PROJECT_ID for Storefront to .env.
 Relay: wss://preview.farmjs.dev/agent
 Opening native Farm preview tunnel...
 Preview URL ready.
@@ -56,15 +64,23 @@ Expires: Sep 30, 2026, 3:45 PM
 Forwarding requests through the native tunnel until Ctrl+C.
 ```
 
-Later previews reuse the opaque Farm account credential saved by the CLI and do not ask the
-developer to sign in again. Pass `--login`, or run `farm login`, to replace that saved login. In an interactive terminal,
+Later previews reuse the saved API key and don't ask again. Pass `--login`, or run
+`farm login`, to get a new one. In an interactive terminal,
 omitting `--expires` prompts for a duration and defaults to one hour. In CI and other
 non-interactive terminals, the hosted default is used.
 
 ### Farm.js Infrastructure authentication and dashboard
 
-Gateways configured with `FARM_INFRA_URL` use your Farm.js Infrastructure account instead of the
-legacy GitHub device flow. You do not need to link GitHub in the dashboard.
+`farm preview` needs one credential, a Farm.js Infrastructure API key:
+
+- If `FARMJS_API_KEY` is set, in your shell, your CI secrets, or the app's `.env` files, it is
+  used and there is no sign-in.
+- Otherwise `farm login`, or the first `farm preview`, signs you in at app.farmjs.dev and asks
+  whether to create an API key for this machine. Yes saves it in a file only your user can read;
+  no creates nothing. It then offers your existing projects; the one you pick goes into the
+  app's `.env` as `FARMJS_PROJECT_ID`. Apps that already set it aren't asked.
+- `farm logout` forgets that saved key on this machine. The key itself stays valid until you
+  revoke it in Farm.js Infrastructure.
 
 1. With a Farm.js Infrastructure API key in `FARMJS_API_KEY`, the same key analytics uses,
    the CLI signs in with it and never opens a browser. It reads the key from your shell or
@@ -79,9 +95,8 @@ legacy GitHub device flow. You do not need to link GitHub in the dashboard.
 CI never waits for browser approval: set `FARMJS_API_KEY`, otherwise the command fails
 with instructions. For CI, create a key restricted to the preview's project, with an
 expiry, rather than an account-wide key. `FARM_PREVIEW_TOKEN` is deprecated: it still works
-and prints a warning, and `FARMJS_API_KEY` replaces it. The hosted gateway still uses GitHub
-sign-in, which doesn't accept API keys. Device approval signs the first-party CLI into your Infra account;
-the saved credential is a Better Auth session token, not a third-party OAuth access token.
+and prints a warning, and `FARMJS_API_KEY` replaces it. Device approval only exists to create the
+key: the CLI trades the approved sign-in for an API key and keeps nothing else.
 The gateway verifies that credential or API key whenever it issues a new, name-scoped
 grant. A grant cannot outlive the verified account session or API key expiry. API keys
 may be restricted to one project slug: pass the matching `--project` when starting a preview.
@@ -126,8 +141,6 @@ dashboard link opens that preview directly. Activity is retained until seven day
 after preview expiry; it is best-effort metadata, not a complete request archive.
 
 This requires matching CLI, gateway, and Infra releases plus database/environment setup.
-Deploying the dashboard alone does not change existing gateway authentication. Gateways
-without `FARM_INFRA_URL` retain their GitHub or self-hosted authentication behavior.
 
 During the relay rollout, the CLI warns and falls back to compatibility gateway polling if the hosted endpoint cannot accept the native WebSocket connection. An explicitly configured `FARM_PREVIEW_RELAY_URL` is tried first as well.
 
@@ -188,18 +201,15 @@ farm whoami
 farm logout
 ```
 
-`farm login` signs in and saves the credential without starting a preview. `farm whoami` prints
+`farm login` signs in and saves an API key without starting a preview. `farm whoami` prints
 the gateway, how it signs people in, and which credential `farm preview` would send:
 `FARMJS_API_KEY` (shown by its first characters, never the whole key), the deprecated
-`FARM_PREVIEW_TOKEN`, or the saved sign-in. It also says when `FARMJS_API_KEY` is set but not
+`FARM_PREVIEW_TOKEN`, or the saved key. It also says when `FARMJS_API_KEY` is set but not
 used, and exits with code 1 when `farm preview` would need a browser sign-in, so scripts can
 check first.
 
-`farm logout` deletes the saved sign-in from this machine. A Farm.js Infrastructure sign-in is
-also ended on the server, so the token stops working even if it was copied elsewhere. Previews
-that are already running keep their grant; stop them separately. A GitHub sign-in is a token the
-gateway signed, with no server session to end, so it stays valid until it expires. `farm logout`
-never revokes `FARMJS_API_KEY`: revoke API keys in the Farm.js Infrastructure dashboard.
+`farm logout` deletes the saved key from this machine. It doesn't revoke it; revoke keys in the
+Farm.js Infrastructure dashboard.
 
 All three read the app's `.env` files the way `farm preview` does, and accept `--gateway` and
 `--root`.
@@ -349,7 +359,7 @@ The hosted gateway owns:
 The local CLI owns:
 
 - Local target detection.
-- GitHub device sign-in and the cached opaque Farm account credential.
+- Farm.js Infrastructure sign-in and the saved API key.
 - Native tunnel lifecycle and local reachability checks.
 - Forwarding requests to `localhost`.
 - Request and response logging.
@@ -376,25 +386,19 @@ vercel blob create-store farm-preview-gateway --access private --region iad1 --y
 vercel env add FARM_PREVIEW_DOMAIN production
 ```
 
-For managed login, create a GitHub OAuth app, enable its device flow, and configure its public client
-id. Generate the Farm signing secret once and keep it only in the hosted project:
+For managed login, generate two secrets and keep them only on the server:
 
 ```bash
 openssl rand -hex 32
-vercel env add FARM_PREVIEW_GITHUB_CLIENT_ID production
 vercel env add FARM_PREVIEW_AUTH_SECRET production
+vercel env add FARM_PREVIEW_GATEWAY_SECRET production
 ```
 
-`FARM_PREVIEW_AUTH_SECRET` signs opaque Farm account tokens and session-scoped tunnel grants. It is
-not the GitHub client secret and must never be placed on developer machines. Set both auth variables
-or neither; a partial setup fails during gateway startup. `FARM_PREVIEW_DEFAULT_TTL_MS` and
-`FARM_PREVIEW_MAX_TTL_MS` optionally control the default and maximum hosted durations.
-
-Alternatively, connect a Farm.js Infrastructure installation with `FARM_INFRA_URL` and
-`FARM_PREVIEW_GATEWAY_SECRET` on the gateway. Set the same backchannel secret on Infra,
-and keep `FARM_PREVIEW_AUTH_SECRET` only on the gateway. Infra must have its auth,
-API-key, and preview-activity migrations applied before switching the gateway's provider.
-See the gateway example README for the deployment order and activity cleanup contract.
+`FARM_PREVIEW_AUTH_SECRET` signs the short-lived tunnel grants. `FARM_PREVIEW_GATEWAY_SECRET`
+lets the gateway check API keys with Farm.js Infrastructure at app.farmjs.dev; set the same value
+there. Neither ever reaches a developer machine. `FARM_PREVIEW_DEFAULT_TTL_MS` and
+`FARM_PREVIEW_MAX_TTL_MS` optionally control the default and maximum hosted durations. See the
+gateway example README for the deployment order and activity cleanup contract.
 
 For a private domain such as `preview.example.com`, configure:
 
@@ -453,9 +457,8 @@ Use this path only when the hosted Farm gateway is not appropriate for your envi
 The preview URL forwards public internet traffic to your local app. Treat it like a temporary public deployment:
 
 - Stop the command when testing is finished.
-- The CLI caches only the opaque Farm account credential, never the GitHub provider token. The
-  credential file is created with user-only permissions. Use `--login` or `farm login` to replace
-  it, and `farm logout` to remove it.
+- The CLI saves only the API key, in a file created with user-only permissions. Use `--login`
+  or `farm login` to replace it, and `farm logout` to remove it.
 - Tunnel grants are bound to one normalized preview name and one absolute expiry. Current polling
   control requests send session credentials in the `Authorization` header. The native agent is
   configured with one relay URL, so its name-bound grant is carried only on the outbound `/agent`
