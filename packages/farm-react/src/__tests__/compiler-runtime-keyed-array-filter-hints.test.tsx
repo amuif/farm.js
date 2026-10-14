@@ -89,6 +89,33 @@ function hintedFilter(items: Item[], removed: ReadonlySet<string>): Item[] {
   ) as Item[];
 }
 
+async function mappedSurvivorArraySizes(update: () => void): Promise<number[]> {
+  const sizes: number[] = [];
+  // Count callback-based initialization of private identity-index arrays.
+  // Leave native filter/slice identities intact so user collection hints apply.
+  const nativeFrom = Array.from;
+  const from = vi.spyOn(Array, "from").mockImplementation((...args: unknown[]) => {
+    const result = Reflect.apply(nativeFrom, Array, args);
+    if (
+      typeof args[1] === "function" &&
+      result.length === 128 &&
+      result.every((value: unknown, index: number) => value === index)
+    ) {
+      sizes.push(result.length);
+    }
+    return result;
+  });
+  try {
+    await act(async () => {
+      update();
+      await flushCompilerUpdates();
+    });
+  } finally {
+    from.mockRestore();
+  }
+  return sizes;
+}
+
 function rowDescriptor(item: Item): CompilerKeyedRowElement {
   return {
     kind: "element",
@@ -317,6 +344,87 @@ describe.each(
     expect(secondList.children[0]).toBe(secondRows[0]);
     expect(secondList.children[1]).toBe(secondRows[1]);
     expect([...firstList.children].map((row) => row.textContent)).toEqual(["Beta", "Gamma"]);
+  });
+
+  it.each(["filter", "slice", "filter-slice-filter"] as const)(
+    "initializes survivor indices without per-row mapping callbacks for %s",
+    async (operation) => {
+      const initialItems = Array.from(
+        { length: 128 },
+        (_, index): Item => ({ id: `row-${index}`, label: `Row ${index}` }),
+      );
+      const harness = createFilterHarness(initialItems);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      roots.push(root);
+      await act(async () => root.render(<harness.Inventory />));
+      const before = [...container.querySelectorAll("li")];
+      harness.counters.bindingReads = 0;
+      let expected = before;
+      const mappedSizes = await mappedSurvivorArraySizes(() => {
+        if (operation !== "slice") {
+          harness.remove(["row-0", "row-64", "row-127"]);
+          expected = expected.filter((_, index) => ![0, 64, 127].includes(index));
+        }
+        if (operation !== "filter") {
+          harness.slice(2, -2);
+          expected = expected.slice(2, -2);
+        }
+        if (operation === "filter-slice-filter") {
+          harness.remove(["row-3", "row-63", "row-124"]);
+          expected = expected.filter(
+            (row) => !["Row 3", "Row 63", "Row 124"].includes(row.textContent!),
+          );
+        }
+      });
+      expect(mappedSizes).toEqual([]);
+      const after = [...container.querySelectorAll("li")];
+      expect(after).toHaveLength(expected.length);
+      after.forEach((row, index) => expect(row).toBe(expected[index]));
+      expect(harness.counters.executions).toBe(1);
+      expect(harness.counters.listRenders).toBe(1);
+      expect(harness.counters.bindingReads).toBe(0);
+    },
+  );
+
+  it("evaluates shared queued hints independently for two mounted lists", async () => {
+    const initialItems = Array.from(
+      { length: 64 },
+      (_, index): Item => ({ id: `row-${index}`, label: `Row ${index}` }),
+    );
+    const first = createFilterHarness(initialItems);
+    const second = createFilterHarness(initialItems);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <>
+          <first.Inventory />
+          <second.Inventory />
+        </>,
+      ),
+    );
+    const lists = [...container.querySelectorAll("ul")];
+    const before = lists.map((list) => [...list.children]);
+    const filtered = hintedFilter(initialItems, new Set(["row-0", "row-32", "row-63"]));
+    const shared = createCompilerKeyedArraySlice(filtered, filtered.slice, 2, -2) as Item[];
+    const expectedIds = shared.map((item) => Number(item.id.slice(4)));
+    await act(async () => {
+      first.update(() => shared);
+      second.update(() => shared);
+      await flushCompilerUpdates();
+    });
+    for (const [index, list] of lists.entries()) {
+      const rows = [...list.children];
+      expect(rows).toHaveLength(expectedIds.length);
+      rows.forEach((row, rowIndex) => expect(row).toBe(before[index][expectedIds[rowIndex]]));
+    }
+    expect(initialItems).toHaveLength(64);
+    expect(filtered).toHaveLength(61);
+    expect(shared.map((item) => Number(item.id.slice(4)))).toEqual(expectedIds);
   });
 
   it("removes only rejected rows and preserves every surviving DOM identity", async () => {
