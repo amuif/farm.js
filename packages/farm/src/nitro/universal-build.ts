@@ -25,7 +25,7 @@ import {
 import type { Rollup } from "vite";
 import os from "os";
 import path from "path";
-import { constants as fsConstants, existsSync, readFileSync } from "fs";
+import { constants as fsConstants, existsSync, readFileSync, realpathSync } from "fs";
 import { findRequestBoundSourceBlockers, parseRouteRenderingDirective } from "../ssg";
 import { fileURLToPath } from "url";
 import { builtinModules, createRequire } from "module";
@@ -206,23 +206,96 @@ function findFarmCoreRoot(from: string): string | null {
   return null;
 }
 
-const farmCoreRoot = _filename ? findFarmCoreRoot(_filename)?.split("\\").join("/") : undefined;
+const farmCoreRoot = _filename ? findFarmCoreRoot(_filename) : null;
+
+function toModulePath(file: string): string {
+  const normalized = file.split("\\").join("/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Node's package lookup: the nearest node_modules/<name> at or above `from`. */
+function findInstalledPackageDir(name: string, from: string): string | null {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (existsSync(path.join(candidate, "package.json"))) {
+      try {
+        return realpathSync(candidate);
+      } catch {
+        return null;
+      }
+    }
+    if (dir === path.dirname(dir)) return null;
+  }
+}
+
+/** Directories of Farm's packages and every package they depend on, as installed for the app. */
+function collectFarmDependencyDirs(root: string): string[] {
+  const queue: Array<{ name: string; from: string }> = [];
+  const seen = new Set<string>();
+  const visit = (dir: string) => {
+    if (seen.has(dir)) return;
+    seen.add(dir);
+    let manifest: Record<string, Record<string, string> | undefined>;
+    try {
+      manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
+    } catch {
+      return;
+    }
+    for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      for (const name of Object.keys(manifest[field] ?? {})) queue.push({ name, from: dir });
+    }
+  };
+
+  if (farmCoreRoot) visit(realpathSync(farmCoreRoot));
+  queue.push({ name: "@farm.js/core", from: root });
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    for (const field of ["dependencies", "devDependencies"]) {
+      for (const name of Object.keys(manifest[field] ?? {})) {
+        if (name.startsWith("@farm.js/")) queue.push({ name, from: root });
+      }
+    }
+  } catch {}
+
+  for (let next = queue.pop(); next; next = queue.pop()) {
+    const dir = findInstalledPackageDir(next.name, next.from);
+    if (dir) visit(dir);
+  }
+  return [...seen];
+}
 
 /**
- * Tree-shaking for the server bundle. Farm's own modules have no import side effects, so
- * unused ones (including build-time helpers reachable from the package root) are dropped.
- * Every other module keeps its top-level code unless its package declares `sideEffects`:
- * SDKs register defaults on import (the OpenAI Agents default model provider, LangGraph's
- * AsyncLocalStorage), and dropping that code broke them and crashed Rolldown on LangGraph.
+ * Tree-shaking for the server bundle. Farm's packages and their dependencies are treated
+ * as free of import side effects, so unused parts of Farm's graph (the docs Markdown
+ * pipeline, build-time helpers) stay out of the bundle. The app's own code and
+ * dependencies get the bundler default instead: SDKs register state on import (the OpenAI
+ * Agents default model provider, LangGraph's AsyncLocalStorage), and dropping that code
+ * broke them and crashed Rolldown on LangGraph.
  *
  * `undefined` defers to the package: Rolldown reads its `sideEffects` field, and Rollup
  * keeps the module unless the resolved package marked it side-effect free.
  */
-function farmServerModuleSideEffects(id: string): false | undefined {
-  const file = id.split("\\").join("/");
-  if (file.includes("/node_modules/@farm.js/")) return false;
-  if (farmCoreRoot && file.startsWith(`${farmCoreRoot}/`)) return false;
-  return undefined;
+function createFarmServerModuleSideEffects(root: string) {
+  const installed = new Set<string>();
+  const linked: string[] = [];
+  for (const dir of collectFarmDependencyDirs(root)) {
+    const modulePath = toModulePath(dir);
+    if (modulePath.includes("/node_modules/")) installed.add(modulePath);
+    else linked.push(`${modulePath}/`);
+  }
+
+  return (id: string): false | undefined => {
+    const file = toModulePath(id.split("?")[0]);
+    const index = file.lastIndexOf("/node_modules/");
+    if (index !== -1) {
+      const start = index + "/node_modules/".length;
+      const segments = file.slice(start).split("/");
+      const packageDir =
+        file.slice(0, start) + segments.slice(0, segments[0].startsWith("@") ? 2 : 1).join("/");
+      return installed.has(packageDir) ? false : undefined;
+    }
+    return linked.some((prefix) => file.startsWith(prefix)) ? false : undefined;
+  };
 }
 
 const NODE_BUILTIN_MODULES = new Set([
@@ -4411,7 +4484,9 @@ async function buildSSRInMemory(
           ],
           treeshake: {
             // Rollup's type wants a boolean; both bundlers accept `undefined` (see the hook).
-            moduleSideEffects: farmServerModuleSideEffects as Rollup.HasModuleSideEffects,
+            moduleSideEffects: createFarmServerModuleSideEffects(
+              root,
+            ) as Rollup.HasModuleSideEffects,
           },
         },
       },
