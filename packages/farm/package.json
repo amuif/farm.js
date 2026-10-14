@@ -695,7 +695,7 @@
     "@opentelemetry/api": "1.9.1",
     "@scalar/api-reference": "1.38.1",
     "@scalar/openapi-parser": "^0.22.3",
-    "@tailwindcss/vite": "4.1.18",
+    "@tailwindcss/vite": "4.3.3",
     "@vercel/og": "0.11.1",
     "@vitejs/plugin-react": "^4.2.1",
     "better-call": "^1.0.19",
@@ -714,9 +714,9 @@
     "sirv": "^2.0.4",
     "sugar-high": "^0.9.5",
     "supports-color": "^10.2.2",
-    "tailwindcss": "4.1.18",
+    "tailwindcss": "4.3.3",
     "unstorage": "2.0.0-alpha.10",
-    "vite": "^5.0.10",
+    "vite": "8.1.5",
     "zod": "^4.1.12"
   },
   "devDependencies": {
@@ -748,8 +748,7 @@
   },
   "optionalDependencies": {
     "rolldown": "1.2.0",
-    "sharp": "^0.35.5",
-    "vite-rolldown": "npm:vite@8.1.5"
+    "sharp": "^0.35.5"
   },
   "engines": {
     "node": ">=22.13.0"

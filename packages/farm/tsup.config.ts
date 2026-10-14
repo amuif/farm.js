@@ -107,7 +107,6 @@ export const farmPackageBuildOptions = {
     "rolldown",
     "sharp",
     "vite",
-    "vite-rolldown",
     /^@farming-labs\/orm/,
     "@farming-labs/docs",
   ],

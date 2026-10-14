@@ -317,7 +317,6 @@ const NITRO_EXTERNAL_MODULES = new Set([
   "lightningcss",
   "rollup",
   "vite",
-  "vite-rolldown",
   "nitro",
   "nitropack",
   "sharp",
@@ -1078,9 +1077,7 @@ export async function buildUniversal(
       throw productionViteResult.reason;
     }
     const productionVite = productionViteResult.value;
-    if (productionVite.builder === "rolldown") {
-      logger.info("⚡ Building application bundles with Vite Rolldown");
-    }
+    logger.info("⚡ Building application bundles with Vite Rolldown");
 
     const buildClientBundle = () =>
       buildClient(
@@ -1161,24 +1158,12 @@ export async function buildUniversal(
       } catch (retryError) {
         if (!(retryError instanceof IncompleteClientBuildOutputError)) throw retryError;
 
-        // A second Rolldown pass can observe the same incomplete graph when a
-        // renderer or build plugin leaves process-global state behind. Keep
-        // the server/SSR bundle on the selected builder, but use Vite's
-        // compatibility Rollup path for the client rather than shipping a
-        // missing browser entry.
-        logger.warn("Client bundle remained incomplete; falling back to Rollup...");
-        const rollupVite = await loadFarmProductionVite("rollup");
-        await buildClient(
-          rollupVite,
-          config,
-          root,
-          srcDir,
-          clientOutputDir,
-          pageRoutes,
-          layoutRoutes,
-          routeSlots,
-          isolatedClientBoundaryModules,
-          hydrationPlanCache,
+        // A second incomplete pass means a renderer or build plugin left state
+        // behind that a rebuild in this process cannot clear. Stop rather than
+        // ship a missing browser entry.
+        throw new IncompleteClientBuildOutputError(
+          `${retryError.message.replace(/^Farm client build produced incomplete output: /, "")}. ` +
+            "The client bundle was still incomplete after a sequential rebuild; run the build again in a fresh process.",
         );
       }
     }
@@ -1844,7 +1829,6 @@ async function buildClient(
               id.endsWith(".node") ||
               id === "nitro" ||
               id === "vite" ||
-              id === "vite-rolldown" ||
               id === "esbuild" ||
               id === "rollup" ||
               id.startsWith("nitro/") ||
@@ -4483,10 +4467,7 @@ async function buildSSRInMemory(
             /^node:/,
           ],
           treeshake: {
-            // Rollup's type wants a boolean; both bundlers accept `undefined` (see the hook).
-            moduleSideEffects: createFarmServerModuleSideEffects(
-              root,
-            ) as Rollup.HasModuleSideEffects,
+            moduleSideEffects: createFarmServerModuleSideEffects(root),
           },
         },
       },
@@ -4521,7 +4502,6 @@ async function buildSSRInMemory(
           "@rollup/rollup-win32-arm64-msvc",
           "@rollup/rollup-win32-ia32-msvc",
           "vite",
-          "vite-rolldown",
           "nitro",
           "nitropack",
           "@prisma/client",

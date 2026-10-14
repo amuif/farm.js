@@ -13,11 +13,7 @@ import { chromium } from "@playwright/test";
 import { imageSize } from "image-size";
 import { describe, expect, it, vi } from "vitest";
 import { build } from "../build";
-import {
-  loadFarmProductionVite,
-  supportsRolldownVite,
-  type FarmProductionViteRuntime,
-} from "../build/production-vite";
+import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
 import { resolveConfig } from "../config";
 import { defineIntegration } from "../integrations";
 import { definePlugin } from "../plugin";
@@ -2932,70 +2928,83 @@ export default function PageOwner() { return <section data-page-owner><LiveCount
     }
   }, 180_000);
 
-  it("recovers an incomplete Rolldown client bundle after the parallel SSR build", async () => {
-    const root = await createProductionFixture();
-
-    try {
-      await fs.writeFile(
-        path.join(root, "src", "app", "globals.css"),
-        ".client-output-marker { color: red; }",
-      );
-      await fs.writeFile(
-        path.join(root, "src", "app", "page.tsx"),
-        `
+  async function buildWithIncompleteClientAttempts(root: string, incompleteAttempts: number) {
+    await fs.writeFile(
+      path.join(root, "src", "app", "globals.css"),
+      ".client-output-marker { color: red; }",
+    );
+    await fs.writeFile(
+      path.join(root, "src", "app", "page.tsx"),
+      `
 "use client";
 
 export default function Page() {
   return <main className="client-output-marker">client output retry</main>;
 }
 `.trim(),
-      );
+    );
 
-      const config = await resolveConfig(
-        {
-          root,
-          srcDir: "src",
-          images: { provider: "none" },
-          generateBuildId: () => "client-output-retry-test",
-        },
-        "production",
-      );
-      const productionVite = await loadFarmProductionVite();
-      let clientBuildAttempts = 0;
-      const buildWithIncompleteFirstClient = (async (inlineConfig: any) => {
-        if (!inlineConfig.build?.ssr) {
-          clientBuildAttempts++;
-          if (clientBuildAttempts <= 2) {
-            const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
-            await fs.mkdir(outputDir, { recursive: true });
-            await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
-            return { output: [] };
-          }
-        }
-
-        return productionVite.build(inlineConfig);
-      }) as FarmProductionViteRuntime["build"];
-      const retryingProductionVite: FarmProductionViteRuntime = {
-        ...productionVite,
-        build: buildWithIncompleteFirstClient,
-        builder: "rolldown",
-      };
-
-      await build(config, {
+    const config = await resolveConfig(
+      {
         root,
-        preset: "node-server",
-        productionVite: retryingProductionVite,
-      });
+        srcDir: "src",
+        images: { provider: "none" },
+        generateBuildId: () => "client-output-retry-test",
+      },
+      "production",
+    );
+    const productionVite = await loadFarmProductionVite();
+    let clientBuildAttempts = 0;
+    const buildWithIncompleteClient = (async (inlineConfig: any) => {
+      if (!inlineConfig.build?.ssr) {
+        clientBuildAttempts++;
+        if (clientBuildAttempts <= incompleteAttempts) {
+          const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
+          await fs.mkdir(outputDir, { recursive: true });
+          await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
+          return { output: [] };
+        }
+      }
 
-      // The second Rolldown attempt is deliberately incomplete too. The
-      // production build must recover through the compatibility Rollup path.
-      expect(clientBuildAttempts).toBe(2);
+      return productionVite.build(inlineConfig);
+    }) as FarmProductionViteRuntime["build"];
+
+    const result = build(config, {
+      root,
+      preset: "node-server",
+      productionVite: { ...productionVite, build: buildWithIncompleteClient },
+    });
+    return { result, attempts: () => clientBuildAttempts };
+  }
+
+  it("recovers an incomplete Rolldown client bundle after the parallel SSR build", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 1);
+      await result;
+
+      expect(attempts()).toBe(2);
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.js"), "utf8"),
       ).resolves.not.toBe("");
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
       ).resolves.toContain(".client-output-marker");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("fails instead of shipping a client bundle that stays incomplete after the retry", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 2);
+      await expect(result).rejects.toThrow(
+        "The client bundle was still incomplete after a sequential rebuild",
+      );
+      expect(attempts()).toBe(2);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -5173,10 +5182,9 @@ export function GET() {
   // Programmatic routes load through a virtual id that ends in the route path
   // (`routes.tsx?farm-route=api:%2Ffeed.xml`). A path ending in a file extension
   // used to make the production transform read the id as an .xml or .json file.
-  it.each(["rolldown", "rollup"] as const)(
+  it.each(["rolldown"] as const)(
     "builds programmatic routes whose path ends in a file extension with %s",
     async (builder) => {
-      if (builder === "rolldown" && !supportsRolldownVite()) return;
       const root = await createProductionFixture();
 
       try {
@@ -5214,7 +5222,7 @@ export default defineRoutes(({ api, page }) => [
         await build(config, {
           root,
           preset: "node-server",
-          productionVite: await loadFarmProductionVite(builder),
+          productionVite: await loadFarmProductionVite(),
         });
 
         const serverDir = path.join(root, ".farm", ".output", "server");

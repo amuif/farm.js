@@ -630,7 +630,6 @@ jobs:
       matrix:
         builder:
           - rolldown
-          - rollup
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -760,7 +759,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        builder: [rolldown, rollup]
+        builder: [rolldown]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -790,7 +789,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        builder: [rolldown, rollup]
+        builder: [rolldown]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

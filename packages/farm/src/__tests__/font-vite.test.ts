@@ -187,9 +187,9 @@ console.log(demo, farmFontPreloadHeader);`,
           output.type === "asset" && output.fileName.startsWith("assets/fonts/"),
       );
 
-      expect(entry?.code).toMatch(/className:\s*["']farm-font-/);
-      expect(entry?.code).toMatch(/variable:\s*["']farm-font-variable-/);
-      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["']\/assets\/fonts\/demo-/);
+      expect(entry?.code).toMatch(/className:\s*["'`]farm-font-/);
+      expect(entry?.code).toMatch(/variable:\s*["'`]farm-font-variable-/);
+      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["'`]\/assets\/fonts\/demo-/);
       expect(entry?.code).not.toContain("localFont({");
       expect(entry?.code).not.toContain("__FARM_FONT_PRELOAD_HEADER__");
       expect(entry?.code).toContain("%3C%2Fassets%2Ffonts%2Fdemo-");
@@ -314,7 +314,7 @@ console.log(demo, farmFontPreloadHeader);`,
       // metadata, and encoded Link header must not carry basePath.
       expect(css).toMatch(/url\("\/assets\/fonts\/demo-h[a-f0-9]{12}\.woff2"\)/);
       expect(css).not.toContain("/docs/assets/fonts/");
-      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["']\/assets\/fonts\/demo-/);
+      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["'`]\/assets\/fonts\/demo-/);
       expect(entry?.code).toContain("%3C%2Fassets%2Ffonts%2Fdemo-");
       expect(entry?.code).not.toContain("%2Fdocs%2Fassets");
     } finally {

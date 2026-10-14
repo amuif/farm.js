@@ -47,18 +47,19 @@ type VitePendingRequest = {
 };
 
 async function drainVitePendingRequests(server: ViteDevServer): Promise<void> {
-  // Vite waits for this registry after closing its plugin container and
-  // dependency optimizer. That order can strand optimized-dependency loads:
-  // the optimizer is gone, but the plugin hook still awaits its processing
-  // promise. Drain the same registry first while the optimizer can finish.
-  const pendingRequests = (
-    server as ViteDevServer & {
-      _pendingRequests?: Map<string, VitePendingRequest>;
-    }
-  )._pendingRequests;
+  // Each Vite environment waits for this registry while it closes its plugin
+  // container and dependency optimizer. That order can strand
+  // optimized-dependency loads: the optimizer is gone, but the plugin hook
+  // still awaits its processing promise. Drain every registry first while the
+  // optimizers can finish; a request in one environment can start another.
+  const registries = Object.values(server.environments ?? {}).map(
+    (environment) =>
+      (environment as { _pendingRequests?: Map<string, VitePendingRequest> })._pendingRequests,
+  );
+  const pending = () => registries.flatMap((registry) => (registry ? [...registry.values()] : []));
 
-  while (pendingRequests?.size) {
-    await Promise.allSettled([...pendingRequests.values()].map(({ request }) => request));
+  for (let requests = pending(); requests.length > 0; requests = pending()) {
+    await Promise.allSettled(requests.map(({ request }) => request));
   }
 }
 
@@ -361,7 +362,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
         // Finish Vite's active transforms, stop serving, release what the
         // plugins hold, then flush telemetry last so shutdown problems are
         // still reported.
-        // Vite 5.4's close() can deadlock after the client entry has been
+        // Vite's close() can deadlock after the client entry has been
         // transformed: background pre-transforms of its bare imports wait in
         // the optimized-deps load hook for a dependency run that
         // depsOptimizer.close() cancels without settling, and the plugin

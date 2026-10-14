@@ -20,11 +20,7 @@ import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import { farmFontImportsPlugin } from "../font-vite";
 import { createFarmSourceAlias, mergeFarmViteConfig } from "../server/vite-config";
 import { getFarmRendererComponentExtensions, loadFarmRendererVitePlugins } from "../renderer";
-import {
-  canUseRolldownForRouteDiscovery,
-  loadFarmProductionVite,
-  type FarmProductionViteRuntime,
-} from "./production-vite";
+import { loadFarmProductionVite, type FarmProductionViteRuntime } from "./production-vite";
 import { withProductionNodeEnv } from "./production-node-env";
 
 interface BuildOptions {
@@ -154,12 +150,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
       : undefined;
     if (productionViteResult?.status === "rejected") throw productionViteResult.reason;
     const productionVite = productionViteResult?.value;
-    const useProductionViteForDiscovery =
-      productionVite && canUseRolldownForRouteDiscovery(config.vite);
-    if (productionVite?.builder === "rolldown" && !useProductionViteForDiscovery) {
-      logger.info("🔌 Using Vite Rollup for route discovery with custom Vite configuration");
-    }
-    const createViteServer = useProductionViteForDiscovery
+    const createViteServer = productionVite
       ? productionVite.createServer
       : (await import("vite")).createServer;
     projectModuleServer = await createProjectModuleServer(createViteServer, config, root);
