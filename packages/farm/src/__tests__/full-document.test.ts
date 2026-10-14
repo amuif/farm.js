@@ -8,6 +8,7 @@ import { renderToPipeableStream } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   composeFarmFullDocument,
+  ensureFarmDocumentHead,
   extractFarmFullDocument,
   isFarmFullDocument,
   opensFarmFullDocument,
@@ -37,6 +38,42 @@ function productionExtractor(): typeof extractFarmFullDocument {
   const generated = new Function("return `" + source.slice(start, end) + "`;")();
   return new Function(generated + "; return extractFarmFullDocument;")();
 }
+
+function productionEnsureHead(): typeof ensureFarmDocumentHead {
+  const source = readFileSync(new URL("../nitro/universal-build.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function ensureFarmDocumentHead(markup)");
+  const end = source.indexOf("function createFarmErrorDocument(html, title)", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const generated = new Function("return `" + source.slice(start, end) + "`;")();
+  return new Function(generated + "; return ensureFarmDocumentHead;")();
+}
+
+describe.each([
+  ["development", ensureFarmDocumentHead],
+  ["production", productionEnsureHead()],
+] as const)("%s document head", (_runtime, ensureHead) => {
+  it("adds an empty head right after <html> when the document has none", () => {
+    expect(ensureHead('<html lang="en"><body><main>hi</main></body></html>')).toBe(
+      '<html lang="en"><head></head><body><main>hi</main></body></html>',
+    );
+  });
+
+  it("does not mistake <header> for a head", () => {
+    expect(ensureHead("<HTML><body><header>nav</header></body></HTML>")).toBe(
+      "<html><head></head><body><header>nav</header></body></HTML>",
+    );
+  });
+
+  it("leaves documents that already have a head unchanged", () => {
+    for (const document of [
+      "<html><head></head><body></body></html>",
+      '<html><HEAD data-x="1"><title>t</title></HEAD><body></body></html>',
+    ]) {
+      expect(ensureHead(document)).toBe(document);
+    }
+  });
+});
 
 describe.each([
   ["development", extractFarmFullDocument],
@@ -191,6 +228,25 @@ describe("full-document composition", () => {
     // Head asset lands inside <head>, footer inside <body>.
     expect(html.indexOf("/globals.css")).toBeLessThan(html.indexOf("</head>"));
     expect(html.indexOf("/@farm/client.js")).toBeLessThan(html.indexOf("</body>"));
+  });
+
+  it("keeps Farm's head assets when the layout renders no <head>", () => {
+    // <head> is optional; without one the client props and runtime were dropped
+    // and the page never hydrated in development.
+    const html = composeFarmFullDocument(
+      '<html lang="en"><body><header>nav</header><main>hi</main></body></html>',
+      {
+        headAssets: "<script>window.__FARM_PROPS__ = {};</script>",
+        bodyFooter: '<script type="module" src="/@farm/client.js"></script>',
+      },
+    );
+
+    expect(html.match(/<head[\s>]/gi)).toHaveLength(1);
+    expect(html.indexOf("<head>")).toBeLessThan(html.indexOf("window.__FARM_PROPS__"));
+    expect(html.indexOf("window.__FARM_PROPS__")).toBeLessThan(html.indexOf("</head>"));
+    expect(html.indexOf("</head>")).toBeLessThan(html.indexOf("<body"));
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("<header>nav</header>");
   });
 
   it("inserts injected markup literally even with $-replacement sequences", () => {

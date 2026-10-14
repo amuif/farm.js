@@ -70,6 +70,19 @@ export function opensFarmFullDocument(markup: string): boolean {
   return /^<!doctype/i.test(inner) || /^<html[\s>]/i.test(inner);
 }
 
+/**
+ * Give a layout's document a `<head>` when it renders none. `<head>` is optional in
+ * HTML and React, but Farm's managed head assets (route props, the client runtime,
+ * styles) are inserted before `</head>`, and without one they would be dropped and
+ * the page would never hydrate. Matches the production build's helper.
+ */
+export function ensureFarmDocumentHead(markup: string): string {
+  if (/<head[\s>]/i.test(markup)) return markup;
+  return markup.replace(/<html([^>]*)>/i, (_match, attributes: string) => {
+    return `<html${attributes}><head></head>`;
+  });
+}
+
 /** Remove document title elements before inserting a higher-priority title. */
 export function removeFarmDocumentTitles(markup: string): string {
   return markup.replace(/<title\b[^>]*>[\s\S]*?<\/title>\s*/gi, "");
@@ -96,7 +109,7 @@ export function composeFarmFullDocument(
   documentHtml: string,
   assets: FarmFullDocumentAssets,
 ): string {
-  let html = documentHtml;
+  let html = ensureFarmDocumentHead(documentHtml);
 
   if (assets.htmlAttributes) {
     html = html.replace(/<html\b([^>]*)>/i, (_match, attrs: string) => {
