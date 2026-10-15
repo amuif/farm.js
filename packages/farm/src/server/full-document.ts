@@ -97,6 +97,11 @@ export function ensureFarmDocumentRoot(markup: string): string {
     .replace(/<\/body>/i, () => "</div></body>");
 }
 
+/** True when the markup already links a favicon. Matches the production build's helper. */
+export function hasFarmDocumentIcon(markup: string): boolean {
+  return /<link\b[^>]*\brel=["']?(?:shortcut )?icon\b/i.test(markup);
+}
+
 /** Remove document title elements before inserting a higher-priority title. */
 export function removeFarmDocumentTitles(markup: string): string {
   return markup.replace(/<title\b[^>]*>[\s\S]*?<\/title>\s*/gi, "");
@@ -111,6 +116,11 @@ export interface FarmFullDocumentAssets {
   htmlAttributes?: string;
   /** Existing attributes Farm owns and must replace before merging. */
   replaceHtmlAttributes?: readonly string[];
+  /**
+   * Add `<link rel="icon" href="data:,">` unless the document already links an icon, so
+   * the browser doesn't request a missing /favicon.ico. Matches the generated shell.
+   */
+  fallbackIcon?: boolean;
 }
 
 /**
@@ -141,8 +151,14 @@ export function composeFarmFullDocument(
 
   html = ensureFarmDocumentRoot(html);
 
-  if (assets.headAssets) {
-    html = html.replace(/<\/head>/i, () => `  ${assets.headAssets}\n</head>`);
+  const headAssets = [
+    assets.fallbackIcon && !hasFarmDocumentIcon(html) ? '<link rel="icon" href="data:,">' : "",
+    assets.headAssets,
+  ]
+    .filter(Boolean)
+    .join("\n  ");
+  if (headAssets) {
+    html = html.replace(/<\/head>/i, () => `  ${headAssets}\n</head>`);
   }
   if (assets.bodyFooter) {
     html = html.replace(/<\/body>/i, () => `  ${assets.bodyFooter}\n</body>`);

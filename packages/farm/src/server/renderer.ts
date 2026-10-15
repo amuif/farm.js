@@ -748,7 +748,10 @@ export class ServerRenderer {
       const rendered = await this.rendererRuntime.renderToStringWithHead(element);
       return { html: rendered.html, head: rendered.head || "" };
     }
-    return { html: await this.rendererRuntime.renderToString(element), head: "" };
+    // Render to completion through the streaming renderer where there is one, so a
+    // component that suspends (data hooks, lazy imports) resolves instead of failing
+    // React's synchronous renderToString. Production buffers the same stream.
+    return { html: await this.renderElementToCompleteHTML(element), head: "" };
   }
 
   /**
@@ -2723,6 +2726,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
           ? removeFarmDocumentTitles(rendererHead)
           : rendererHead;
         html = composeFarmFullDocument(documentHtml, {
+          fallbackIcon: !hasFavicon,
           htmlAttributes: `${
             i18nSnapshot
               ? ` lang="${escapeHtmlAttribute(i18nSnapshot.locale)}" dir="${escapeHtmlAttribute(i18nSnapshot.direction)}"`
@@ -3518,6 +3522,7 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
       return composeFarmFullDocument(
         metadataHead ? removeFarmDocumentTitles(fullDocument) : fullDocument,
         {
+          fallbackIcon: !metadataHead,
           htmlAttributes: `${
             i18nSnapshot
               ? ` lang="${escapeHtmlAttribute(i18nSnapshot.locale)}" dir="${escapeHtmlAttribute(i18nSnapshot.direction)}"`

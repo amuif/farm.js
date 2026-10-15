@@ -4447,6 +4447,10 @@ async function buildSSRInMemory(
           external: [
             "fsevents",
             "sharp",
+            // Loads its .node addon through `bindings`, which finds the binary from its own
+            // file path (`__filename`). Inlined into the ESM server bundle, it crashed at
+            // startup; kept external, Nitro copies the package into the output.
+            "better-sqlite3",
             ...rendererOptionalExternals,
             ...(useExternalMetadataImageRuntime ? ["@vercel/og"] : []),
             "@prisma/client",
@@ -6036,7 +6040,9 @@ const farmDocsHandler = ${
 }, {
   rootDir: farmDocsRuntimeRoot,
   clientEntry: "/__farm_client_js_src__",
-  stylesheets: ["/farm-fonts.css", "/__farm_client_css_href__"],
+  // Font CSS is merged into the client stylesheet; farm-fonts.css only exists when the
+  // app has fonts, so linking it separately 404'd for apps without them.
+  stylesheets: ["/__farm_client_css_href__"],
   resolveLayoutFonts: (pathname) =>
     resolveFarmLayoutFonts(
       getApplicableLayouts(getFarmRoutePathname(pathname)).map((layout) => layout.module),
@@ -6524,6 +6530,15 @@ function ensureFarmDocumentRoot(markup) {
       return "<body" + attributes + '><div id="root">';
     })
     .replace(/<\\/body>/i, function() { return "</div></body>"; });
+}
+
+function hasFarmDocumentIcon(markup) {
+  return /<link\\b[^>]*\\brel=["']?(?:shortcut )?icon\\b/i.test(markup);
+}
+
+function addFarmFallbackIcon(markup, hasFavicon) {
+  if (hasFavicon || hasFarmDocumentIcon(markup)) return markup;
+  return markup.replace(/<\\/head>/i, function() { return '  <link rel="icon" href="data:,">\\n</head>'; });
 }
 
 function createFarmErrorDocument(html, title) {
@@ -8474,8 +8489,9 @@ async function handleFarmRequestInContext(
         let fullHtml;
         if (hasFullDocument) {
           // Layout provides full HTML structure - inject CSS and client script
-          html = ensureFarmDocumentRoot(
-            ensureFarmDocumentHead(extractFarmFullDocument(html) || html),
+          html = addFarmFallbackIcon(
+            ensureFarmDocumentRoot(ensureFarmDocumentHead(extractFarmFullDocument(html) || html)),
+            hasFavicon,
           );
           fullHtml = html
             // Inject CSS link after opening head tag or first meta tag
@@ -8808,7 +8824,10 @@ async function handleFarmRequestInContext(
     
     let fullHtml;
     if (hasFullDocument) {
-      fullHtml = ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument))
+      fullHtml = addFarmFallbackIcon(
+        ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument)),
+        notFoundMetadata.hasFavicon,
+      )
         // The not-found title replaces any title the layout rendered, as metadata does on pages.
         .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
           "<head" + attrs + ">" +
