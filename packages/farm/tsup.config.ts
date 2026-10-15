@@ -89,8 +89,8 @@ export const farmPackageBuildOptions = {
   entry,
   format: ["cjs", "esm"],
   // Declarations for every entry except the CLI's React-free runtime. Everything it exports
-  // is typed by index.d.ts, which package.json points it at, and one more declaration entry
-  // pushes the worker past CI's 8 GB heap.
+  // is typed by index.d.ts, which package.json points it at. The declaration worker peaks
+  // around 10 GB on Node 22, so builds run with a 12 GB heap.
   dts: {
     entry: Object.fromEntries(
       Object.entries(entry).filter(([name]) => name !== "internal/cli-runtime"),
