@@ -20,6 +20,7 @@ export async function loadCompiledAndOriginal(source: string): Promise<{
   original: Record<string, React.ComponentType<Record<string, unknown>>>;
   names: readonly string[];
   reasons: string[];
+  code: string;
 }> {
   const result = await compileReactModule(
     source,
@@ -41,6 +42,7 @@ export async function loadCompiledAndOriginal(source: string): Promise<{
     original: await load(source),
     names: result.compiled,
     reasons: result.diagnostics.map((diagnostic) => diagnostic.reason),
+    code: result.code,
   };
 }
 

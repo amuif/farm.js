@@ -14,7 +14,8 @@ const repo = resolve(root, "../..");
 const require = createRequire(`${root}/package.json`);
 const { build } = require("vite");
 const { chromium } = createRequire(`${repo}/package.json`)("@playwright/test");
-const { createFarmRendererPlugin } = await import(`${root}/dist/vite.mjs`);
+const { normalizeReactCompilerOptions } = await import(`${root}/dist/index.mjs`);
+const ts = require("typescript");
 const runtime = `${root}/src/compiler-runtime.tsx`;
 const entry = `${root}/fixtures/runtime-size/keyed-plain.tsx`;
 const runtimeSource = readFileSync(runtime, "utf8");
@@ -25,7 +26,31 @@ const baselineSource = execFileSync(
   ["show", baseRef + ":packages/farm-react/src/compiler-runtime.tsx"],
   { cwd: repo, encoding: "utf8" },
 );
-assert.notEqual(baselineSource, runtimeSource);
+const compilerSource = readFileSync(`${root}/src/compiler.ts`, "utf8");
+const baselineCompilerSource = execFileSync(
+  "git",
+  ["show", baseRef + ":packages/farm-react/src/compiler.ts"],
+  { cwd: repo, encoding: "utf8" },
+);
+assert(baselineSource !== runtimeSource || baselineCompilerSource !== compilerSource);
+// Compile the trusted Git/worktree sources with the same dependencies and options.
+// This also isolates compiler-only changes instead of using today's compiler for both arms.
+function loadCompiler(source) {
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  const module = { exports: {} };
+  new Function("require", "module", "exports", outputText)(require, module, module.exports);
+  return module.exports.compileReactModule;
+}
+const compilers = {
+  base: loadCompiler(baselineCompilerSource),
+  candidate: loadCompiler(compilerSource),
+};
+const compilerOptions = normalizeReactCompilerOptions({
+  onUnsupported: "error",
+  reactivity: "hybrid",
+});
 const bindingCount = Number(process.env.FARM_ALLOCATION_BINDINGS || 1);
 assert([1, 3].includes(bindingCount), "FARM_ALLOCATION_BINDINGS must be 1 or 3");
 let fixture = `import React, {useState} from 'react';
@@ -73,15 +98,14 @@ for (const variant of ["base", "candidate", "react"]) {
             return candidate ? runtimeSource : baselineSource;
           }
         },
-      },
-      ...createFarmRendererPlugin({
-        rendererOptions: {
-          experimental: {
-            compiler:
-              variant === "react" ? false : { onUnsupported: "error", reactivity: "hybrid" },
-          },
+        async transform(code, id) {
+          if (id !== entry || variant === "react") return;
+          const result = await compilers[variant](code, id, compilerOptions);
+          assert.deepEqual(result.diagnostics, []);
+          assert.deepEqual(result.compiled, ["Table"]);
+          return { code: result.code, map: result.map };
         },
-      }),
+      },
     ],
     build: { write: false, minify: "esbuild", rollupOptions: { input: entry } },
   });

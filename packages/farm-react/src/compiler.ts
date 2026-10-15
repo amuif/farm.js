@@ -5465,7 +5465,8 @@ function analyzeKeyedRowTree(
       bindings.push({
         kind: "text",
         path: [...path],
-        value: t.arrayExpression(parts),
+        // Normalization accepts scalars and arrays; only joined text needs a wrapper.
+        value: parts.length === 1 ? parts[0] : t.arrayExpression(parts),
       });
     }
 
