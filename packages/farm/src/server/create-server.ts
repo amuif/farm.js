@@ -305,7 +305,6 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
               "rollup",
               "fsevents",
               "nf3",
-              "better-call",
               "zod",
               "supports-color",
               "node-fetch",

@@ -11,6 +11,7 @@ import {
   ensureFarmDocumentHead,
   ensureFarmDocumentRoot,
   extractFarmFullDocument,
+  hasFarmDocumentIcon,
   isFarmFullDocument,
   opensFarmFullDocument,
   removeFarmDocumentTitles,
@@ -59,6 +60,38 @@ function productionEnsureRoot(): typeof ensureFarmDocumentRoot {
   const generated = new Function("return `" + source.slice(start, end) + "`;")();
   return new Function(generated + "; return ensureFarmDocumentRoot;")();
 }
+
+function productionHasIcon(): typeof hasFarmDocumentIcon {
+  const source = readFileSync(new URL("../nitro/universal-build.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function hasFarmDocumentIcon(markup)");
+  const end = source.indexOf("function addFarmFallbackIcon(markup, hasFavicon)", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const generated = new Function("return `" + source.slice(start, end) + "`;")();
+  return new Function(generated + "; return hasFarmDocumentIcon;")();
+}
+
+describe.each([
+  ["development", hasFarmDocumentIcon],
+  ["production", productionHasIcon()],
+] as const)("%s document icon detection", (_runtime, hasIcon) => {
+  it.each([
+    '<link rel="icon" href="/favicon.svg">',
+    "<link href='/x.ico' rel='shortcut icon'>",
+    '<LINK REL="icon" HREF="data:,">',
+    "<link rel=icon href=/a.png>",
+  ])("finds %s", (link) => {
+    expect(hasIcon(`<html><head>${link}</head><body></body></html>`)).toBe(true);
+  });
+
+  it.each([
+    '<link rel="apple-touch-icon" href="/a.png">',
+    '<link rel="stylesheet" href="/icon.css">',
+    "<html><head></head><body></body></html>",
+  ])("ignores %s", (markup) => {
+    expect(hasIcon(markup)).toBe(false);
+  });
+});
 
 describe.each([
   ["development", ensureFarmDocumentRoot],
@@ -282,6 +315,27 @@ describe("full-document composition", () => {
     expect(html.indexOf("</head>")).toBeLessThan(html.indexOf("<body"));
     expect(html).toContain('<html lang="en">');
     expect(html).toContain("<header>nav</header>");
+  });
+
+  it("adds a fallback icon only when the document links none", () => {
+    const bare = composeFarmFullDocument("<html><head></head><body></body></html>", {
+      headAssets: "",
+      bodyFooter: "",
+      fallbackIcon: true,
+    });
+    expect(bare).toContain('<link rel="icon" href="data:,">');
+
+    const withIcon = composeFarmFullDocument(
+      '<html><head><link rel="icon" href="/favicon.svg"></head><body></body></html>',
+      { headAssets: "", bodyFooter: "", fallbackIcon: true },
+    );
+    expect(withIcon).not.toContain("data:,");
+
+    const notRequested = composeFarmFullDocument("<html><head></head><body></body></html>", {
+      headAssets: "",
+      bodyFooter: "",
+    });
+    expect(notRequested).not.toContain("data:,");
   });
 
   it("inserts injected markup literally even with $-replacement sequences", () => {

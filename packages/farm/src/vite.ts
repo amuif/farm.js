@@ -1,4 +1,12 @@
-import type { ConfigEnv, Plugin, UserConfig, ViteDevServer, HmrContext, Connect } from "vite";
+import type {
+  AliasOptions,
+  ConfigEnv,
+  Plugin,
+  UserConfig,
+  ViteDevServer,
+  HmrContext,
+  Connect,
+} from "vite";
 import type { FarmConfig, FarmRequest } from "./types";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FarmApp } from "./app";
@@ -1024,6 +1032,14 @@ export function shouldEmitFarmClientRootHmr(renderer?: FarmRenderer): boolean {
   return getFarmRendererCapabilities(resolveFarmRenderer(renderer)).reconcilesRerenders;
 }
 
+function hasViteAlias(alias: AliasOptions | undefined, find: string): boolean {
+  if (!alias) return false;
+  if (!Array.isArray(alias)) return Object.prototype.hasOwnProperty.call(alias, find);
+  return alias.some((entry) =>
+    typeof entry.find === "string" ? entry.find === find : entry.find.test(`${find}/`),
+  );
+}
+
 export function farmPlugin(
   options: FarmVitePluginOptions = {},
   initialPluginManager?: PluginManager,
@@ -1055,8 +1071,13 @@ export function farmPlugin(
   return {
     name: "farm",
 
-    config(_userConfig, configEnv) {
+    config(userConfig, configEnv) {
       const layerAliases = getFarmLayerAliases(options.layers);
+      // `@/` resolves to the source directory in development as it does in production
+      // builds. An `@` alias in the app's own Vite config wins.
+      const sourceAlias = hasViteAlias(userConfig.resolve?.alias, "@")
+        ? {}
+        : createFarmSourceAlias(options.root || process.cwd(), options.srcDir);
       const layerRoots = (options.layers ?? []).map((layer) => layer.root);
       return {
         // Honor Farm's publicDir so the dev server serves the same static
@@ -1064,7 +1085,7 @@ export function farmPlugin(
         ...(options.publicDir ? { publicDir: options.publicDir } : {}),
         define: getEnvDefines(options, configEnv),
         resolve: {
-          alias: layerAliases,
+          alias: { ...layerAliases, ...sourceAlias },
         },
         ...(layerRoots.length
           ? {
@@ -5898,7 +5919,6 @@ export async function defineConfig(config: FarmVitePluginOptions = {}): Promise<
         "rollup",
         "fsevents",
         "nf3",
-        "better-call",
         "zod",
         "supports-color",
         "node-fetch",

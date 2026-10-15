@@ -6546,6 +6546,15 @@ function ensureFarmDocumentRoot(markup) {
     .replace(/<\\/body>/i, function() { return "</div></body>"; });
 }
 
+function hasFarmDocumentIcon(markup) {
+  return /<link\\b[^>]*\\brel=["']?(?:shortcut )?icon\\b/i.test(markup);
+}
+
+function addFarmFallbackIcon(markup, hasFavicon) {
+  if (hasFavicon || hasFarmDocumentIcon(markup)) return markup;
+  return markup.replace(/<\\/head>/i, function() { return '  <link rel="icon" href="data:,">\\n</head>'; });
+}
+
 function createFarmErrorDocument(html, title) {
   const escapedTitle = escapeFarmHtmlAttribute(title || "Application Error");
   const fullDocument = extractFarmFullDocument(html);
@@ -8494,8 +8503,9 @@ async function handleFarmRequestInContext(
         let fullHtml;
         if (hasFullDocument) {
           // Layout provides full HTML structure - inject CSS and client script
-          html = ensureFarmDocumentRoot(
-            ensureFarmDocumentHead(extractFarmFullDocument(html) || html),
+          html = addFarmFallbackIcon(
+            ensureFarmDocumentRoot(ensureFarmDocumentHead(extractFarmFullDocument(html) || html)),
+            hasFavicon,
           );
           fullHtml = html
             // Inject CSS link after opening head tag or first meta tag
@@ -8828,7 +8838,10 @@ async function handleFarmRequestInContext(
     
     let fullHtml;
     if (hasFullDocument) {
-      fullHtml = ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument))
+      fullHtml = addFarmFallbackIcon(
+        ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument)),
+        notFoundMetadata.hasFavicon,
+      )
         // The not-found title replaces any title the layout rendered, as metadata does on pages.
         .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
           "<head" + attrs + ">" +
