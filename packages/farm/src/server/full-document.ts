@@ -1,9 +1,9 @@
 // Handling for a root layout that returns a full `<html>…</html>` document.
 //
-// Farm owns the document shell — a layout is expected to return a fragment (its
-// children), like the docs example does. When a layout instead returns a whole
-// document, the dev renderer must compose that document as the response rather
-// than nesting it inside the generated shell, which would emit invalid nested
+// A root layout may return its children (Farm then renders the document shell)
+// or a whole document, as the create-app templates do. A whole document is
+// composed as the response, with Farm's assets merged into it, rather than
+// nested inside the generated shell, which would emit invalid nested
 // `<html>`/`<head>`/`<body>`. This mirrors the production (Nitro) build's
 // `hasFullDocument` path so dev and prod agree.
 
@@ -70,6 +70,33 @@ export function opensFarmFullDocument(markup: string): boolean {
   return /^<!doctype/i.test(inner) || /^<html[\s>]/i.test(inner);
 }
 
+/**
+ * Give a layout's document a `<head>` when it renders none. `<head>` is optional in
+ * HTML and React, but Farm's managed head assets (route props, the client runtime,
+ * styles) are inserted before `</head>`, and without one they would be dropped and
+ * the page would never hydrate. Matches the production build's helper.
+ */
+export function ensureFarmDocumentHead(markup: string): string {
+  if (/<head[\s>]/i.test(markup)) return markup;
+  return markup.replace(/<html([^>]*)>/i, (_match, attributes: string) => {
+    return `<html${attributes}><head></head>`;
+  });
+}
+
+/**
+ * Wrap the body's content in the `#root` element the client hydrates, unless the document
+ * already has one. Matches the production build's helper.
+ */
+export function ensureFarmDocumentRoot(markup: string): string {
+  if (/\sid=["']root["']/i.test(markup)) return markup;
+  return markup
+    .replace(
+      /<body\b([^>]*)>/i,
+      (_match, attributes: string) => `<body${attributes}><div id="root">`,
+    )
+    .replace(/<\/body>/i, () => "</div></body>");
+}
+
 /** Remove document title elements before inserting a higher-priority title. */
 export function removeFarmDocumentTitles(markup: string): string {
   return markup.replace(/<title\b[^>]*>[\s\S]*?<\/title>\s*/gi, "");
@@ -96,7 +123,7 @@ export function composeFarmFullDocument(
   documentHtml: string,
   assets: FarmFullDocumentAssets,
 ): string {
-  let html = documentHtml;
+  let html = ensureFarmDocumentHead(documentHtml);
 
   if (assets.htmlAttributes) {
     html = html.replace(/<html\b([^>]*)>/i, (_match, attrs: string) => {
@@ -112,12 +139,7 @@ export function composeFarmFullDocument(
     });
   }
 
-  // Ensure a hydration root exists so the client can mount, matching the shell.
-  if (!/\sid=["']root["']/i.test(html)) {
-    html = html
-      .replace(/<body\b([^>]*)>/i, '<body$1><div id="root">')
-      .replace(/<\/body>/i, "</div></body>");
-  }
+  html = ensureFarmDocumentRoot(html);
 
   if (assets.headAssets) {
     html = html.replace(/<\/head>/i, () => `  ${assets.headAssets}\n</head>`);

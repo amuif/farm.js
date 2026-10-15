@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/otel",
-  "version": "0.1.0-beta.39",
+  "version": "0.1.0-beta.41",
   "description": "OpenTelemetry SDK setup for Farm.js applications",
   "license": "MIT",
   "repository": {

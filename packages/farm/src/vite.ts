@@ -3,7 +3,6 @@ import type { FarmConfig, FarmRequest } from "./types";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FarmApp } from "./app";
 import { logger, toPosixPath, toViteModuleId } from "./utils";
-import { defaultGlobalCSS } from "./default-styles";
 import {
   FARM_NODE_RESPONSE_END_PENDING,
   type FarmPlugin,
@@ -52,6 +51,8 @@ import {
   normalizeFarmMarkdownRoutePath,
 } from "./app-markdown";
 import { applyWebResponseHeaders, sendWebResponse } from "./server/response";
+import { resolveDevGlobalStylesheetHref } from "./server/dev-styles";
+import { FARM_LAYOUT_ELEMENT_CLIENT_SOURCE } from "./document-layout-client";
 import {
   getClientModuleMetadata,
   getIslandStrategyExport,
@@ -1115,15 +1116,6 @@ export function farmPlugin(
         server,
       );
 
-      const globalsCSSPath = path.join(server.config.root, "src/app/globals.css");
-      if (!fs.existsSync(globalsCSSPath)) {
-        const appDir = path.join(server.config.root, "src/app");
-        if (!fs.existsSync(appDir)) {
-          fs.mkdirSync(appDir, { recursive: true });
-        }
-        fs.writeFileSync(globalsCSSPath, defaultGlobalCSS);
-      }
-
       await farmApp.initialize();
 
       const farmConfig = farmApp.getConfig();
@@ -1492,7 +1484,10 @@ export function farmPlugin(
               clientEntry: "/@farm/client.js",
               resolveLayoutFonts: resolveDocsLayoutFonts,
               fontStylesheetHref: "/@farm/fonts.css",
-              globalStylesheetHref: "/src/app/globals.css",
+              globalStylesheetHref: resolveDevGlobalStylesheetHref(
+                farmConfig.root,
+                farmConfig.srcDir,
+              ),
               loadModule: async (specifier) => {
                 const resolved = await server.pluginContainer.resolveId(specifier, undefined, {
                   ssr: true,
@@ -1510,7 +1505,10 @@ export function farmPlugin(
               fontAssets: toFarmDocsPublicFontAssets(farmDocsFontAssetList),
               resolveLayoutFonts: resolveDocsLayoutFonts,
               fontStylesheetHref: "/@farm/fonts.css",
-              globalStylesheetHref: "/src/app/globals.css",
+              globalStylesheetHref: resolveDevGlobalStylesheetHref(
+                farmConfig.root,
+                farmConfig.srcDir,
+              ),
             })
         : null;
       const wrapFarmDocsResponseWithLayouts = async (
@@ -3095,6 +3093,10 @@ export const getManifest = () => ({
         }
 
         const manifest = routeManager.generateClientManifest(server.config.root);
+        const globalStylesheetHref = resolveDevGlobalStylesheetHref(
+          server.config.root,
+          farmApp?.getConfig().srcDir,
+        );
 
         // Convert to full manifest format
         const fullManifest = {
@@ -3102,12 +3104,9 @@ export const getManifest = () => ({
           routes: {} as Record<string, any>,
           layouts: {} as Record<string, any>,
           slots: [] as Array<Record<string, any>>,
-          sharedAssets: [
-            {
-              tag: "link",
-              attrs: { rel: "stylesheet", href: "/src/app/globals.css" },
-            },
-          ],
+          sharedAssets: globalStylesheetHref
+            ? [{ tag: "link", attrs: { rel: "stylesheet", href: globalStylesheetHref } }]
+            : [],
         };
 
         // Convert routes array to object keyed by pattern
@@ -4863,19 +4862,12 @@ async function loadLayoutComponents(layouts = []) {
   return loadedLayouts;
 }
 
+${FARM_LAYOUT_ELEMENT_CLIENT_SOURCE}
 function wrapWithLoadedLayouts(element, loadedLayouts, params) {
   let wrapped = element;
   for (let index = loadedLayouts.length - 1; index >= 0; index--) {
     const layout = loadedLayouts[index];
-    wrapped = React.createElement(layout.Component, {
-      children: wrapped,
-      params,
-    });
-    wrapped = React.createElement('div', {
-      'data-farm-layout-boundary': 'true',
-      'data-farm-layout-pattern': layout.pattern,
-      style: { display: 'contents' },
-    }, wrapped);
+    wrapped = createFarmLayoutElement(layout.Component, layout.pattern, wrapped, params);
   }
   return wrapped;
 }

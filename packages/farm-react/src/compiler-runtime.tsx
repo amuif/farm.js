@@ -379,7 +379,9 @@ function compilerKeyedArrayFilterSurvivorsFromUpdate(
     updates.push(current);
   }
 
-  let survivors = Array.from({ length: expectedLength }, (_, index) => index);
+  // oxlint-disable-next-line unicorn/no-new-array -- Known row count; avoid Array.from mapping callbacks.
+  let survivors = new Array<number>(expectedLength);
+  for (let index = 0; index < expectedLength; index += 1) survivors[index] = index;
   let keysStable = true;
   for (let updateIndex = updates.length - 1; updateIndex >= 0; updateIndex -= 1) {
     const current = updates[updateIndex];

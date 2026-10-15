@@ -27,6 +27,7 @@ import os from "os";
 import path from "path";
 import { constants as fsConstants, existsSync, readFileSync, realpathSync } from "fs";
 import { findRequestBoundSourceBlockers, parseRouteRenderingDirective } from "../ssg";
+import { FARM_LAYOUT_ELEMENT_CLIENT_SOURCE } from "../document-layout-client";
 import { fileURLToPath } from "url";
 import { builtinModules, createRequire } from "module";
 import { isDeepStrictEqual } from "node:util";
@@ -3232,6 +3233,7 @@ function hasHydratableLayout(pathname) {
   });
 }
 
+${FARM_LAYOUT_ELEMENT_CLIENT_SOURCE}
 // Wrap a page element with applicable layouts
 function wrapWithLayouts(pageElement, pathname, params) {
   const layouts = getApplicableLayouts(pathname);
@@ -3240,18 +3242,8 @@ function wrapWithLayouts(pageElement, pathname, params) {
   // Wrap from innermost to outermost (reverse order since layouts are root-first)
   for (let i = layouts.length - 1; i >= 0; i--) {
     const layout = layouts[i];
-    const LayoutComponent = layout.Component;
-    if (LayoutComponent) {
-      wrapped = React.createElement(LayoutComponent, { children: wrapped, params: params });
-      wrapped = React.createElement(
-        "div",
-        {
-          "data-farm-layout-boundary": "true",
-          "data-farm-layout-pattern": layout.pattern,
-          style: { display: "contents" },
-        },
-        wrapped,
-      );
+    if (layout.Component) {
+      wrapped = createFarmLayoutElement(layout.Component, layout.pattern, wrapped, params);
     }
   }
   
@@ -6525,6 +6517,15 @@ function ensureFarmDocumentHead(markup) {
   });
 }
 
+function ensureFarmDocumentRoot(markup) {
+  if (/\\sid=["']root["']/i.test(markup)) return markup;
+  return markup
+    .replace(/<body\\b([^>]*)>/i, function(_match, attributes) {
+      return "<body" + attributes + '><div id="root">';
+    })
+    .replace(/<\\/body>/i, function() { return "</div></body>"; });
+}
+
 function createFarmErrorDocument(html, title) {
   const escapedTitle = escapeFarmHtmlAttribute(title || "Application Error");
   const fullDocument = extractFarmFullDocument(html);
@@ -6545,12 +6546,7 @@ function createFarmErrorDocument(html, title) {
       '</body>\\n</html>';
   }
 
-  let fullHtml = ensureFarmDocumentHead(fullDocument);
-  if (!/\\sid=["']root["']/.test(fullHtml)) {
-    fullHtml = fullHtml
-      .replace(/<body([^>]*)>/i, '<body$1><div id="root">')
-      .replace(/<\\/body>/i, '</div></body>');
-  }
+  let fullHtml = ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument));
   fullHtml = fullHtml
     .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
     // Function replacements: dynamic markup may contain $-sequences ($&, $', $$)
@@ -8478,7 +8474,9 @@ async function handleFarmRequestInContext(
         let fullHtml;
         if (hasFullDocument) {
           // Layout provides full HTML structure - inject CSS and client script
-          html = ensureFarmDocumentHead(extractFarmFullDocument(html) || html);
+          html = ensureFarmDocumentRoot(
+            ensureFarmDocumentHead(extractFarmFullDocument(html) || html),
+          );
           fullHtml = html
             // Inject CSS link after opening head tag or first meta tag
             .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
@@ -8810,7 +8808,7 @@ async function handleFarmRequestInContext(
     
     let fullHtml;
     if (hasFullDocument) {
-      fullHtml = ensureFarmDocumentHead(fullDocument)
+      fullHtml = ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument))
         // The not-found title replaces any title the layout rendered, as metadata does on pages.
         .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
           "<head" + attrs + ">" +

@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/core",
-  "version": "0.1.11",
+  "version": "0.1.13",
   "description": "Core Farm.js framework for modern integrated apps",
   "keywords": [
     "@farm.js/core",
@@ -693,8 +693,6 @@
     "@jridgewell/trace-mapping": "0.3.31",
     "@mdx-js/mdx": "^3.1.1",
     "@opentelemetry/api": "1.9.1",
-    "@scalar/api-reference": "1.38.1",
-    "@scalar/openapi-parser": "^0.22.3",
     "@tailwindcss/vite": "4.3.3",
     "@vercel/og": "0.11.1",
     "better-call": "^1.0.19",
@@ -710,7 +708,6 @@
     "pg": "^8.20.0",
     "picocolors": "^1.0.0",
     "remark-gfm": "^4.0.1",
-    "sirv": "^2.0.4",
     "sugar-high": "^0.9.5",
     "supports-color": "^10.2.2",
     "tailwindcss": "4.3.3",
@@ -746,7 +743,7 @@
     }
   },
   "optionalDependencies": {
-    "rolldown": "1.2.0",
+    "rolldown": "^1.2.7",
     "sharp": "^0.35.5"
   },
   "engines": {
