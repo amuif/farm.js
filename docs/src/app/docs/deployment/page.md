@@ -315,6 +315,13 @@ Use `farm deploy --plan` before a release when you want to verify the selected t
 
 Keep environment variables in the platform's environment manager or local `.env` files. Farm config can reference `process.env`, and integrations should validate required provider keys during setup.
 
+Server values declared under `env.server` are validated when the app builds, but they are not
+stored in the build output. The production server reads them from its own environment when code
+calls `getEnv` or `serverEnv`, so set them wherever the server runs, and a restart picks up a
+rotated secret. A value read at runtime keeps the type its parser produced at build time, such as a
+number or boolean. Values declared under `env.public` are part of the client bundle, so never put a
+secret there.
+
 ```ts
 export default defineConfig({
   integrations: {

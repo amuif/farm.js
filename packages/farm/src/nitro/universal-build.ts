@@ -1,3 +1,4 @@
+import { createBundledEnv } from "../env";
 import type { RedirectConfig, ResolvedFarmConfig, RewriteConfig } from "../config";
 import { hasCustomFarmRouteContext, resolveDeployOutputPath } from "../config";
 import {
@@ -4524,7 +4525,7 @@ async function buildSSRInMemory(
       },
       define: {
         __FARM_API_BASE_URL__: JSON.stringify(config.api.baseURL),
-        __FARM_ENV__: JSON.stringify(config.env || { server: {}, public: {} }),
+        __FARM_ENV__: JSON.stringify(createBundledEnv(config.env)),
         __FARM_PUBLIC_ENV__: JSON.stringify(config.env?.public || {}),
       },
       plugins: [

@@ -59,10 +59,25 @@ export type FarmPublicEnv = FarmEnvTypes extends { public: infer TPublic }
 
 export type FarmTypedEnv = ResolvedFarmEnv<FarmServerEnv, FarmPublicEnv>;
 
+export type FarmEnvRuntimeType = "string" | "number" | "boolean" | "json";
+
+/**
+ * The env a server bundle carries. `runtime.server` lists server keys that are
+ * read from the server's environment instead of being stored in the bundle,
+ * with the type their parsed value had at build time.
+ */
+export interface BundledFarmEnv extends ResolvedFarmEnv {
+  runtime?: { server: Record<string, FarmEnvRuntimeType> };
+}
+
 declare const __FARM_PUBLIC_ENV__: Record<string, unknown> | undefined;
-declare const __FARM_ENV__: ResolvedFarmEnv | undefined;
+declare const __FARM_ENV__: BundledFarmEnv | undefined;
 
 const FARM_ENV_SYMBOL = Symbol.for("farm.env");
+// Kept on the env object itself so duplicated module instances share it.
+const FARM_ENV_RUNTIME_SYMBOL = Symbol.for("farm.env.runtime");
+type RuntimeEnvState = { pending: Record<string, FarmEnvRuntimeType>; warned: Set<string> };
+type EnvWithRuntime = ResolvedFarmEnv & { [FARM_ENV_RUNTIME_SYMBOL]?: RuntimeEnvState };
 const farmEnvGlobal = globalThis as typeof globalThis & {
   [FARM_ENV_SYMBOL]?: ResolvedFarmEnv;
 };
@@ -80,15 +95,45 @@ export function resolveEnv<TConfig extends FarmEnvConfig<any, any> | undefined>(
   return resolved;
 }
 
-export function setEnv(env: ResolvedFarmEnv): void {
-  currentEnv = normalizeResolvedEnv(env);
+/**
+ * Prepare resolved env for a server bundle. Server values that came from the
+ * build environment are left out and read from `process.env` when the server
+ * uses them, so secrets never land in build output and a restart picks up a
+ * rotated value. Values a parser produced without an env var (defaults) stay.
+ */
+export function createBundledEnv(
+  env: ResolvedFarmEnv | FarmEnvConfig<any, any> | undefined,
+  source: Record<string, string | undefined> = getProcessEnv(),
+): BundledFarmEnv {
+  const resolved = normalizeResolvedEnv((env ?? {}) as ResolvedFarmEnv);
+  const server: Record<string, unknown> = {};
+  const runtime: Record<string, FarmEnvRuntimeType> = {};
+  for (const [key, value] of Object.entries(resolved.server)) {
+    if (source[key] === undefined) {
+      server[key] = value;
+    } else {
+      runtime[key] = getRuntimeEnvType(value);
+    }
+  }
+
+  return {
+    server,
+    public: resolved.public,
+    ...(Object.keys(runtime).length > 0 ? { runtime: { server: runtime } } : {}),
+  };
+}
+
+export function setEnv(env: ResolvedFarmEnv | BundledFarmEnv): void {
+  currentEnv = prepareEnv(env);
   if (typeof window === "undefined") {
     farmEnvGlobal[FARM_ENV_SYMBOL] = currentEnv;
   }
 }
 
 export function getResolvedEnv<TEnv extends ResolvedFarmEnv = FarmTypedEnv>(): TEnv {
-  return getCurrentEnv() as TEnv;
+  const env = getCurrentEnv();
+  if (typeof window === "undefined") readRuntimeServerEnv(env);
+  return env as TEnv;
 }
 
 export function getEnv<TServer extends Record<string, any> = FarmServerEnv>(): TServer;
@@ -96,12 +141,12 @@ export function getEnv<TKey extends Extract<keyof FarmServerEnv, string>>(
   key: TKey,
 ): FarmServerEnv[TKey];
 export function getEnv(key?: string): unknown {
-  assertServerEnvAccess();
+  const server = getEnvScope("server");
   if (key === undefined) {
-    return getCurrentEnv().server;
+    return server;
   }
 
-  return getCurrentEnv().server[key];
+  return readServerEnvKey(server, key);
 }
 
 export function getPublicEnv<TPublic extends Record<string, any> = FarmPublicEnv>(): TPublic;
@@ -170,7 +215,7 @@ function createEnvProxy(scope: "server" | "public"): Record<string, unknown> {
         }
 
         const env = getEnvScope(scope);
-        return env[property];
+        return scope === "server" ? readServerEnvKey(env, property) : env[property];
       },
       ownKeys() {
         return Reflect.ownKeys(getEnvScope(scope));
@@ -195,11 +240,84 @@ function createEnvProxy(scope: "server" | "public"): Record<string, unknown> {
 }
 
 function getEnvScope(scope: "server" | "public"): Record<string, unknown> {
+  const env = getCurrentEnv();
   if (scope === "server") {
     assertServerEnvAccess();
+    readRuntimeServerEnv(env);
   }
 
-  return getCurrentEnv()[scope] || {};
+  return env[scope] || {};
+}
+
+function readServerEnvKey(server: Record<string, unknown>, key: string): unknown {
+  const value = server[key];
+  if (value === undefined) {
+    const state = (getCurrentEnv() as EnvWithRuntime)[FARM_ENV_RUNTIME_SYMBOL];
+    if (state && key in state.pending && !state.warned.has(key)) {
+      state.warned.add(key);
+      console.warn(
+        `[Farm] Server env "${key}" was set when this app was built but is not set where the ` +
+          `server runs, so it reads as undefined. Farm reads server env at runtime and does ` +
+          `not store it in the build output; set "${key}" in the server's environment.`,
+      );
+    }
+  }
+  return value;
+}
+
+/** Fill server keys that are read at runtime from the current `process.env`. */
+function readRuntimeServerEnv(env: EnvWithRuntime): void {
+  const state = env[FARM_ENV_RUNTIME_SYMBOL];
+  if (!state) return;
+  const source = getProcessEnv();
+  for (const [key, type] of Object.entries(state.pending)) {
+    const raw = source[key];
+    if (raw === undefined) continue;
+    env.server[key] = coerceRuntimeEnvValue(raw, type);
+    delete state.pending[key];
+  }
+}
+
+function getRuntimeEnvType(value: unknown): FarmEnvRuntimeType {
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (value !== null && typeof value === "object" && !(value instanceof Date)) return "json";
+  return "string";
+}
+
+function coerceRuntimeEnvValue(raw: string, type: FarmEnvRuntimeType): unknown {
+  if (type === "number") {
+    const value = Number(raw);
+    return raw.trim() !== "" && Number.isFinite(value) ? value : raw;
+  }
+  if (type === "boolean") {
+    if (/^(true|1)$/i.test(raw.trim())) return true;
+    if (/^(false|0|)$/i.test(raw.trim())) return false;
+    return raw;
+  }
+  if (type === "json") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+function prepareEnv(env: ResolvedFarmEnv | BundledFarmEnv): ResolvedFarmEnv {
+  const normalized = normalizeResolvedEnv(env);
+  const runtime = (env as BundledFarmEnv).runtime?.server;
+  if (!isRecord(runtime) || Object.keys(runtime).length === 0) return normalized;
+  const prepared: EnvWithRuntime = { server: { ...normalized.server }, public: normalized.public };
+  Object.defineProperty(prepared, FARM_ENV_RUNTIME_SYMBOL, {
+    value: {
+      pending: { ...(runtime as Record<string, FarmEnvRuntimeType>) },
+      warned: new Set<string>(),
+    },
+    enumerable: false,
+  });
+  return prepared;
 }
 
 function assertServerEnvAccess(): void {
@@ -235,7 +353,7 @@ function getCurrentEnv(): ResolvedFarmEnv {
 function getInjectedEnv(): ResolvedFarmEnv | null {
   try {
     if (typeof __FARM_ENV__ !== "undefined" && __FARM_ENV__) {
-      return normalizeResolvedEnv(__FARM_ENV__);
+      return prepareEnv(__FARM_ENV__);
     }
   } catch {
     // The compile-time global is only defined in Farm server bundles.

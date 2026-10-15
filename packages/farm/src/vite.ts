@@ -1,3 +1,4 @@
+import { createBundledEnv } from "./env";
 import type {
   AliasOptions,
   ConfigEnv,
@@ -741,7 +742,7 @@ function getEnvDefines(
   };
 
   if (configEnv?.isSsrBuild) {
-    defines.__FARM_ENV__ = JSON.stringify(getFullEnvDefine(config));
+    defines.__FARM_ENV__ = JSON.stringify(createBundledEnv(getFullEnvDefine(config)));
   }
 
   return defines;

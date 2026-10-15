@@ -952,6 +952,58 @@ export default function Page() {
     }
   }, 120_000);
 
+  it("reads server env where the server runs instead of storing it in the build output", async () => {
+    const root = await createProductionFixture();
+    const previous = process.env.FARM_TEST_DATABASE_URL;
+    process.env.FARM_TEST_DATABASE_URL = "postgres://build-time-secret";
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import { getEnv } from "@farm.js/core/env";
+
+export default function Page() {
+  return <main data-env={String(getEnv("FARM_TEST_DATABASE_URL"))}>env</main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          env: { server: { FARM_TEST_DATABASE_URL: (value: string | undefined) => value } },
+          generateBuildId: () => "production-runtime-env-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      delete process.env.FARM_TEST_DATABASE_URL;
+
+      expect(
+        await readJavaScriptOutput(path.join(root, ".farm"), [".mjs", ".js", ".cjs", ".json"]),
+      ).not.toContain("build-time-secret");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain('data-env="postgres://rotated-secret"');
+        },
+        "/",
+        undefined,
+        { FARM_TEST_DATABASE_URL: "postgres://rotated-secret" },
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FARM_TEST_DATABASE_URL;
+      else process.env.FARM_TEST_DATABASE_URL = previous;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("keeps production slot params request-local beneath a basePath", async () => {
     const root = await createProductionFixture();
     const writeRoute = async (name: string, source: string) => {

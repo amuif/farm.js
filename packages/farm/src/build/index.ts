@@ -1,3 +1,4 @@
+import { createBundledEnv } from "../env";
 import type { ResolvedFarmConfig } from "../config";
 import {
   getDefaultDeployOutputDir,
@@ -416,7 +417,7 @@ async function buildSSR(
     },
     define: {
       __FARM_API_BASE_URL__: JSON.stringify(config.api.baseURL),
-      __FARM_ENV__: JSON.stringify(config.env || { server: {}, public: {} }),
+      __FARM_ENV__: JSON.stringify(createBundledEnv(config.env)),
       __FARM_PUBLIC_ENV__: JSON.stringify(config.env?.public || {}),
     },
     plugins: [
@@ -562,7 +563,7 @@ async function buildNitro(
     farmRegistry.apiRouteManager = apiRouteManager;
     farmRegistry.routeManager = routeManager;
     farmRegistry.serverRenderer = serverRenderer;
-    farmRegistry.env = config.env || { server: {}, public: {} };
+    farmRegistry.env = createBundledEnv(config.env);
 
     // Store route paths for SSR module loading
     const routePaths: Record<string, string> = {};
