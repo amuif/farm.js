@@ -12010,6 +12010,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private trackedBindingsByDependency: Set<CompilerBinding<Props>>[] = [];
     private readonly trackedDependenciesByBinding = new Map<CompilerBinding<Props>, Set<number>>();
     private readonly bindingValues = new Map<CompilerBinding<Props>, unknown>();
+    private readonly textNodes = new Map<Element, readonly Node[]>();
     private activeBinding: CompilerBinding<Props> | null = null;
     private activeDependencies: Set<number> | null = null;
     private readonly cells: RuntimeCell[];
@@ -12370,6 +12371,15 @@ export function createCompiledComponentWithFeatures<Props>(
         if (Object.is(this.bindingValues.get(binding), comparableValue)) return;
       }
       if (binding.kind === "text") {
+        // Keep React's committed children for the next full reconciliation.
+        // Direct writes may replace HostText nodes still owned by its fibers.
+        if (!this.textNodes.has(target)) {
+          const children: Node[] = [];
+          // Avoid materializing a live childNodes collection on this hot target.
+          for (let child = target.firstChild; child; child = child.nextSibling)
+            children.push(child);
+          this.textNodes.set(target, children);
+        }
         target.textContent = comparableValue as string;
       } else if (binding.kind === "style") {
         updateStyle(target, binding.name, value);
@@ -12389,7 +12399,16 @@ export function createCompiledComponentWithFeatures<Props>(
     getSnapshotBeforeUpdate(): boolean {
       const currentDefinition = definitionReference.current;
       const propValues = currentDefinition.readProps?.(this.props) || null;
-      return this.canReuseRenderedElement(currentDefinition, propValues);
+      if (this.canReuseRenderedElement(currentDefinition, propValues)) return true;
+      // Restore only at commit: a suspended or abandoned render must not
+      // roll back the visible DOM. React can now reconcile its own nodes.
+      for (const [target, children] of this.textNodes) {
+        target.textContent = "";
+        for (const child of children) target.appendChild(child);
+      }
+      this.textNodes.clear();
+      this.bindingValues.clear();
+      return false;
     }
 
     componentDidUpdate(
@@ -12412,6 +12431,10 @@ export function createCompiledComponentWithFeatures<Props>(
             // snapshot. Commit the cell without scheduling duplicate work.
             cell.flush();
           }
+        }
+        if (!reusedRenderedElement) {
+          this.ensureBindingIndex();
+          this.primeHybridBindings();
         }
         this.flushBindingUpdates();
         return;
@@ -12440,6 +12463,7 @@ export function createCompiledComponentWithFeatures<Props>(
       this.trackedBindingsByDependency = [];
       this.trackedDependenciesByBinding.clear();
       this.bindingValues.clear();
+      this.textNodes.clear();
       this.activeBinding = null;
       this.activeDependencies = null;
       refreshListeners.delete(this.refreshDefinition);

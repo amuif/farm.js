@@ -101,6 +101,58 @@ const testSource = String.raw`
   );
   const { List } = await import("@farm.js/react/list");
 
+  // Root text mutations must hand React back the exact committed HostText nodes.
+  for (const reactivity of ["static", "hybrid"]) {
+    for (const hydrate of [false, true]) {
+      const RootText = createCompiledComponentWithFeatures({
+        displayName: "CompatibilityRootText", reactivity,
+        initialize: () => ["before"],
+        readProps: (props) => [props.next],
+        render(_props, state) {
+          return React.createElement("main", null,
+            React.createElement("button", { onClick: () => state[0].set(state[1].get()) }, "Update"),
+            React.createElement("p", null, state[0].get()),
+            React.createElement("p", null, "prefix ", state[0].get(), " suffix"),
+            React.createElement("input", { defaultValue: "draft" }),
+          );
+        },
+        bindings: [
+          { kind: "text", path: [1], dependencies: [0], read: (_props, state) => [state[0].get()] },
+          { kind: "text", path: [2], dependencies: [0], read: (_props, state) => ["prefix ", state[0].get(), " suffix"] },
+        ],
+      }, []);
+      const container = document.createElement("div");
+      document.body.append(container);
+      const tree = (next) => React.createElement(React.StrictMode, null, React.createElement(RootText, { next }));
+      if (hydrate) container.innerHTML = renderToString(tree("after"));
+      let root;
+      const errors = [];
+      flushSync(() => {
+        root = hydrate ? hydrateRoot(container, tree("after"), { onRecoverableError: (error) => errors.push(error) }) : createRoot(container);
+        if (!hydrate) root.render(tree("after"));
+      });
+      const input = container.querySelector("input");
+      input.value = "edited draft"; input.focus(); input.setSelectionRange(2, 5);
+      try {
+        for (const [next, expected] of [["after", "after"], [null, ""], [[], ""], [["one"], "one"], [false, ""], [0, "0"], ["", ""], [["one", ["two", null, 3]], "onetwo3"], ["before", "before"]]) {
+          flushSync(() => root.render(tree(next)));
+          container.querySelector("button").click();
+          await Promise.resolve(); await Promise.resolve();
+          assert.equal(container.querySelectorAll("p")[0].textContent, expected);
+          assert.equal(container.querySelectorAll("p")[1].textContent, "prefix " + expected + " suffix");
+          assert.equal(container.querySelector("input"), input);
+          assert.equal(document.activeElement, input);
+          assert.equal(input.value, "edited draft");
+          assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 5]);
+        }
+        assert.deepEqual(errors, []);
+      } finally {
+        flushSync(() => root.unmount());
+        container.remove();
+      }
+    }
+  }
+
   // Compiler mutations leave React's previous child fibers stale until the
   // keyed container is safely re-adopted at a props/Fast Refresh handoff.
   for (const reactivity of ["static", "hybrid"]) {
