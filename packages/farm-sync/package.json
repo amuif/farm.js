@@ -49,8 +49,8 @@
     "@farm.js/core": "workspace:*"
   },
   "devDependencies": {
-    "@farming-labs/orm": "0.0.62",
-    "@farming-labs/orm-runtime": "0.0.62",
+    "@farming-labs/orm": "0.0.64",
+    "@farming-labs/orm-runtime": "0.0.64",
     "@types/node": "^20.10.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
