@@ -4668,35 +4668,57 @@ type CompilerPreparedKeyedRowBindingCommit = readonly [
   update: CompilerPreparedKeyedRowBindingUpdate,
 ];
 
+// Keep a single update as its tuple; allocate a list only for multiple changes.
+type CompilerPreparedKeyedRowBindingUpdates =
+  | CompilerPreparedKeyedRowBindingUpdate
+  | CompilerPreparedKeyedRowBindingUpdate[];
+
 function prepareKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
   item: unknown,
   index: number,
-): CompilerPreparedKeyedRowBindingUpdate[] | undefined {
+): CompilerPreparedKeyedRowBindingUpdates | undefined {
+  let first: CompilerPreparedKeyedRowBindingUpdate | undefined;
   let updates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
     const update = prepareKeyedRowBindingUpdate(props, instance, item, index, bindingIndex);
     if (update === undefined) return undefined;
-    if (update) (updates ||= []).push(update);
+    if (update) {
+      if (updates) updates.push(update);
+      else if (first) {
+        updates = [];
+        updates.push(first);
+        updates.push(update);
+      } else first = update;
+    }
   }
-  return updates || NO_KEYED_ROW_BINDING_UPDATES;
+  return updates || first || NO_KEYED_ROW_BINDING_UPDATES;
 }
 
 // Shared by every row with nothing to patch; callers only iterate it.
-const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdate[] = [];
+const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdates = [];
 
 function applyPreparedKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
-  updates: readonly CompilerPreparedKeyedRowBindingUpdate[],
+  updates: Readonly<CompilerPreparedKeyedRowBindingUpdates>,
 ): void {
-  for (const [bindingIndex, target, value] of updates) {
+  if (typeof updates[0] === "number") {
+    const [bindingIndex, target, value] = updates as CompilerPreparedKeyedRowBindingUpdate;
+    commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
+    return;
+  }
+  for (const [
+    bindingIndex,
+    target,
+    value,
+  ] of updates as readonly CompilerPreparedKeyedRowBindingUpdate[]) {
     commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
   }
 }
 
-type CompilerPreparedKeyedRowBindingSet = CompilerPreparedKeyedRowBindingUpdate[][];
+type CompilerPreparedKeyedRowBindingSet = CompilerPreparedKeyedRowBindingUpdates[];
 
 function prepareKeyedRowBindingSetUpdates(
   props: CompilerKeyedRowBindingSource,
@@ -4705,7 +4727,7 @@ function prepareKeyedRowBindingSetUpdates(
   /** Instances already in row order, which skips the keyed lookups. */
   ordered?: readonly CompilerKeyedRowInstance[],
 ): CompilerPreparedKeyedRowBindingSet | undefined {
-  const preparedUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+  const preparedUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
   for (let index = 0; index < rows.items.length; index += 1) {
     const instance = ordered ? ordered[index] : instances.get(rows.keys[index]);
     if (!instance) return undefined;
@@ -5340,7 +5362,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
     const elements = [...this.root.children];
     const descriptors = flattenCompilerHostElements(materializeCompilerHostChildren(this.host));
     if (elements.length !== descriptors.length) return false;
-    const preparedBindings: CompilerPreparedKeyedRowBindingUpdate[][][] = [];
+    const preparedBindings: CompilerPreparedKeyedRowBindingUpdates[][] = [];
     let cursor = 0;
 
     for (let rangeIndex = 0; rangeIndex < this.block.ranges.length; rangeIndex += 1) {
@@ -5363,7 +5385,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
 
       const instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
       this.instances.push(instances);
-      const rangeBindingUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+      const rangeBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -5385,7 +5407,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
           index,
           conditionalValues: new Map(),
         };
-        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
         try {
           bindingUpdates = prepareKeyedRowBindingUpdates(range, instance, rows.items[index], index);
         } catch (error) {
@@ -5673,7 +5695,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const descriptors = flattenCompilerHostElements(this.host.children);
     if (elements.length !== descriptors.length) return false;
     const preparedKeyedBindings: Array<
-      readonly (readonly CompilerPreparedKeyedRowBindingUpdate[])[] | undefined
+      readonly Readonly<CompilerPreparedKeyedRowBindingUpdates>[] | undefined
     > = [];
     let cursor = 0;
 
@@ -5736,7 +5758,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
       }
       const keyedInstances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
       this.instances.push({ kind: "keyed", value: keyedInstances });
-      const keyedBindingUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+      const keyedBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < snapshot.rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -5758,7 +5780,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
           index,
           conditionalValues: new Map(),
         };
-        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
         try {
           bindingUpdates = prepareKeyedRowBindingUpdates(
             range,
@@ -7232,7 +7254,7 @@ function reconcileCompilerKeyedArrayMapReorder(
   const reverse = update.kind === CompilerKeyedArrayReorderKind.Reverse;
   const prepared = (() => {
     const changed: Array<{
-      bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+      bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
       instance: CompilerKeyedRowInstance;
       item: unknown;
     }> = [];
@@ -7515,7 +7537,7 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -7780,7 +7802,7 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
   const retainedLength = previousInstances.length - retainedStart;
   const survivors: CompilerKeyedRowInstance[] = [];
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -8080,7 +8102,7 @@ type CompilerPreparedKeyedArrayWindow = [
   incomingKeySet: ReadonlySet<KeyedRowKey>,
   nextWindow: CompilerKeyedRowInstance[],
   sequence: number[],
-  preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined>,
+  preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined>,
 ];
 
 function prepareCompilerKeyedArrayWindow(
@@ -8119,7 +8141,7 @@ function prepareCompilerKeyedArrayWindow(
     : undefined;
   const nextWindow: CompilerKeyedRowInstance[] = [];
   const sequence: number[] = [];
-  const preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined> = [];
+  const preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined> = [];
   try {
     for (let offset = 0; offset < window[3]; offset += 1) {
       const index = window[1] + offset;
@@ -8299,7 +8321,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
         index: number,
         instance: CompilerKeyedRowInstance,
         item: unknown,
-        updates: readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined,
+        updates: Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined,
         replacement: CompilerKeyedRowInstance | undefined,
       ]
     > = [];
@@ -8383,7 +8405,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
     update.insertedCount === update.removedCount &&
     incomingKeys.every((key, offset) => key === removed[offset].key)
   ) {
-    const prepared: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+    const prepared: CompilerPreparedKeyedRowBindingUpdates[] = [];
     try {
       for (let offset = 0; offset < update.insertedCount; offset += 1) {
         const updates = prepareKeyedRowBindingUpdates(
@@ -8510,7 +8532,7 @@ function reconcileCompilerKeyedArrayStructuralReorder(
       };
       let preservesSurvivorOrder = true;
       const directChanges: Array<{
-        bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+        bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
         instance: CompilerKeyedRowInstance;
         item: unknown;
       }> = [];
@@ -8968,7 +8990,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
