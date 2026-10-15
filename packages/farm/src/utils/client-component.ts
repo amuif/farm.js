@@ -1604,9 +1604,11 @@ function resolveProjectAliasSourcePath(
     if (!match || alias.prefix.length > match.alias.prefix.length) match = { alias, captured };
   }
   if (!match) return undefined;
+  // Normalize so a `/`-separated capture yields the same path as a relative
+  // import on Windows (`src\components\nav`, not `src\components/nav`).
   return resolveSourceCandidate(
     match.alias.targets.map((target) =>
-      match.alias.wildcard ? target.replace("*", match.captured) : target,
+      path.normalize(match.alias.wildcard ? target.replace("*", match.captured) : target),
     ),
   );
 }
