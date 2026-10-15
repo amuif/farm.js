@@ -4463,6 +4463,10 @@ async function buildSSRInMemory(
           external: [
             "fsevents",
             "sharp",
+            // Loads its .node addon through `bindings`, which finds the binary from its own
+            // file path (`__filename`). Inlined into the ESM server bundle, it crashed at
+            // startup; kept external, Nitro copies the package into the output.
+            "better-sqlite3",
             ...rendererOptionalExternals,
             ...(useExternalMetadataImageRuntime ? ["@vercel/og"] : []),
             "@prisma/client",
@@ -6056,7 +6060,9 @@ const farmDocsHandler = ${
 }, {
   rootDir: farmDocsRuntimeRoot,
   clientEntry: "/__farm_client_js_src__",
-  stylesheets: ["/farm-fonts.css", "/__farm_client_css_href__"],
+  // Font CSS is merged into the client stylesheet; farm-fonts.css only exists when the
+  // app has fonts, so linking it separately 404'd for apps without them.
+  stylesheets: ["/__farm_client_css_href__"],
   resolveLayoutFonts: (pathname) =>
     resolveFarmLayoutFonts(
       getApplicableLayouts(getFarmRoutePathname(pathname)).map((layout) => layout.module),
