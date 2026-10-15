@@ -28,7 +28,10 @@ describe("hints Farm plugin", () => {
   it("pre-bundles its lazily imported browser runtime in development", async () => {
     const plugin = hints();
     const configured = (await plugin.configure?.(
-      { plugins: [plugin], vite: { optimizeDeps: { include: ["react"], exclude: ["x"] } } } as never,
+      {
+        plugins: [plugin],
+        vite: { optimizeDeps: { include: ["react"], exclude: ["x"] } },
+      } as never,
       context(true),
     )) as { plugins: unknown[]; vite: { optimizeDeps: { include: string[]; exclude: string[] } } };
 
