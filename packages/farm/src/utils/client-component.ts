@@ -1298,9 +1298,10 @@ function collectIsolatedClientBoundaries(
     const importedBindings = getStaticImportBindings(content);
     let estimatedBoundaryCount = 0;
     for (const specifier of new Set(getImportSpecifiers(content))) {
-      const importedPath = resolveImportedModuleSourcePath(moduleSourcePath, specifier, root);
+      const imported = resolveImportedModule(moduleSourcePath, specifier, root);
+      const importedPath = imported.path;
       if (!importedPath) continue;
-      if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
+      if (!imported.local) {
         const packageMetadata = inspectPackageClientBoundary(importedPath, root, new Set());
         if (packageMetadata.shouldHydrate) {
           if (options.staticPackageBoundaries) {
@@ -1383,11 +1384,10 @@ function inspectClientModuleMetadata(
   let importsClientBoundary = false;
   let importedIslandStrategy: FarmIslandStrategy | null = null;
   for (const specifier of getImportSpecifiers(content)) {
-    const importedPath = resolveImportedModuleSourcePath(resolvedPath, specifier, root);
-    const importedMetadata =
-      !specifier.startsWith(".") && !specifier.startsWith("/")
-        ? inspectPackageClientBoundary(importedPath, root, visited)
-        : inspectClientModuleMetadata(importedPath, root, visited, false);
+    const imported = resolveImportedModule(resolvedPath, specifier, root);
+    const importedMetadata = imported.local
+      ? inspectClientModuleMetadata(imported.path, root, visited, false)
+      : inspectPackageClientBoundary(imported.path, root, visited);
     if (importedMetadata.isClientComponent || importedMetadata.shouldHydrate) {
       importsClientBoundary = true;
       if (importedIslandStrategy === null) {
@@ -1553,6 +1553,218 @@ function isTypeOnlyNamedClause(
     entryStartsAt = index + 1;
   }
   return true;
+}
+
+/**
+ * Resolve an import for hydration analysis. `local` is true for project source
+ * (relative, root-absolute, or an app alias such as `@/components/x`), which is
+ * inspected like any app module; false for an npm package, whose client
+ * boundaries are inspected through its own entry graph.
+ */
+function resolveImportedModule(
+  importerPath: string,
+  specifier: string,
+  root?: string,
+): { path: string | null; local: boolean } {
+  if (specifier.startsWith(".") || specifier.startsWith("/")) {
+    return { path: resolveImportedModuleSourcePath(importerPath, specifier, root), local: true };
+  }
+  const aliased = resolveProjectAliasSourcePath(specifier, root);
+  if (aliased !== undefined) return { path: aliased, local: true };
+  return { path: resolvePackageModuleSourcePath(importerPath, specifier, root), local: false };
+}
+
+interface ProjectImportAlias {
+  prefix: string;
+  suffix: string;
+  wildcard: boolean;
+  targets: string[];
+}
+
+const projectImportAliasCache = new Map<string, { stamp: string; aliases: ProjectImportAlias[] }>();
+const PROJECT_ALIAS_FILES = ["tsconfig.json", "jsconfig.json", "package.json"];
+
+/**
+ * Resolve an app alias the way the bundler does: tsconfig/jsconfig `paths`,
+ * then package.json `imports`, then Farm's default `@/` source alias.
+ * Returns undefined when no alias matches, so the caller treats the specifier
+ * as a package.
+ */
+function resolveProjectAliasSourcePath(
+  specifier: string,
+  root?: string,
+): string | null | undefined {
+  if (!root) return undefined;
+  const projectRoot = path.resolve(root);
+  let match: { alias: ProjectImportAlias; captured: string } | undefined;
+  for (const alias of getProjectImportAliases(projectRoot)) {
+    const captured = matchProjectImportAlias(alias, specifier);
+    if (captured === null) continue;
+    // TypeScript picks the pattern with the longest matching prefix.
+    if (!match || alias.prefix.length > match.alias.prefix.length) match = { alias, captured };
+  }
+  if (!match) return undefined;
+  return resolveSourceCandidate(
+    match.alias.targets.map((target) =>
+      match.alias.wildcard ? target.replace("*", match.captured) : target,
+    ),
+  );
+}
+
+function matchProjectImportAlias(alias: ProjectImportAlias, specifier: string): string | null {
+  if (!alias.wildcard) return specifier === alias.prefix ? "" : null;
+  if (
+    specifier.length < alias.prefix.length + alias.suffix.length ||
+    !specifier.startsWith(alias.prefix) ||
+    !specifier.endsWith(alias.suffix)
+  ) {
+    return null;
+  }
+  return specifier.slice(alias.prefix.length, specifier.length - alias.suffix.length);
+}
+
+function getProjectImportAliases(projectRoot: string): ProjectImportAlias[] {
+  const stamp = PROJECT_ALIAS_FILES.map((file) => {
+    try {
+      return String(fs.statSync(path.join(projectRoot, file)).mtimeMs);
+    } catch {
+      return "-";
+    }
+  }).join(":");
+  const cached = projectImportAliasCache.get(projectRoot);
+  if (cached?.stamp === stamp) return cached.aliases;
+
+  const aliases = [
+    ...readTsconfigPathAliases(projectRoot),
+    ...readPackageImportAliases(projectRoot),
+  ];
+  if (!aliases.some((alias) => alias.prefix === "@/")) {
+    // Farm aliases `@` to the source directory in development and builds.
+    aliases.push({
+      prefix: "@/",
+      suffix: "",
+      wildcard: true,
+      targets: [path.join(projectRoot, "src", "*")],
+    });
+  }
+  projectImportAliasCache.set(projectRoot, { stamp, aliases });
+  return aliases;
+}
+
+function readTsconfigPathAliases(projectRoot: string): ProjectImportAlias[] {
+  for (const name of ["tsconfig.json", "jsconfig.json"]) {
+    const configPath = path.join(projectRoot, name);
+    if (!fs.existsSync(configPath)) continue;
+    const resolved = readTsconfigPaths(configPath, new Set());
+    if (!resolved?.paths) return [];
+    const base = resolved.baseUrl ?? resolved.pathsDirectory;
+    return Object.entries(resolved.paths).flatMap(([pattern, targets]) => {
+      if (!Array.isArray(targets)) return [];
+      const wildcardIndex = pattern.indexOf("*");
+      return [
+        {
+          prefix: wildcardIndex === -1 ? pattern : pattern.slice(0, wildcardIndex),
+          suffix: wildcardIndex === -1 ? "" : pattern.slice(wildcardIndex + 1),
+          wildcard: wildcardIndex !== -1,
+          targets: targets
+            .filter((target): target is string => typeof target === "string")
+            .map((target) => path.resolve(base, target)),
+        },
+      ];
+    });
+  }
+  return [];
+}
+
+function readTsconfigPaths(
+  configPath: string,
+  visited: Set<string>,
+): { paths?: Record<string, unknown>; pathsDirectory: string; baseUrl?: string } | null {
+  if (visited.has(configPath)) return null;
+  visited.add(configPath);
+  const config = readJsonWithComments(configPath);
+  if (!config) return null;
+  const directory = path.dirname(configPath);
+
+  // Only relative `extends` can define app aliases; package configs such as
+  // `@tsconfig/node22` set compiler options, not project paths.
+  const parents = (Array.isArray(config.extends) ? config.extends : [config.extends]).filter(
+    (parent: unknown): parent is string => typeof parent === "string" && parent.startsWith("."),
+  );
+  let inherited: ReturnType<typeof readTsconfigPaths> = null;
+  for (const parent of parents) {
+    const parentPath = path.resolve(
+      directory,
+      parent.endsWith(".json") ? parent : `${parent}.json`,
+    );
+    inherited = readTsconfigPaths(parentPath, visited) ?? inherited;
+  }
+
+  const options = config.compilerOptions ?? {};
+  const baseUrl =
+    typeof options.baseUrl === "string"
+      ? path.resolve(directory, options.baseUrl)
+      : inherited?.baseUrl;
+  if (options.paths && typeof options.paths === "object") {
+    return { paths: options.paths, pathsDirectory: directory, baseUrl };
+  }
+  return inherited ? { ...inherited, baseUrl } : { pathsDirectory: directory, baseUrl };
+}
+
+function readPackageImportAliases(projectRoot: string): ProjectImportAlias[] {
+  const imports = readPackageJson(path.join(projectRoot, "package.json"))?.imports;
+  if (!imports || typeof imports !== "object") return [];
+  return Object.entries(imports as Record<string, unknown>).flatMap(([pattern, value]) => {
+    const target = resolveConditionalExportTarget(value);
+    if (!pattern.startsWith("#") || !target?.startsWith("./")) return [];
+    const wildcardIndex = pattern.indexOf("*");
+    return [
+      {
+        prefix: wildcardIndex === -1 ? pattern : pattern.slice(0, wildcardIndex),
+        suffix: wildcardIndex === -1 ? "" : pattern.slice(wildcardIndex + 1),
+        wildcard: wildcardIndex !== -1,
+        targets: [path.resolve(projectRoot, target)],
+      },
+    ];
+  });
+}
+
+/** Parse tsconfig-style JSON: comments and trailing commas, outside strings. */
+function readJsonWithComments(filePath: string): Record<string, any> | null {
+  let source: string;
+  try {
+    source = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  let output = "";
+  let inString = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (inString) {
+      output += char;
+      if (char === "\\") output += source[++index] ?? "";
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      output += char;
+    } else if (char === "/" && source[index + 1] === "/") {
+      while (index < source.length && source[index] !== "\n") index++;
+      output += "\n";
+    } else if (char === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end === -1 ? source.length : end + 1;
+    } else {
+      output += char;
+    }
+  }
+  try {
+    return JSON.parse(output.replace(/,(\s*[}\]])/g, "$1"));
+  } catch {
+    return null;
+  }
 }
 
 function resolveImportedModuleSourcePath(

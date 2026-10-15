@@ -32,7 +32,7 @@ async function writeModule(root: string, relativePath: string, source: string): 
 
 // Behavior the production build already had, which the development server lacked.
 describe("development server matches production", () => {
-  it("resolves @/ imports and renders suspending components on every request", async () => {
+  it("resolves @/ imports, hydrates their client components, and renders suspending components on every request", async () => {
     const root = await fs.realpath(
       await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-parity-")),
     );
@@ -47,14 +47,26 @@ describe("development server matches production", () => {
     }
     await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
     await writeModule(root, "src/lib/greeting.ts", 'export const greeting = "hello from @/lib";');
-    // A whole document, so requests after the first take the buffered path.
+    await writeModule(
+      root,
+      "src/components/nav.tsx",
+      `"use client";
+import { useState } from "react";
+export function Nav() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>count {count}</button>;
+}`,
+    );
+    // A whole document, so requests after the first take the buffered path. The
+    // client component comes in through @/, which hydration analysis must follow.
     await writeModule(
       root,
       "src/app/layout.tsx",
-      `export default function Layout({ children }) {
+      `import { Nav } from "@/components/nav";
+export default function Layout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body><Nav />{children}</body>
     </html>
   );
 }`,
@@ -84,6 +96,7 @@ export default function Page() {
       expect({ attempt, status: response.status }).toEqual({ attempt, status: 200 });
       expect(html).toContain("hello from @/lib");
       expect(html).toContain("late content");
+      expect(html).toContain("window.__FARM_LAYOUT_SHOULD_HYDRATE__ = true");
     }
 
     // Better Auth's browser client imports better-call; excluding it from pre-bundling

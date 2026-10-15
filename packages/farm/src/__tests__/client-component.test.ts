@@ -223,6 +223,110 @@ describe("client component path resolution", () => {
     });
   });
 
+  describe("client components imported through app aliases", () => {
+    const writeAliasFixture = (files: Record<string, string>) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "farm-client-alias-"));
+      tempDirs.push(root);
+      for (const [relativePath, source] of Object.entries(files)) {
+        const filePath = path.join(root, relativePath);
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, source);
+      }
+      return root;
+    };
+    const clientNav = '"use client";\nexport function Nav() { return null; }\n';
+    const hydrated = { isClientComponent: false, shouldHydrate: true, islandStrategy: "load" };
+
+    it("follows Farm's default @/ alias to the source directory", () => {
+      const root = writeAliasFixture({
+        "src/components/nav.tsx": clientNav,
+        "src/app/layout.tsx":
+          'import { Nav } from "@/components/nav";\nexport default function Layout({ children }) { return <html><body><Nav />{children}</body></html>; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/layout.tsx"), root)).toEqual(
+        hydrated,
+      );
+    });
+
+    it("follows tsconfig paths, including comments and trailing commas", () => {
+      const root = writeAliasFixture({
+        "tsconfig.json": `{
+  // Next.js projects keep components at the root.
+  "compilerOptions": {
+    /* "@/*" points at the project root, not src */
+    "paths": { "@/*": ["./*"], "~ui/*": ["./packages/ui/*",], },
+  },
+}`,
+        "components/nav.tsx": clientNav,
+        "packages/ui/button.tsx": '"use client";\nexport function Button() { return null; }\n',
+        "src/app/page.tsx":
+          'import { Nav } from "@/components/nav";\nexport default function Page() { return <Nav />; }\n',
+        "src/app/about/page.tsx":
+          'import { Button } from "~ui/button";\nexport default function About() { return <Button />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+      expect(getClientModuleMetadata(path.join(root, "src/app/about/page.tsx"), root)).toEqual(
+        hydrated,
+      );
+    });
+
+    it("follows paths inherited through a relative tsconfig extends", () => {
+      const root = writeAliasFixture({
+        "tsconfig.base.json":
+          '{ "compilerOptions": { "baseUrl": "src", "paths": { "@app/*": ["*"] } } }',
+        "tsconfig.json": '{ "extends": "./tsconfig.base", "compilerOptions": { "strict": true } }',
+        "src/components/nav.tsx": clientNav,
+        "src/app/page.tsx":
+          'import { Nav } from "@app/components/nav";\nexport default function Page() { return <Nav />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+    });
+
+    it("follows package.json subpath imports", () => {
+      const root = writeAliasFixture({
+        "package.json": '{ "type": "module", "imports": { "#/*": "./src/*" } }',
+        "src/components/nav.tsx": clientNav,
+        "src/app/page.tsx":
+          'import { Nav } from "#/components/nav";\nexport default function Page() { return <Nav />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+    });
+
+    it("isolates a client leaf imported through @/", () => {
+      const root = writeAliasFixture({
+        "src/components/counter.tsx":
+          "'use client';\nexport default function Counter() { return <button>1</button>; }\n",
+        "src/app/layout.tsx":
+          'import Counter from "@/components/counter";\nexport default function Layout({ children }) { return <main><Counter />{children}</main>; }\n',
+      });
+
+      expect(
+        getClientModuleHydrationPlan(path.join(root, "src/app/layout.tsx"), root, "analyze")
+          .isolatedBoundaries,
+      ).toEqual([
+        { modulePath: path.join(root, "src/components/counter.tsx"), islandStrategy: "load" },
+      ]);
+    });
+
+    it("keeps a server-only page server-only when its @/ imports have no client code", () => {
+      const root = writeAliasFixture({
+        "src/lib/greeting.ts": 'export const greeting = "hello";\n',
+        "src/app/page.tsx":
+          'import { greeting } from "@/lib/greeting";\nexport default function Page() { return <h1>{greeting}</h1>; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual({
+        isClientComponent: false,
+        shouldHydrate: false,
+        islandStrategy: null,
+      });
+    });
+  });
+
   it.each([
     ["page.tsx", "export default function Page() { return null; }"],
     ["client.tsx", '"use client"; export default function Client() { return null; }'],
