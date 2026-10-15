@@ -470,10 +470,11 @@ export function getIslandStrategyExport(content: string | null): FarmIslandStrat
 
 export function stripUseClientDirective(content: string): string {
   // Comments (and other directives) may precede "use client"; keep them and
-  // remove only the directive itself.
+  // blank out only the directive. Spaces and the original line breaks keep
+  // every later line and column where the module's source map expects it.
   return content.replace(
     /^((?:\s|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/|(?:"[^"\n]*"|'[^'\n]*')\s*;?)*)(["'])use client\2\s*;?\s*/,
-    "$1",
+    (match, prefix: string) => prefix + match.slice(prefix.length).replace(/[^\r\n]/g, " "),
   );
 }
 

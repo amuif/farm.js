@@ -53,8 +53,19 @@ describe("client component path resolution", () => {
 
     expect(hasUseClientDirective(source)).toBe(true);
     expect(stripUseClientDirective(source)).toBe(
-      "export default function Page() { return null; }\n",
+      "             \n\nexport default function Page() { return null; }\n",
     );
+  });
+
+  it("keeps the lines and columns of code after a stripped directive", () => {
+    const source =
+      '"use client";\n\nimport { useState } from "react";\n  const value = useState(0);\n';
+    const stripped = stripUseClientDirective(source);
+
+    expect(hasUseClientDirective(stripped)).toBe(false);
+    expect(stripped.split("\n")).toHaveLength(source.split("\n").length);
+    expect(stripped.split("\n").slice(2)).toEqual(source.split("\n").slice(2));
+    expect(stripped.indexOf("useState(0)")).toBe(source.indexOf("useState(0)"));
   });
 
   it("detects directives preceded by comments or other directives", () => {
@@ -70,15 +81,15 @@ describe("client component path resolution", () => {
     expect(hasUseClientDirective(afterUseStrict)).toBe(true);
 
     expect(stripUseClientDirective(afterBlockComment)).toBe(
-      "/* Copyright 2026 Acme */\nexport default function Counter() { return null; }\n",
+      "/* Copyright 2026 Acme */\n             \nexport default function Counter() { return null; }\n",
     );
     expect(stripUseClientDirective(afterLineComment)).toBe(
-      "// @generated\nexport default function Counter() { return null; }\n",
+      "// @generated\n             \nexport default function Counter() { return null; }\n",
     );
     // Detection and stripping must agree: a preceding "use strict" directive is
     // kept, and the "use client" directive is removed.
     expect(stripUseClientDirective(afterUseStrict)).toBe(
-      '"use strict";\nexport default function Counter() { return null; }\n',
+      '"use strict";\n             \nexport default function Counter() { return null; }\n',
     );
   });
 
