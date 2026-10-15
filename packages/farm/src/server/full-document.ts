@@ -83,6 +83,20 @@ export function ensureFarmDocumentHead(markup: string): string {
   });
 }
 
+/**
+ * Wrap the body's content in the `#root` element the client hydrates, unless the document
+ * already has one. Matches the production build's helper.
+ */
+export function ensureFarmDocumentRoot(markup: string): string {
+  if (/\sid=["']root["']/i.test(markup)) return markup;
+  return markup
+    .replace(
+      /<body\b([^>]*)>/i,
+      (_match, attributes: string) => `<body${attributes}><div id="root">`,
+    )
+    .replace(/<\/body>/i, () => "</div></body>");
+}
+
 /** Remove document title elements before inserting a higher-priority title. */
 export function removeFarmDocumentTitles(markup: string): string {
   return markup.replace(/<title\b[^>]*>[\s\S]*?<\/title>\s*/gi, "");
@@ -125,12 +139,7 @@ export function composeFarmFullDocument(
     });
   }
 
-  // Ensure a hydration root exists so the client can mount, matching the shell.
-  if (!/\sid=["']root["']/i.test(html)) {
-    html = html
-      .replace(/<body\b([^>]*)>/i, '<body$1><div id="root">')
-      .replace(/<\/body>/i, "</div></body>");
-  }
+  html = ensureFarmDocumentRoot(html);
 
   if (assets.headAssets) {
     html = html.replace(/<\/head>/i, () => `  ${assets.headAssets}\n</head>`);

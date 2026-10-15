@@ -52,6 +52,7 @@ import {
 } from "./app-markdown";
 import { applyWebResponseHeaders, sendWebResponse } from "./server/response";
 import { resolveDevGlobalStylesheetHref } from "./server/dev-styles";
+import { FARM_LAYOUT_ELEMENT_CLIENT_SOURCE } from "./document-layout-client";
 import {
   getClientModuleMetadata,
   getIslandStrategyExport,
@@ -4858,19 +4859,12 @@ async function loadLayoutComponents(layouts = []) {
   return loadedLayouts;
 }
 
+${FARM_LAYOUT_ELEMENT_CLIENT_SOURCE}
 function wrapWithLoadedLayouts(element, loadedLayouts, params) {
   let wrapped = element;
   for (let index = loadedLayouts.length - 1; index >= 0; index--) {
     const layout = loadedLayouts[index];
-    wrapped = React.createElement(layout.Component, {
-      children: wrapped,
-      params,
-    });
-    wrapped = React.createElement('div', {
-      'data-farm-layout-boundary': 'true',
-      'data-farm-layout-pattern': layout.pattern,
-      style: { display: 'contents' },
-    }, wrapped);
+    wrapped = createFarmLayoutElement(layout.Component, layout.pattern, wrapped, params);
   }
   return wrapped;
 }

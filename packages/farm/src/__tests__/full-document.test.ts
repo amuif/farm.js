@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   composeFarmFullDocument,
   ensureFarmDocumentHead,
+  ensureFarmDocumentRoot,
   extractFarmFullDocument,
   isFarmFullDocument,
   opensFarmFullDocument,
@@ -48,6 +49,40 @@ function productionEnsureHead(): typeof ensureFarmDocumentHead {
   const generated = new Function("return `" + source.slice(start, end) + "`;")();
   return new Function(generated + "; return ensureFarmDocumentHead;")();
 }
+
+function productionEnsureRoot(): typeof ensureFarmDocumentRoot {
+  const source = readFileSync(new URL("../nitro/universal-build.ts", import.meta.url), "utf8");
+  const start = source.indexOf("function ensureFarmDocumentRoot(markup)");
+  const end = source.indexOf("function createFarmErrorDocument(html, title)", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const generated = new Function("return `" + source.slice(start, end) + "`;")();
+  return new Function(generated + "; return ensureFarmDocumentRoot;")();
+}
+
+describe.each([
+  ["development", ensureFarmDocumentRoot],
+  ["production", productionEnsureRoot()],
+] as const)("%s document root", (_runtime, ensureRoot) => {
+  it("wraps the body's content in #root, keeping body attributes", () => {
+    expect(
+      ensureRoot('<html><head></head><body class="app"><nav>n</nav><main>m</main></body></html>'),
+    ).toBe(
+      '<html><head></head><body class="app"><div id="root"><nav>n</nav><main>m</main></div></body></html>',
+    );
+  });
+
+  it("leaves a document that already has #root unchanged", () => {
+    const document = '<html><head></head><body><div id="root"><main>m</main></div></body></html>';
+    expect(ensureRoot(document)).toBe(document);
+  });
+
+  it("keeps $-sequences in the content literal", () => {
+    expect(ensureRoot("<html><body>$&amp; $' $$</body></html>")).toBe(
+      '<html><body><div id="root">$&amp; $\' $$</div></body></html>',
+    );
+  });
+});
 
 describe.each([
   ["development", ensureFarmDocumentHead],
