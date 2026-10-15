@@ -18,7 +18,9 @@ afterEach(async () => {
   await Promise.all([...servers].map((server) => server.close()));
   servers.clear();
   await Promise.all(
-    [...temporaryRoots].map((root) => fs.rm(root, { recursive: true, force: true })),
+    [...temporaryRoots].map((root) =>
+      fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+    ),
   );
   temporaryRoots.clear();
   // loadConfig copies .env values into process.env.

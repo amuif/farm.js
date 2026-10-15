@@ -153,7 +153,7 @@ export default function Page({ params }) { return <main>{"items-route:" + String
 
 afterAll(async () => {
   await server?.close();
-  if (root) await fs.rm(root, { recursive: true, force: true });
+  if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("development runtime.before rewrite routing", () => {
