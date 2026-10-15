@@ -18,6 +18,7 @@ afterEach(async () => {
   servers.clear();
   await Promise.all(
     [...temporaryRoots].map((root) =>
+      // Vite 8's optimizer can still be writing deps_temp_* after close() resolves.
       fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
     ),
   );
