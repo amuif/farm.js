@@ -62,8 +62,10 @@ If pnpm refuses a version younger than the release-age window, add that exact `p
 `minimumReleaseAgeExclude` in `pnpm-workspace.yaml`. `@farm.js/vue` requires `vue@^3.5.41`.
 
 ```bash
-pnpm add @farm.js/core@0.1.14 @farm.js/vue@0.1.0-beta.29 vue@3.5.41 zod@4.1.12
-pnpm add -D @farm.js/cli@0.1.14 vue-tsc@3.3.9 typescript
+FARM_VERSION=$(npm view @farm.js/core version)
+FARM_VUE_VERSION=$(npm view @farm.js/vue version)
+pnpm add @farm.js/core@$FARM_VERSION @farm.js/vue@$FARM_VUE_VERSION vue zod
+pnpm add -D @farm.js/cli@$FARM_VERSION vue-tsc typescript
 ```
 
 Create `farm.config.ts`:

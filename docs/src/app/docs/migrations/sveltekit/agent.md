@@ -53,8 +53,10 @@ Pin exact versions. pnpm 11+ applies `minimumReleaseAge`, so a bare `latest` can
 older Farm release right after a publish.
 
 ```bash
-pnpm add @farm.js/core@0.1.14 @farm.js/svelte@0.1.0-beta.33 svelte@5.56.8 zod@4.1.12
-pnpm add -D @farm.js/cli@0.1.14 svelte-check@4.7.5
+FARM_VERSION=$(npm view @farm.js/core version)
+FARM_SVELTE_VERSION=$(npm view @farm.js/svelte version)
+pnpm add @farm.js/core@$FARM_VERSION @farm.js/svelte@$FARM_SVELTE_VERSION svelte zod
+pnpm add -D @farm.js/cli@$FARM_VERSION svelte-check
 ```
 
 `zod` is for endpoint and env schemas. If pnpm rejects a fresh version under `minimumReleaseAge`,

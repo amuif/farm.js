@@ -17,7 +17,7 @@ This document is the complete contract for a coding agent migrating a Next.js Ap
 
 - Node.js 22.13 or newer.
 - A clean git working tree, so every phase can be diffed and reverted.
-- The installed Farm version. Pin one exact version for every `@farm.js/*` package (0.1.14 when this was written; check `npm view @farm.js/core version`). Under pnpm 11+, `minimumReleaseAge` (24 hours by default) can resolve `latest` to an older Farm right after a release. Pin exact versions and add the exclusion the Farm templates use to `pnpm-workspace.yaml`:
+- The installed Farm version. Pin one exact version for every `@farm.js/*` package: the current release from `npm view @farm.js/core version`. Under pnpm 11+, `minimumReleaseAge` (24 hours by default) can resolve `latest` to an older Farm right after a release. Pin exact versions and add the exclusion the Farm templates use to `pnpm-workspace.yaml`:
 
 ```yaml
 minimumReleaseAgeExclude:

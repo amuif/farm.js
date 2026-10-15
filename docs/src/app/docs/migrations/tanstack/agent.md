@@ -31,8 +31,8 @@ starter (`@tanstack/react-start` 1.169.2, created with `@tanstack/cli create`) t
 
 ### Phase 1: add Farm next to TanStack
 
-1. Add exact versions: `@farm.js/core@0.1.14` to `dependencies` and `@farm.js/cli@0.1.14` to
-   `devDependencies`. Do not use `latest`: under pnpm 11+, `minimumReleaseAge` can resolve
+1. Add exact versions of the current release (`npm view @farm.js/core version`):
+   `@farm.js/core@<version>` to `dependencies` and `@farm.js/cli@<version>` to `devDependencies`. Do not use `latest`: under pnpm 11+, `minimumReleaseAge` can resolve
    `latest` to an older Farm release for a day after a publish. If installs are blocked by the
    release age, add `'@farm.js/*'` to `minimumReleaseAgeExclude` in `pnpm-workspace.yaml`.
 2. Create `farm.config.ts` with `export default defineConfig({})`, importing `defineConfig` from
@@ -717,7 +717,7 @@ Never expose secrets through `VITE_` or `public`. Docs: `/docs/environment-funct
   project has a PostCSS config. `@import "tailwindcss"`, `@theme`, and `@plugin` stay (`same`);
   keep `tailwindcss` and plugins such as `@tailwindcss/typography` installed.
 - `styles.css?url` plus a head link (`different`): side-effect `import "../styles.css"` in the layout.
-- `@tanstack/react-devtools`, `@tanstack/devtools-vite` (`different`): add `@farm.js/devtools@0.1.14`
+- `@tanstack/react-devtools`, `@tanstack/devtools-vite` (`different`): add `@farm.js/devtools@<version>`
   as a devDependency and `plugins: [devtools()]` (`devtools` from `@farm.js/devtools`).
 - `@tanstack/react-router-devtools` (`different`): the routes view in Farm DevTools, or
   `farm explain <path>`. `@tanstack/react-query-devtools` (`same`): keep it inside `Providers`.
