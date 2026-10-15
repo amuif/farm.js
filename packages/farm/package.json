@@ -694,7 +694,7 @@
     "@mdx-js/mdx": "^3.1.1",
     "@opentelemetry/api": "1.9.1",
     "@tailwindcss/vite": "4.1.18",
-    "@vercel/og": "0.11.1",
+    "@vercel/og": "1.0.1",
     "better-call": "^1.0.19",
     "db0": "^0.3.4",
     "es-module-lexer": "2.0.0",
