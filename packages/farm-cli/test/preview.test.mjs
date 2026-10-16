@@ -1360,6 +1360,56 @@ test("runs farm preview dry-run through the CLI", async () => {
   }
 });
 
+test("farm preview --no-probe skips the reachability check for an explicit port", async () => {
+  // Nothing listens here, so a probe would fail with "No running Farm app was found".
+  const { port, close } = await createTestServer();
+  await close();
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [cliBin, "preview", "--port", String(port), "--no-probe", "--dry-run"],
+    {
+      env: {
+        ...process.env,
+        FARM_PREVIEW_HOST: "",
+        FARM_PREVIEW_TUNNEL_COMMAND: "farm-preview-agent tunnel --url {url}",
+      },
+    },
+  );
+
+  assert.match(stdout, new RegExp(`Local:\\s+http://localhost:${port}`));
+  assert.match(stdout, /dry run completed/i);
+});
+
+test("farm preview uses FARM_PREVIEW_HOST unless --host is passed", async () => {
+  const server = await createTestServer();
+  const run = (...args) =>
+    execFileAsync(
+      process.execPath,
+      [cliBin, "preview", "--port", String(server.port), ...args, "--dry-run"],
+      {
+        env: {
+          ...process.env,
+          FARM_PREVIEW_HOST: "127.0.0.1",
+          FARM_PREVIEW_TUNNEL_COMMAND: "farm-preview-agent tunnel --url {url}",
+        },
+      },
+    );
+
+  try {
+    assert.match(
+      (await run()).stdout,
+      new RegExp(`Local:\\s+http://127\\.0\\.0\\.1:${server.port}`),
+    );
+    assert.match(
+      (await run("--host", "localhost")).stdout,
+      new RegExp(`Local:\\s+http://localhost:${server.port}`),
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 async function createTestServer(handler) {
   const server = createServer(
     handler ||

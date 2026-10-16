@@ -467,11 +467,18 @@ async function loginWithPreviewDeviceFlow(
       await runtime.wait(retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : interval);
       continue;
     }
-    const result = (await poll.json()) as {
+    // A 5xx or an unreadable success body is a transient Infra or proxy failure, not an
+    // answer: keep polling until the code expires.
+    if (poll.status >= 500) continue;
+    const result = (await poll.json().catch(() => null)) as {
       access_token?: string;
       expires_in?: number;
       error?: string;
-    };
+    } | null;
+    if (!result || typeof result !== "object") {
+      if (poll.ok) continue;
+      throw new Error(`Farm.js Infrastructure sign-in failed (${poll.status}). Try again.`);
+    }
     if (
       poll.ok &&
       typeof result.access_token === "string" &&
@@ -815,20 +822,38 @@ class FilePreviewCredentialStore implements PreviewCredentialStore {
     await this.write(credentials);
   }
 
+  private warnedUnreadable = false;
+
   private async read(): Promise<Record<string, string>> {
+    let source: string;
     try {
-      const value = JSON.parse(await readFile(this.path, "utf8"));
-      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      source = await readFile(this.path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw error;
+    }
+    try {
+      const value = JSON.parse(source);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      // A damaged file holds no usable sign-in. Treat it as signed out so farm login
+      // (or a preview that signs in) can replace it.
+      if (!this.warnedUnreadable) {
+        this.warnedUnreadable = true;
+        logger.warn(
+          `Ignoring unreadable Farm Preview credentials at ${this.path}. Run farm login to replace them.`,
+        );
+      }
+      return {};
     }
   }
 
   private async write(credentials: Record<string, string>) {
     const directory = dirname(this.path);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
+    // Only tighten a directory this store created; an existing one (for example a custom
+    // FARM_PREVIEW_CREDENTIALS_PATH in a shared folder) keeps its owner's permissions.
+    const created = await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (created !== undefined) await chmod(directory, 0o700);
     const temporary = `${this.path}.${process.pid}.tmp`;
     try {
       await writeFile(temporary, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
