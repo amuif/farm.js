@@ -7,6 +7,71 @@ import { loadCompiledAndOriginal, removeCompiledModules } from "./compiled-modul
 afterAll(removeCompiledModules);
 
 describe.each(["static", "hybrid"] as const)("root text ownership (%s)", (reactivity) => {
+  it("reuses only compiler-owned text and falls back for changed child shapes", async () => {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    const { compiled, names } = await loadCompiledAndOriginal(
+      `
+    import { useState } from 'react';
+    export function OwnedText({ next, gate }) {
+      const [value, setValue] = useState('before');
+      return <main data-gate={gate ? 'yes' : 'no'}>
+        <button onClick={() => setValue(next)}>Update</button>
+        <p>prefix {value} suffix</p><output>{value}</output>
+      </main>;
+    }
+  `,
+      reactivity,
+    );
+    expect(names).toContain("OwnedText");
+    const Component = compiled.OwnedText;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (next: unknown, gate: unknown = false) =>
+      act(async () => root.render(<Component next={next} gate={gate} />));
+    const click = () => act(async () => container.querySelector("button")!.click());
+    try {
+      await render("first");
+      const paragraph = container.querySelector("p")!;
+      const output = container.querySelector("output")!;
+      const committed = [...paragraph.childNodes];
+      const committedText = committed.map((node) => node.textContent);
+      await click();
+      const owned = paragraph.firstChild;
+      expect(committed).not.toContain(owned);
+      await render("second");
+      await click();
+      expect(paragraph.firstChild).toBe(owned);
+      expect(paragraph.textContent).toBe("prefix second suffix");
+      expect(committed.map((node) => node.textContent)).toEqual(committedText);
+
+      // Empty content and a changed child shape must use textContent's full replacement.
+      await render(null);
+      await click();
+      expect(output.childNodes.length).toBe(0);
+      for (const nodes of [
+        [],
+        [document.createElement("span")],
+        [document.createTextNode("x"), document.createComment("extra")],
+      ]) {
+        paragraph.replaceChildren(...nodes);
+        await render(String(nodes.length));
+        await click();
+        expect(paragraph.childNodes.length).toBe(1);
+        expect(paragraph.textContent).toBe(`prefix ${nodes.length} suffix`);
+      }
+
+      await render("handoff", {});
+      expect([...paragraph.childNodes]).toEqual(committed);
+      expect(paragraph.textContent).toBe("prefix 2 suffix");
+      await click();
+      expect(paragraph.textContent).toBe("prefix handoff suffix");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   it.each([false, true])(
     "preserves root text across prop renders (hydrated=%s)",
     async (hydrate) => {

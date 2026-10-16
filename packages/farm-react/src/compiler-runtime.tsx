@@ -4627,17 +4627,21 @@ function commitKeyedRowBinding(
   instance.values[bindingIndex] = value;
   if (!target) return;
   if (binding.kind === "text") {
-    // Like React's setTextContent: update a lone text node in place.
-    const text = target.firstChild;
-    if (value && text && text === target.lastChild && text.nodeType === 3) {
-      (text as Text).data = value as string;
-    } else {
-      target.textContent = value as string;
-    }
+    updateTextContent(target, value as string);
   } else if (binding.kind === "style" && binding.name) {
     updateStyle(target, binding.name, value);
   } else if (binding.kind === "attribute" && binding.name) {
     updateAttribute(target, binding.name, value);
+  }
+}
+
+function updateTextContent(target: Element, value: string): void {
+  // Like React's setTextContent: update a lone text node in place.
+  const text = target.firstChild;
+  if (value && text && text === target.lastChild && text.nodeType === 3) {
+    (text as Text).data = value;
+  } else {
+    target.textContent = value;
   }
 }
 
@@ -12074,20 +12078,16 @@ export function createCompiledComponentWithFeatures<Props>(
       this.blockRuntime = blockRuntime as CompilerBlockRuntime;
     }
 
-    private usesHybridReactivity(): boolean {
-      return definitionReference.current.reactivity === "hybrid";
-    }
-
     private canReuseRenderedElement(
       currentDefinition: CompiledComponentDefinition<Props>,
       propValues: readonly unknown[] | null,
     ): boolean {
-      return Boolean(
+      // The committed root ref publishes the definition and element together.
+      return (
         this.mounted &&
-        propValues &&
+        propValues !== null &&
         propValues.every(isCompilerPrimitive) &&
-        this.renderedDefinition === currentDefinition &&
-        this.renderedElement,
+        this.renderedDefinition === currentDefinition
       );
     }
 
@@ -12121,7 +12121,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private tracksBinding(
       binding: Exclude<CompilerBinding<Props>, CompilerConditionalBlockBinding>,
     ): boolean {
-      return this.usesHybridReactivity() && binding.tracking === "dynamic";
+      return definitionReference.current.reactivity === "hybrid" && binding.tracking === "dynamic";
     }
 
     private ensureBindingIndex(): void {
@@ -12197,7 +12197,7 @@ export function createCompiledComponentWithFeatures<Props>(
     }
 
     private primeHybridBindings(): void {
-      if (!this.usesHybridReactivity()) return;
+      if (definitionReference.current.reactivity !== "hybrid") return;
       for (const binding of definitionReference.current.bindings) {
         if (binding.kind === "block") continue;
         if (!this.tracksBinding(binding)) continue;
@@ -12311,34 +12311,28 @@ export function createCompiledComponentWithFeatures<Props>(
           for (const binding of this.staticBindingsByDependency[dependency] || []) {
             affectedBindings.add(binding);
           }
-          if (this.usesHybridReactivity()) {
+          if (definitionReference.current.reactivity === "hybrid") {
             for (const binding of this.trackedBindingsByDependency[dependency] || []) {
               affectedBindings.add(binding);
             }
           }
         }
 
-        const hasAffectedMountedAncestor = (binding: CompilerConditionalBlockBinding): boolean => {
+        const blockRefreshes: CompilerBlockRefresh[] = [];
+        for (const id of affectedBlockIds) {
+          const binding = this.blockBindings.get(id);
+          const refresh = this.blockRefreshListeners.get(id);
+          if (!binding || !refresh) continue;
           let parent = binding.parent;
           while (parent !== undefined) {
-            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) {
-              return true;
-            }
+            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) break;
             parent = this.blockBindings.get(parent)?.parent;
           }
-          return false;
-        };
-
-        const blockRefreshes = [...affectedBlockIds]
-          .map((id) => {
-            const binding = this.blockBindings.get(id);
-            const refresh = this.blockRefreshListeners.get(id);
-            return binding && refresh && !hasAffectedMountedAncestor(binding) ? refresh : undefined;
-          })
-          .filter((refresh): refresh is CompilerBlockRefresh => refresh !== undefined);
+          if (parent === undefined) blockRefreshes.push(refresh);
+        }
 
         for (const binding of affectedBindings) {
-          if (binding.kind !== "block") this.applyBinding(binding);
+          this.applyBinding(binding);
         }
 
         let pendingBlockCommits = blockRefreshes.length;
@@ -12374,13 +12368,12 @@ export function createCompiledComponentWithFeatures<Props>(
         // Keep React's committed children for the next full reconciliation.
         // Direct writes may replace HostText nodes still owned by its fibers.
         if (!this.textNodes.has(target)) {
-          const children: Node[] = [];
-          // Avoid materializing a live childNodes collection on this hot target.
-          for (let child = target.firstChild; child; child = child.nextSibling)
-            children.push(child);
-          this.textNodes.set(target, children);
+          this.textNodes.set(target, [...target.childNodes]);
+          // The direct text node is compiler-owned; never edit a saved React node.
+          target.textContent = comparableValue as string;
+        } else {
+          updateTextContent(target, comparableValue as string);
         }
-        target.textContent = comparableValue as string;
       } else if (binding.kind === "style") {
         updateStyle(target, binding.name, value);
       } else {
@@ -12402,10 +12395,10 @@ export function createCompiledComponentWithFeatures<Props>(
       if (this.canReuseRenderedElement(currentDefinition, propValues)) return true;
       // Restore only at commit: a suspended or abandoned render must not
       // roll back the visible DOM. React can now reconcile its own nodes.
-      for (const [target, children] of this.textNodes) {
+      this.textNodes.forEach((children, target) => {
         target.textContent = "";
         for (const child of children) target.appendChild(child);
-      }
+      });
       this.textNodes.clear();
       this.bindingValues.clear();
       return false;
@@ -12414,7 +12407,7 @@ export function createCompiledComponentWithFeatures<Props>(
     componentDidUpdate(
       _previousProps: Readonly<Props>,
       _previousState: Readonly<Record<string, never>>,
-      reusedRenderedElement = false,
+      reusedRenderedElement?: boolean,
     ): void {
       const propValues = definitionReference.current.readProps?.(this.props) || null;
       if (propValues) {
@@ -12444,7 +12437,7 @@ export function createCompiledComponentWithFeatures<Props>(
       // React-owned prop reconciliation behavior.
       this.ensureBindingIndex();
       for (const binding of definitionReference.current.bindings) {
-        if (binding.kind !== "block") this.applyBinding(binding, true);
+        this.applyBinding(binding, true);
       }
     }
 

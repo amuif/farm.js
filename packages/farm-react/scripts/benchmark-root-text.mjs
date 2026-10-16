@@ -94,6 +94,7 @@ try {
   });
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH });
   const samples = { base: [], candidate: [] };
+  const firstUpdateSamples = { base: [], candidate: [] };
   for (const [variant, control] of [
     ["candidate", true],
     ...Array.from({ length: 7 }, (_, i) =>
@@ -114,17 +115,25 @@ try {
     const result = await page.evaluate(async () => {
       const nodes = [...document.querySelectorAll("p")];
       if (nodes.length !== 2048) throw new Error("Wrong binding count");
-      for (let i = 0; i < 10; i++) await window.update();
+      const firstStart = performance.now();
+      await window.update();
+      const firstUpdateMs = performance.now() - firstStart;
+      if (!nodes.every((node) => node.textContent === "Value: 1"))
+        throw new Error("First update output mismatch");
+      for (let i = 1; i < 10; i++) await window.update();
       const start = performance.now();
       for (let i = 0; i < 100; i++) await window.update();
       const ms = (performance.now() - start) / 100;
       const after = [...document.querySelectorAll("p")];
       if (!nodes.every((node, i) => node === after[i] && node.textContent === "Value: 110"))
         throw new Error("Output/identity mismatch");
-      return ms;
+      return { ms, firstUpdateMs };
     });
     assert.deepEqual(errors, []);
-    if (!control) samples[variant].push(result);
+    if (!control) {
+      samples[variant].push(result.ms);
+      firstUpdateSamples[variant].push(result.firstUpdateMs);
+    }
     await page.close();
   }
   const median = (a) => [...a].sort((a, b) => a - b)[Math.floor(a.length / 2)];
@@ -139,6 +148,11 @@ try {
         load: loadavg(),
         sizes,
         samples,
+        firstUpdateSamples,
+        firstUpdateMedians: {
+          base: median(firstUpdateSamples.base),
+          candidate: median(firstUpdateSamples.candidate),
+        },
         medians: { base: median(samples.base), candidate: median(samples.candidate) },
         workload:
           "2048 joined root text bindings; 10 warmups + 100 measured local updates; 7 alternating pairs, fresh pages; ordinary React correctness control; production Vite bundles, not frame latency or official framework benchmark",
