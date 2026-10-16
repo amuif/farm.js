@@ -12385,8 +12385,10 @@ export function createCompiledComponentWithFeatures<Props>(
     componentDidMount(): void {
       this.mounted = true;
       refreshListeners.add(this.refreshDefinition);
-      this.ensureBindingIndex();
-      this.primeHybridBindings();
+      // React replays this lifecycle when Activity/Suspense reappears. Publish
+      // the current committed props before rebuilding dependency tracking, and
+      // drain state queued while hidden through the ordinary update path.
+      this.componentDidUpdate();
     }
 
     getSnapshotBeforeUpdate(): boolean {
@@ -12405,8 +12407,8 @@ export function createCompiledComponentWithFeatures<Props>(
     }
 
     componentDidUpdate(
-      _previousProps: Readonly<Props>,
-      _previousState: Readonly<Record<string, never>>,
+      previousProps?: Readonly<Props>,
+      _previousState?: Readonly<Record<string, never>>,
       reusedRenderedElement?: boolean,
     ): void {
       const propValues = definitionReference.current.readProps?.(this.props) || null;
@@ -12425,25 +12427,24 @@ export function createCompiledComponentWithFeatures<Props>(
             cell.flush();
           }
         }
-        if (!reusedRenderedElement) {
-          this.ensureBindingIndex();
-          this.primeHybridBindings();
-        }
-        this.flushBindingUpdates();
-        return;
       }
 
-      // Hand-authored definitions without prop cells retain the original
-      // React-owned prop reconciliation behavior.
-      this.ensureBindingIndex();
-      for (const binding of definitionReference.current.bindings) {
-        this.applyBinding(binding, true);
+      if (!reusedRenderedElement) {
+        this.ensureBindingIndex();
+        this.primeHybridBindings();
       }
+      // Hand-authored definitions without prop cells retain their prop update
+      // behavior. Initial/replayed mounts do not force redundant DOM writes.
+      if (!propValues && previousProps) {
+        for (const binding of definitionReference.current.bindings) {
+          this.applyBinding(binding, true);
+        }
+      }
+      if (this.dirtyState.size) this.flushBindingUpdates();
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.dirtyState.clear();
       this.inputSelection = null;
       this.blockRefreshListeners.clear();
       // React 18 StrictMode replays lifecycles without detaching host refs.
@@ -12456,7 +12457,10 @@ export function createCompiledComponentWithFeatures<Props>(
       this.trackedBindingsByDependency = [];
       this.trackedDependenciesByBinding.clear();
       this.bindingValues.clear();
-      this.textNodes.clear();
+      // Hiding also calls this lifecycle: pending state and React-owned text
+      // snapshots belong to the retained component, not its active effects.
+      // Reconciliation clears snapshots; real unmount releases host refs and
+      // the global refresh listener, allowing this instance to be collected.
       this.activeBinding = null;
       this.activeDependencies = null;
       refreshListeners.delete(this.refreshDefinition);

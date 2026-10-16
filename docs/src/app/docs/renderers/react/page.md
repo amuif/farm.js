@@ -280,6 +280,12 @@ comparison and diagnostic mode. `"hybrid"` is the default because it can avoid i
 preserving the compiler's safe fallback and React ownership boundaries. Both modes cache the last
 committed direct-binding value and skip an identical DOM write.
 
+When Suspense (or React 19's Activity) temporarily hides a compiled component, Farm retains
+its pending local state and React-owned text-node snapshots. On reappearance, it synchronizes
+the current committed props before rebuilding binding dependencies and drains queued updates
+in order. Hiding is not treated as permanent disposal: host refs and refresh subscriptions
+are detached, while component-owned state remains available for React to resume.
+
 ### Component selection
 
 #### Automatic inference

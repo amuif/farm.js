@@ -153,6 +153,104 @@ const testSource = String.raw`
     }
   }
 
+  // Reappearance replays mount lifecycles, not ordinary prop-update lifecycles.
+  // Activity is a React 19 API; Suspense covers the contract on both versions.
+  for (const reactivity of ["static", "hybrid"]) {
+    for (const boundary of ["Suspense", ...(React.Activity ? ["Activity"] : [])]) {
+      for (const hydrate of [false, true]) {
+        let gate;
+        const view = (value, clear, read, later) => React.createElement("main", null,
+          React.createElement("button", { onClick: clear }, "Clear"),
+          React.createElement("button", { onClick: read }, "Read prop"),
+          React.createElement("button", { onClick: later }, "Async"),
+          React.createElement("p", null, value),
+          React.createElement("p", null, "prefix ", value, " suffix"),
+          React.createElement("input", { defaultValue: "draft" }),
+        );
+        function Ordinary({ next }) {
+          const [value, setValue] = React.useState("before");
+          return view(value, () => setValue([]), () => setValue(next), () => gate.then(() => setValue(next)));
+        }
+        const hmrId = "compatibility-reappearance-" + reactivity + boundary + hydrate;
+        const Compiled = createCompiledComponentWithFeatures({
+          displayName: "CompatibilityReappearance", hmrId, reactivity,
+          initialize: () => ["before"], readProps: (props) => [props.next],
+          render(_props, state) {
+            return view(state[0].get(), () => state[0].set([]), () => state[0].set(state[1].get()),
+              () => gate.then(() => state[0].set(state[1].get())));
+          },
+          bindings: [
+            { kind: "text", path: [3], dependencies: [0], read: (_props, state) => [state[0].get()] },
+            { kind: "text", path: [4], dependencies: [0], read: (_props, state) => ["prefix ", state[0].get(), " suffix"] },
+          ],
+        }, []);
+        for (const Component of [Ordinary, Compiled]) {
+          let releaseBoundary;
+          const suspended = new Promise((resolve) => { releaseBoundary = resolve; });
+          function Guard({ hidden }) { if (hidden) throw suspended; return null; }
+          const tree = (hidden, next) => React.createElement(React.StrictMode, null,
+            boundary === "Activity"
+              ? React.createElement(React.Activity, { mode: hidden ? "hidden" : "visible" }, React.createElement(Component, { next }))
+              : React.createElement(React.Suspense, { fallback: React.createElement("aside", null, "Loading") },
+                React.createElement(Component, { next }), React.createElement(Guard, { hidden })),
+          );
+          const container = document.createElement("div");
+          document.body.append(container);
+          if (hydrate) container.innerHTML = renderToString(tree(false, "after"));
+          const errors = [];
+          let root, release;
+          flushSync(() => {
+            root = hydrate ? hydrateRoot(container, tree(false, "after"), { onRecoverableError: (error) => errors.push(error) }) : createRoot(container);
+            if (!hydrate) root.render(tree(false, "after"));
+          });
+          const render = (hidden, next) => flushSync(() => root.render(tree(hidden, next)));
+          const click = async (index) => {
+            flushSync(() => container.querySelectorAll("button")[index].click());
+            await Promise.resolve(); await Promise.resolve();
+          };
+          const input = container.querySelector("input");
+          const paragraphs = [...container.querySelectorAll("p")];
+          input.value = "edited draft"; input.setSelectionRange(2, 5);
+          try {
+            await click(0);
+            render(true, "after");
+            render(true, "resumed");
+            render(false, "resumed");
+            assert.equal(paragraphs[0].textContent, "");
+            await click(1);
+            assert.equal(paragraphs[0].textContent, "resumed");
+            render(false, "queued");
+            gate = new Promise((resolve) => { release = resolve; });
+            await click(2);
+            render(true, "queued");
+            // A promise update can use a concurrent lane on React 18. Drain
+            // React's scheduler, not just the promise microtasks, for both
+            // the ordinary React control and the compiled component.
+            const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+            globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+            try {
+              await React.act(async () => { release(); await gate; });
+              await React.act(async () => render(false, "queued"));
+            } finally {
+              globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+            }
+            assert.equal(paragraphs[0].textContent, "queued", "async resume: " + reactivity + "/" + boundary + "/hydrate=" + hydrate + "/" + (Component === Ordinary ? "ordinary" : "compiled"));
+            assert.equal(paragraphs[1].textContent, "prefix queued suffix");
+            assert.equal(container.querySelector("input"), input);
+            assert.deepEqual([...container.querySelectorAll("p")], paragraphs);
+            assert.equal(input.value, "edited draft");
+            assert.deepEqual([input.selectionStart, input.selectionEnd], [2, 5]);
+            assert.deepEqual(errors, []);
+          } finally {
+            flushSync(() => root.unmount());
+            release?.(); releaseBoundary(); container.remove();
+          }
+          assert.equal(globalThis[Symbol.for("@farm.js/react/compiler-hmr-registry")].get(hmrId).refreshListeners.size, 0);
+        }
+      }
+    }
+  }
+
   // Compiler mutations leave React's previous child fibers stale until the
   // keyed container is safely re-adopted at a props/Fast Refresh handoff.
   for (const reactivity of ["static", "hybrid"]) {
