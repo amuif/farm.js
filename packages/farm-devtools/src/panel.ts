@@ -4,12 +4,17 @@ import "./panel.css";
 import type { FarmDevtoolsSnapshot } from "@farm.js/core";
 import type { InspectedModule, ModuleDetails } from "./types.js";
 import { DEVTOOLS_PATH } from "./types.js";
-import { codeBlock, escapeHtml as esc, heading, property } from "./ui.js";
+import { codeBlock, createShortcutMatcher, escapeHtml as esc, heading, property } from "./ui.js";
 import { icon } from "./icons.js";
 
 export function startPanel(root: HTMLElement) {
   const window = root.ownerDocument.defaultView!;
   const document = root.ownerDocument;
+  // Only the toggle shortcut is forwarded to the host page, never other keystrokes.
+  const matchesShortcut = createShortcutMatcher(
+    root.dataset.shortcut ?? "",
+    /Mac|iPhone|iPad|iPod/.test(window.navigator.platform),
+  );
   const views = [
     ["overview", "Overview", "overview"],
     ["routes", "Routes", "route"],
@@ -422,7 +427,7 @@ export function startPanel(root: HTMLElement) {
         controls[0]?.focus();
       }
     }
-    if (window.parent !== window)
+    if (window.parent !== window && matchesShortcut(event))
       window.parent.postMessage(
         {
           type: "farm:devtools:keydown",
