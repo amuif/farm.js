@@ -1,3 +1,5 @@
+import { readFarmEnvironmentValue } from "./utils/runtime-env";
+
 export interface EnvSchema<TOutput = unknown> {
   parse(value: unknown): TOutput;
 }
@@ -97,9 +99,11 @@ export function resolveEnv<TConfig extends FarmEnvConfig<any, any> | undefined>(
 
 /**
  * Prepare resolved env for a server bundle. Server values that came from the
- * build environment are left out and read from `process.env` when the server
- * uses them, so secrets never land in build output and a restart picks up a
- * rotated value. Values a parser produced without an env var (defaults) stay.
+ * build environment are left out and read from the server's environment when
+ * the server uses them, so secrets never land in build output and a restart
+ * picks up a rotated value. Values a parser produced without an env var
+ * (defaults) stay, and so do values the runtime cannot rebuild from the raw
+ * string, because the parser itself does not run in the server bundle.
  */
 export function createBundledEnv(
   env: ResolvedFarmEnv | FarmEnvConfig<any, any> | undefined,
@@ -109,10 +113,12 @@ export function createBundledEnv(
   const server: Record<string, unknown> = {};
   const runtime: Record<string, FarmEnvRuntimeType> = {};
   for (const [key, value] of Object.entries(resolved.server)) {
-    if (source[key] === undefined) {
-      server[key] = value;
+    const raw = source[key];
+    const type = getRuntimeEnvType(value);
+    if (raw !== undefined && isSameEnvValue(coerceRuntimeEnvValue(raw, type), value)) {
+      runtime[key] = type;
     } else {
-      runtime[key] = getRuntimeEnvType(value);
+      server[key] = value;
     }
   }
 
@@ -265,13 +271,16 @@ function readServerEnvKey(server: Record<string, unknown>, key: string): unknown
   return value;
 }
 
-/** Fill server keys that are read at runtime from the current `process.env`. */
+/**
+ * Fill server keys that are read at runtime from the server's environment:
+ * runtime bindings on `globalThis.__env__` (Cloudflare Workers), then
+ * `process.env`.
+ */
 function readRuntimeServerEnv(env: EnvWithRuntime): void {
   const state = env[FARM_ENV_RUNTIME_SYMBOL];
   if (!state) return;
-  const source = getProcessEnv();
   for (const [key, type] of Object.entries(state.pending)) {
-    const raw = source[key];
+    const raw = readFarmEnvironmentValue(key);
     if (raw === undefined) continue;
     env.server[key] = coerceRuntimeEnvValue(raw, type);
     delete state.pending[key];
@@ -303,6 +312,33 @@ function coerceRuntimeEnvValue(raw: string, type: FarmEnvRuntimeType): unknown {
     }
   }
   return raw;
+}
+
+function isSameEnvValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => isSameEnvValue(item, right[index]))
+    );
+  }
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(right, key) && isSameEnvValue(left[key], right[key]),
+    )
+  );
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function prepareEnv(env: ResolvedFarmEnv | BundledFarmEnv): ResolvedFarmEnv {

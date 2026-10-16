@@ -207,5 +207,54 @@ describe("env", () => {
       expect(getEnv("PORT")).toBe("not-a-port");
       expect(getEnv("FEATURE_FLAG")).toBe("maybe");
     });
+
+    it("reads runtime bindings that Cloudflare Workers expose on globalThis.__env__", () => {
+      const runtime = globalThis as typeof globalThis & { __env__?: Record<string, unknown> };
+      setEnv(createBundledEnv(resolved, buildEnvironment));
+      runtime.__env__ = { DATABASE_URL: "postgres://worker-binding", PORT: "8787" };
+      try {
+        expect(getEnv("DATABASE_URL")).toBe("postgres://worker-binding");
+        expect(env.PORT).toBe(8787);
+      } finally {
+        delete runtime.__env__;
+      }
+    });
+
+    it("keeps a value in the bundle when its parser does more than the runtime can repeat", () => {
+      const config = {
+        server: {
+          FEATURE_FLAG: (value: string | undefined) => value === "on",
+          TIMEOUT_MS: (value: string | undefined) => Number(value) * 1000,
+          ALLOWED_HOSTS: (value: string | undefined) => (value ?? "").split(","),
+          API_ORIGIN: (value: string | undefined) => new URL(value ?? "").origin,
+          PORT: (value: string | undefined) => Number(value),
+        },
+      };
+      const source = {
+        FEATURE_FLAG: "off",
+        TIMEOUT_MS: "60",
+        ALLOWED_HOSTS: "a.test,b.test",
+        API_ORIGIN: "https://api.farm.test/v1",
+        PORT: "3000",
+      };
+      const bundled = createBundledEnv(resolveEnv(config, source), source);
+
+      expect(bundled.server).toEqual({
+        FEATURE_FLAG: false,
+        TIMEOUT_MS: 60000,
+        ALLOWED_HOSTS: ["a.test", "b.test"],
+        API_ORIGIN: "https://api.farm.test",
+      });
+      // A value the runtime coerces back to the same parsed value is still read at runtime.
+      expect(bundled.runtime).toEqual({ server: { PORT: "number" } });
+
+      setEnv(bundled);
+      process.env.PORT = "8080";
+      expect(getEnv("FEATURE_FLAG")).toBe(false);
+      expect(getEnv("TIMEOUT_MS")).toBe(60000);
+      expect(getEnv("ALLOWED_HOSTS")).toEqual(["a.test", "b.test"]);
+      expect(getEnv("API_ORIGIN")).toBe("https://api.farm.test");
+      expect(getEnv("PORT")).toBe(8080);
+    });
   });
 });
