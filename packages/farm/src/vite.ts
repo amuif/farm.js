@@ -36,6 +36,7 @@ import { resolveFarmAPIServerBasePath } from "./api/server-path";
 import { isFarmAPIPathname } from "./api/runtime";
 import type { OpenAPIManager } from "./openapi/manager";
 import { MiddlewareManager } from "./middleware/manager";
+import { _runWithMiddlewareContext, _runWithMiddlewareData } from "./middleware/server";
 import { generateFarmTypeArtifacts, type GenerateFarmTypeArtifactsOptions } from "./type-artifacts";
 import {
   isProgrammaticRoutesFileName,
@@ -2478,6 +2479,25 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                 headers: request.headers,
                 signal: request.signal,
               });
+              // Client navigation must pass the same middleware a document
+              // request for the target does: production navigates by fetching
+              // the target document, which runs its middleware first.
+              let middlewareMap = new Map<string, unknown>();
+              let middlewareContext = new Map<string, unknown>();
+              if (middlewareManager?.hasMiddleware()) {
+                const targetNodeRequest = createPageDataMiddlewareRequest(req, targetRequestUrl);
+                const handled = await runFarmMiddlewareWithNavigation(
+                  farmApp.getServerRenderer(),
+                  targetRequest,
+                  targetNodeRequest,
+                  res,
+                  () => middlewareManager!.execute(targetNodeRequest, res),
+                );
+                if (handled) return;
+                middlewareMap = targetNodeRequest.__FARM_MIDDLEWARE_DATA__ ?? middlewareMap;
+                middlewareContext =
+                  targetNodeRequest.__FARM_MIDDLEWARE_CONTEXT__ ?? middlewareContext;
+              }
               await farmApp.getServerRenderer().runWithRequestContext(targetRequest, async () => {
                 const routeManager = farmApp.getRouteManager();
                 if (pm) {
@@ -2576,6 +2596,7 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                       params,
                       searchParams: Promise.resolve(searchParams),
                       path: targetUrl.pathname,
+                      middleware: middlewareMap.size > 0 ? { data: middlewareMap } : undefined,
                     },
                     routeContext,
                   ),
@@ -2683,27 +2704,32 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                   parseFarmLayoutChainHeader(request.headers.get("x-farm-layout-chain")),
                   destinationLayoutPatterns,
                 );
-                const fragmentHtml = await farmApp.getServerRenderer().renderNavigationFragment({
-                  PageComponent: (routeModule as any).default,
-                  LoadingComponent: (loadingModule as any)?.default,
-                  pageProps: routeProps as Record<string, unknown>,
-                  params,
-                  layouts: layouts.map((layout, index) => ({
-                    pattern: layout.pattern,
-                    module: layoutModules[index] as any,
-                  })),
-                  layoutStartIndex,
-                  slots: routeSlots.map((slot) => ({
-                    name: slot.name,
-                    ownerPattern: slot.ownerPattern,
-                    containerId: slot.containerId,
-                    module: slot.renderModule as any,
-                    props: slot.props,
-                  })),
-                  pageShouldHydrate: shouldHydrate,
-                  layoutShouldHydrate: shouldHydrateLayout,
-                  islandStrategy: hydrationIslandStrategy,
-                });
+                const renderer = farmApp.getServerRenderer();
+                const fragmentHtml = await _runWithMiddlewareData(middlewareMap, () =>
+                  _runWithMiddlewareContext(middlewareContext, () =>
+                    renderer.renderNavigationFragment({
+                      PageComponent: (routeModule as any).default,
+                      LoadingComponent: (loadingModule as any)?.default,
+                      pageProps: routeProps as Record<string, unknown>,
+                      params,
+                      layouts: layouts.map((layout, index) => ({
+                        pattern: layout.pattern,
+                        module: layoutModules[index] as any,
+                      })),
+                      layoutStartIndex,
+                      slots: routeSlots.map((slot) => ({
+                        name: slot.name,
+                        ownerPattern: slot.ownerPattern,
+                        containerId: slot.containerId,
+                        module: slot.renderModule as any,
+                        props: slot.props,
+                      })),
+                      pageShouldHydrate: shouldHydrate,
+                      layoutShouldHydrate: shouldHydrateLayout,
+                      islandStrategy: hydrationIslandStrategy,
+                    }),
+                  ),
+                );
 
                 // Return page data for SPA navigation
                 const pageData = {
@@ -2719,6 +2745,10 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                       : {}),
                     ...((routeProps as any).__farmRoutePropsResolved
                       ? { __farmRoutePropsResolved: true }
+                      : {}),
+                    // The same serialized shape a full load embeds in __FARM_PROPS__.
+                    ...(middlewareMap.size > 0
+                      ? { middleware: { data: Object.fromEntries(middlewareMap) } }
                       : {}),
                   },
                   canonicalPath: (routeProps as any).__farmCanonicalPath,
@@ -3701,6 +3731,28 @@ function runFarmMiddlewareWithNavigation(
       throw error;
     }
   });
+}
+
+type PageDataMiddlewareRequest = IncomingMessage & {
+  originalUrl?: string;
+  __FARM_MIDDLEWARE_DATA__?: Map<string, unknown>;
+  __FARM_MIDDLEWARE_CONTEXT__?: Map<string, unknown>;
+};
+
+/**
+ * The page-data request seen as the document request for its target, so app
+ * middleware matches and reads the target path while headers, cookies and the
+ * socket stay the navigating client's.
+ */
+function createPageDataMiddlewareRequest(
+  req: IncomingMessage,
+  target: URL,
+): PageDataMiddlewareRequest {
+  const targetNodeRequest = Object.create(req) as PageDataMiddlewareRequest;
+  targetNodeRequest.url = `${target.pathname}${target.search}`;
+  targetNodeRequest.originalUrl = targetNodeRequest.url;
+  targetNodeRequest.method = "GET";
+  return targetNodeRequest;
 }
 
 /**
