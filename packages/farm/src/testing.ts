@@ -267,7 +267,10 @@ export function createFarmTestHarness<TContext = unknown>(
       const endpointPath = endpointOptions.path ?? endpointRecord.__path ?? "/__farm/test/endpoint";
       const endpointRequest = request(endpointPath, {
         ...omitEndpointControlOptions(endpointOptions),
-        method: endpointOptions.method ?? endpointRecord.__method ?? "GET",
+        method:
+          endpointOptions.method ??
+          endpointRecord.__method ??
+          (hasRequestBody(endpointOptions) ? "POST" : "GET"),
       });
 
       return invokeTestEndpoint(
@@ -445,6 +448,10 @@ function readCanonicalPath(props: Record<string, unknown>): string | undefined {
 function stripInternalRouteProps(props: Record<string, unknown>): Record<string, unknown> {
   const { __farmRoutePropsResolved, __farmCanonicalPath, ...componentProps } = props;
   return componentProps;
+}
+
+function hasRequestBody(options: FarmTestRequestOptions): boolean {
+  return options.json !== undefined || options.form !== undefined || options.body != null;
 }
 
 function getDefaultApiMethod(route: ProgrammaticApiRoute): ProgrammaticRouteMethod {
