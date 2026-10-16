@@ -967,6 +967,8 @@ export async function buildUniversal(
     pluginManager?: PluginManager;
     routeRuntimeManifest?: FarmRouteRuntimeManifest;
     productionVite?: FarmProductionViteRuntime | Promise<FarmProductionViteRuntime>;
+    /** @internal Lifetime owned by the outer build, including discovery. */
+    rendererBuildLifetime?: AbortSignal;
   } = {},
 ): Promise<void> {
   const root = options.root || config.root || process.cwd();
@@ -987,6 +989,11 @@ export async function buildUniversal(
   const nitroBuilderResultPromise = preloadFarmNitroBuilder();
 
   logger.info(`🚜 Building Farm.js application (universal) with preset: ${preset}...`);
+
+  // Direct callers own a scope too; the outer build normally supplies one
+  // so discovery can share exact compiler results with both bundle graphs.
+  const rendererBuild = options.rendererBuildLifetime ? undefined : new AbortController();
+  const rendererBuildLifetime = options.rendererBuildLifetime ?? rendererBuild!.signal;
 
   try {
     const routeRuntimeManifestPromise = options.routeRuntimeManifest
@@ -1093,6 +1100,7 @@ export async function buildUniversal(
         routeSlots,
         isolatedClientBoundaryModules,
         hydrationPlanCache,
+        rendererBuildLifetime,
       );
     const buildSSRBundle = () =>
       buildSSRInMemory(
@@ -1108,6 +1116,7 @@ export async function buildUniversal(
         routeSlots,
         isolatedClientBoundaryModules,
         hydrationPlanCache,
+        rendererBuildLifetime,
       );
 
     // Route metadata and the client/SSR graphs read independent inputs. Drain
@@ -1156,6 +1165,7 @@ export async function buildUniversal(
           routeSlots,
           isolatedClientBoundaryModules,
           hydrationPlanCache,
+          rendererBuildLifetime,
         );
       } catch (retryError) {
         if (!(retryError instanceof IncompleteClientBuildOutputError)) throw retryError;
@@ -1222,6 +1232,8 @@ export async function buildUniversal(
     }
     logger.error(`❌ Build failed: ${error}`);
     throw error;
+  } finally {
+    rendererBuild?.abort();
   }
 }
 
@@ -1363,6 +1375,7 @@ async function buildClient(
   routeSlots: UniversalRouteSlot[] = [],
   isolatedClientBoundaryModules: ReadonlySet<string> = new Set(),
   hydrationPlanCache: Map<string, ClientModuleHydrationPlan> = new Map(),
+  rendererBuildLifetime?: AbortSignal,
 ) {
   const viteBuild = productionVite.build;
   const { farmPlugin, farmServerOnlyEntriesPlugin } = await import("../vite");
@@ -1704,6 +1717,7 @@ async function buildClient(
   let tailwindVitePlugin: any = undefined;
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: false,
+    buildLifetime: rendererBuildLifetime,
   });
   if (hasScopedPostcssConfig) {
     logger.info("📦 Using project PostCSS/Tailwind configuration");
@@ -4161,6 +4175,7 @@ async function buildSSRInMemory(
   collectedRouteSlots: readonly UniversalRouteSlot[],
   isolatedClientBoundaryModules: ReadonlySet<string>,
   hydrationPlanCache: Map<string, ClientModuleHydrationPlan>,
+  rendererBuildLifetime: AbortSignal,
 ): Promise<{
   bundle: OutputBundle;
   entryFile: string;
@@ -4182,6 +4197,7 @@ async function buildSSRInMemory(
   let tailwindVitePlugin: any = undefined;
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: true,
+    buildLifetime: rendererBuildLifetime,
   });
   if (!hasScopedPostcssConfig) {
     postcssConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "farm-postcss-"));

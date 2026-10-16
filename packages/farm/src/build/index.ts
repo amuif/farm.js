@@ -106,6 +106,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
   });
   pluginManager.addPlugins(config.plugins || []);
   let projectModuleServer: ViteDevServer | undefined;
+  const rendererBuild = new AbortController();
 
   try {
     await pluginManager.runHookParallel("init");
@@ -154,7 +155,12 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
     const createViteServer = productionVite
       ? productionVite.createServer
       : (await import("vite")).createServer;
-    projectModuleServer = await createProjectModuleServer(createViteServer, config, root);
+    projectModuleServer = await createProjectModuleServer(
+      createViteServer,
+      config,
+      root,
+      rendererBuild.signal,
+    );
     const farmApp = createFarmApp(config, projectModuleServer);
     await farmApp.initialize();
 
@@ -208,6 +214,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
         root,
         pluginManager,
         productionVite,
+        rendererBuildLifetime: rendererBuild.signal,
       });
     } else {
       const { build: legacyViteBuild } = await import("vite");
@@ -271,7 +278,11 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
     logger.error(`❌ Build failed: ${error}`);
     throw error;
   } finally {
-    await projectModuleServer?.close();
+    try {
+      await projectModuleServer?.close();
+    } finally {
+      rendererBuild.abort();
+    }
   }
 }
 
@@ -279,9 +290,11 @@ async function createProjectModuleServer(
   createViteServer: FarmProductionViteRuntime["createServer"],
   config: ResolvedFarmConfig,
   root: string,
+  buildLifetime: AbortSignal,
 ): Promise<ViteDevServer> {
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: true,
+    buildLifetime,
   });
   const viteConfig = mergeFarmViteConfig(
     {

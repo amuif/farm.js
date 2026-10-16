@@ -275,6 +275,8 @@ export function getFarmRendererComponentExtensions(
 export interface FarmRendererViteModule {
   createFarmRendererPlugin(options?: {
     ssr?: boolean;
+    /** Shared only within a production build; aborted after all graphs close. */
+    buildLifetime?: AbortSignal;
     rendererOptions?: Readonly<Record<string, unknown>>;
   }): unknown | readonly unknown[] | Promise<unknown | readonly unknown[]>;
 }
@@ -450,7 +452,7 @@ function createFarmReactJsxPlugin() {
 export async function loadFarmRendererVitePlugins(
   renderer: FarmRenderer,
   root: string,
-  options: { ssr?: boolean } = {},
+  options: { ssr?: boolean; buildLifetime?: AbortSignal } = {},
 ): Promise<unknown[]> {
   // React needs no renderer package. Keep this path dependency-free and avoid
   // resolving Farm's own built package while running from source in the monorepo.
