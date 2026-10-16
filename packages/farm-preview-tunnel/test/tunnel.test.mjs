@@ -421,6 +421,56 @@ test("routes wildcard preview hosts and advertises the matching public URL", asy
   }
 });
 
+test("routes preview subdomains only by host, never by the path form", async () => {
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    publicBaseUrl: "https://preview.example.com",
+    publicDomain: "preview.example.com",
+  });
+  const address = await relay.listen();
+  const targets = [];
+  const agents = [];
+  for (const name of ["alice", "bob"]) {
+    const target = createServer((request, response) => response.end(`${name}:${request.url}`));
+    await listen(target);
+    targets.push(target);
+    agents.push(
+      await startTypeScriptPreviewAgent({
+        relayUrl: address.websocketUrl,
+        token: RELAY_TOKEN,
+        name,
+        targetUrl: `http://127.0.0.1:${target.address().port}`,
+      }),
+    );
+  }
+
+  try {
+    // A tenant origin must not reach another tenant through the path form.
+    const crossTenant = await requestWithHost(
+      `${address.httpUrl}/preview/bob/account`,
+      "alice.preview.example.com",
+    );
+    assert.equal(crossTenant.body, "alice:/preview/bob/account");
+
+    // Hostnames are case-insensitive.
+    const uppercase = await requestWithHost(`${address.httpUrl}/upper`, "BOB.Preview.Example.com");
+    assert.equal(uppercase.body, "bob:/upper");
+
+    // The apex domain and loopback hosts keep the path form.
+    const apex = await requestWithHost(
+      `${address.httpUrl}/preview/bob/apex`,
+      "preview.example.com",
+    );
+    assert.equal(apex.body, "bob:/apex");
+    const loopback = await fetch(`${address.httpUrl}/preview/bob/loopback`);
+    assert.equal(await loopback.text(), "bob:/loopback");
+  } finally {
+    for (const agent of agents) await agent.close();
+    await relay.close();
+    for (const target of targets) await close(target);
+  }
+});
+
 test("aborts the local request when the public visitor disconnects", async () => {
   let markLocalStarted;
   const localStarted = new Promise((resolve) => {

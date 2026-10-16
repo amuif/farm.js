@@ -1211,22 +1211,27 @@ async function requireSession(store: PreviewGatewayStore, sessionId: string, tok
 }
 
 function resolvePublicPreviewRoute(request: Request, url: URL, domain: string) {
-  const pathMatch = url.pathname.match(/^\/__preview\/([^/]+)(\/.*)?$/);
-  if (pathMatch) {
+  const host = (request.headers.get("host") || url.host)
+    .split(":")[0]
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+
+  // Every preview subdomain is its own origin. Honoring the path form there
+  // would let `alice.<domain>/__preview/bob` serve bob's app, cookies, and
+  // scripts on alice's origin, so tenant hosts route only by subdomain.
+  if (host.endsWith(`.${domain}`)) {
     return {
-      name: pathMatch[1],
-      path: pathMatch[2] || "/",
+      name: host.slice(0, -(domain.length + 1)),
+      path: url.pathname || "/",
     };
   }
 
-  const host = (request.headers.get("host") || url.host).split(":")[0];
-  if (!host || host === domain || !host.endsWith(`.${domain}`)) {
-    return undefined;
-  }
-
+  const pathMatch = url.pathname.match(/^\/__preview\/([^/]+)(\/.*)?$/);
+  if (!pathMatch) return undefined;
   return {
-    name: host.slice(0, -(domain.length + 1)),
-    path: url.pathname || "/",
+    name: pathMatch[1],
+    path: pathMatch[2] || "/",
   };
 }
 
@@ -1367,6 +1372,8 @@ function randomId(prefix: string) {
 
 function normalizeDomain(value: string) {
   return value
+    .trim()
+    .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/^\.*/, "")
     .replace(/\/*$/, "");

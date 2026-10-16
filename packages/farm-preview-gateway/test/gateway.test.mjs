@@ -122,6 +122,68 @@ test("proxies a public preview request through the gateway queue", async () => {
   }
 });
 
+test("routes preview subdomains only by host, never by the path form", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const gateway = await createGatewayServer(store);
+  const register = async (name) =>
+    await (
+      await fetch(`${gateway.url}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, localUrl: "http://localhost:4321" }),
+      })
+    ).json();
+  const poll = async (session) => {
+    const response = await fetch(
+      `${gateway.url}/api/sessions/${session.id}/requests?token=${session.token}&wait=200`,
+    );
+    return response.status === 204 ? [] : (await response.json()).requests;
+  };
+  const respond = (session, requestId) =>
+    store.saveResponse(session.id, requestId, {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+      body: Buffer.from(session.name).toString("base64"),
+      encoding: "base64",
+    });
+
+  try {
+    const alice = await register("alice");
+    const bob = await register("bob");
+
+    // A tenant origin must not reach another tenant through the path form.
+    const crossTenant = requestWithHeaders(`${gateway.url}/__preview/bob/account`, {
+      host: "alice.preview.farmjs.dev",
+    });
+    const [aliceRequests, bobRequests] = await Promise.all([poll(alice), poll(bob)]);
+    assert.deepEqual(bobRequests, []);
+    assert.equal(aliceRequests.length, 1);
+    assert.equal(aliceRequests[0].path, "/__preview/bob/account");
+    await respond(alice, aliceRequests[0].id);
+    assert.equal((await crossTenant).body, "alice");
+
+    // Hostnames are case-insensitive.
+    const uppercase = requestWithHeaders(`${gateway.url}/upper`, {
+      host: "BOB.Preview.FarmJS.dev",
+    });
+    const [uppercaseRequest] = await poll(bob);
+    assert.equal(uppercaseRequest.path, "/upper");
+    await respond(bob, uppercaseRequest.id);
+    assert.equal((await uppercase).body, "bob");
+
+    // The apex domain keeps the path form.
+    const apex = requestWithHeaders(`${gateway.url}/__preview/bob/apex`, {
+      host: "preview.farmjs.dev",
+    });
+    const [apexRequest] = await poll(bob);
+    assert.equal(apexRequest.path, "/apex");
+    await respond(bob, apexRequest.id);
+    assert.equal((await apex).body, "bob");
+  } finally {
+    await gateway.close();
+  }
+});
+
 test("rejects oversized agent responses and completes the public request safely", async () => {
   const store = new MemoryPreviewGatewayStore();
   const gateway = await createGatewayServer(store, { maxResponseBodyBytes: 8 });

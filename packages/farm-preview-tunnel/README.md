@@ -39,6 +39,11 @@ const relay = createPersistentPreviewRelay({
 });
 ```
 
+With `publicDomain`, each preview is served from its own subdomain, such as
+`my-preview.preview.example.com`. Requests to a preview subdomain route only by that subdomain, so
+`/preview/<name>` paths are forwarded to that preview's app unchanged. The `/preview/<name>` path form
+is only matched on the apex domain, on loopback or IP hosts, and when no `publicDomain` is set.
+
 Public relays should authorize each agent before allowing it to claim a preview name. The callback can validate a short-lived, name-bound grant and return its absolute expiry; the relay closes that agent route when the grant expires:
 
 ```ts
