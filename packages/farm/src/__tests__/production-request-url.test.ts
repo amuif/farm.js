@@ -84,8 +84,9 @@ describe("production request URL ownership", () => {
       const r = runtime(i18n);
       const response = await r.request(new Request("https://farm.test/base/fr/old?q=original"));
       expect(await response.json()).toEqual({ pathname: "/base/fr/new", search: "?q=rewritten" });
-      // The outer response still negotiates against the original URL, as before.
-      expect(response.headers.get("link")).toContain("</old.md>");
+      // The outer response still negotiates against the original public URL,
+      // basePath and locale included, not the rewrite destination.
+      expect(response.headers.get("link")).toContain("</base/fr/old.md>");
     },
   );
 
