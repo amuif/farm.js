@@ -30,48 +30,53 @@ async function writeModule(root: string, relativePath: string, source: string): 
   await fs.writeFile(filePath, source);
 }
 
-describe("development OpenAPI spec route", () => {
-  it("serves the raw OpenAPI spec as JSON at /openapi.json", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-openapi-"));
-    temporaryRoots.add(root);
+async function startApp(config = ""): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-openapi-"));
+  temporaryRoots.add(root);
 
-    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
-    for (const pkg of ["react", "react-dom"]) {
-      await fs.symlink(
-        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
-        path.join(root, "node_modules", pkg),
-        "junction",
-      );
-    }
-    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
-    // Use a real farm.config.ts so the OpenAPI config (and its specRoute
-    // default of /openapi.json) is resolved, matching how `farm dev` runs.
-    await fs.writeFile(
-      path.join(root, "farm.config.ts"),
-      `export default {
+  await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+  for (const pkg of ["react", "react-dom"]) {
+    await fs.symlink(
+      await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+      path.join(root, "node_modules", pkg),
+      "junction",
+    );
+  }
+  await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+  // Use a real farm.config.ts so the OpenAPI config (and its specRoute
+  // default of /openapi.json) is resolved, matching how `farm dev` runs.
+  await fs.writeFile(
+    path.join(root, "farm.config.ts"),
+    `export default {
   srcDir: "src",
   images: { provider: "none" },
   openapi: { enabled: true, title: "Dev API" },
+  ${config}
 };`,
-    );
-    await writeModule(
-      root,
-      "src/app/layout.tsx",
-      `import React from "react";
+  );
+  await writeModule(
+    root,
+    "src/app/layout.tsx",
+    `import React from "react";
 export default function Layout({ children }) { return <>{children}</>; }`,
-    );
-    await writeModule(
-      root,
-      "src/app/api/health/route.ts",
-      `export function GET() { return Response.json({ ok: true }); }`,
-    );
+  );
+  await writeModule(
+    root,
+    "src/app/api/health/route.ts",
+    `export function GET() { return Response.json({ ok: true }); }`,
+  );
 
-    const server = await createServer({ root });
-    servers.add(server);
-    await server.listen(await getAvailablePort());
-    const address = server.httpServer?.address();
-    if (!address || typeof address === "string") throw new Error("Missing dev server address");
-    const origin = `http://localhost:${address.port}`;
+  const server = await createServer({ root });
+  servers.add(server);
+  await server.listen(await getAvailablePort());
+  const address = server.httpServer?.address();
+  if (!address || typeof address === "string") throw new Error("Missing dev server address");
+  return `http://localhost:${address.port}`;
+}
+
+describe("development OpenAPI spec route", () => {
+  it("serves the raw OpenAPI spec as JSON at /openapi.json", async () => {
+    const origin = await startApp();
 
     const response = await fetch(`${origin}/openapi.json`);
     expect(response.status).toBe(200);
@@ -83,5 +88,18 @@ export default function Layout({ children }) { return <>{children}</>; }`,
     const post = await fetch(`${origin}/openapi.json`, { method: "POST" });
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET, HEAD");
+  }, 30_000);
+
+  it("serves the OpenAPI reference and spec beneath the configured basePath", async () => {
+    const origin = await startApp(`basePath: "/app",`);
+
+    const spec = await fetch(`${origin}/app/openapi.json`);
+    expect(spec.status).toBe(200);
+    expect(spec.headers.get("content-type")).toContain("application/json");
+    expect((await spec.json()).paths["/health"].get.operationId).toBe("get_health");
+
+    const reference = await fetch(`${origin}/app/docs/reference`);
+    expect(reference.status).toBe(200);
+    expect(await reference.text()).toContain("<title>Dev API</title>");
   }, 30_000);
 });

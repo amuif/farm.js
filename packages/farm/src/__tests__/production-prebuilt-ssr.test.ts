@@ -1047,6 +1047,63 @@ export default function Page() {
     }
   }, 120_000);
 
+  it("serves OpenAPI routes and Markdown alternates beneath the configured basePath", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "api", "health"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "health", "route.ts"),
+        `export function GET() { return Response.json({ ok: true }); }`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "admin"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "admin", "page.tsx"),
+        `export default function Admin() { return <main>admin page</main>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          basePath: "/workspace",
+          images: { provider: "none" },
+          telemetry: false,
+          openapi: { enabled: true, title: "Base Path API" },
+          generateBuildId: () => "production-base-path-openapi-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("<title>Base Path API</title>");
+
+          const spec = await fetch(new URL("/workspace/openapi.json", response.url));
+          expect(spec.status).toBe(200);
+          expect((await spec.json()).paths["/health"].get.operationId).toBe("get_health");
+
+          const page = await fetch(new URL("/workspace/admin", response.url), {
+            headers: { accept: "text/html" },
+          });
+          expect(page.status).toBe(200);
+          expect(page.headers.get("link")).toContain("</workspace/admin.md>");
+          expect(await page.text()).toContain('href="/workspace/admin.md"');
+
+          const markdown = await fetch(new URL("/workspace/admin.md", response.url));
+          expect(markdown.status).toBe(200);
+          expect(await markdown.text()).toContain("admin page");
+        },
+        "/workspace/docs/reference",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("reads server env where the server runs instead of storing it in the build output", async () => {
     const root = await createProductionFixture();
     const previous = process.env.FARM_TEST_DATABASE_URL;

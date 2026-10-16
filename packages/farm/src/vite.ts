@@ -50,6 +50,7 @@ import {
   getFarmMarkdownMirrorPath,
   resolveMarkdownMirrorTarget,
 } from "./markdown";
+import { stripFarmBasePath } from "./base-path";
 import { resolveFarmLlmsTxtConfig } from "./llms-txt";
 import { resolveFarmAgentCrawlers } from "./agent-crawlers";
 import {
@@ -1866,12 +1867,16 @@ window.__FARM_MANIFEST__ = ${inlineValue({
             );
           };
 
+          // OpenAPI routes are app routes, so they live beneath the basePath.
+          const openAPIRequestPathname = openAPIManager
+            ? stripFarmBasePath(requestPathname, farmConfig.basePath)
+            : requestPathname;
           // Serve the raw OpenAPI spec as JSON at a predictable URL for agents
           // and API tooling.
           if (
             openAPIManager &&
             options.openapi?.specRoute &&
-            requestPathname === options.openapi.specRoute
+            openAPIRequestPathname === options.openapi.specRoute
           ) {
             if (await runAppMiddlewareForContentRoute()) return;
             if (requestMethod !== "GET" && requestMethod !== "HEAD") {
@@ -1891,7 +1896,7 @@ window.__FARM_MANIFEST__ = ${inlineValue({
           }
 
           // Handle OpenAPI docs route
-          if (openAPIManager && requestPathname === options.openapi?.route) {
+          if (openAPIManager && openAPIRequestPathname === options.openapi?.route) {
             if (await runAppMiddlewareForContentRoute()) return;
             const docsHandler = openAPIManager.getDocsRouteHandler(parsedRequestUrl.origin);
             return docsHandler(req, res);

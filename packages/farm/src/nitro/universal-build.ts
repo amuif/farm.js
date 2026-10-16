@@ -7175,7 +7175,7 @@ function hasLocalRequestRoute(request, routePathname) {
   const pathname = new URL(request.url).pathname;
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     return true;
   }
@@ -7215,7 +7215,7 @@ function getFarmPluginRequestOptions(request) {
   const route = { pathname };
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     return {
       kind: "docs",
@@ -7558,9 +7558,10 @@ async function handleFarmRequest(request, adapterContext) {
     config.md?.enabled
       ? `const pathname = getFarmRoutePathname(requestUrl.pathname);
   if (matchPageRoute(pathname)) {
+    // The Link header advertises the public .md URL, like the head alternate.
     return applyMarkdownNegotiationHeaders(response, {
       config: farmMarkdownConfig,
-      pathname,
+      pathname: requestUrl.pathname,
     });
   }`
       : ""
@@ -7784,7 +7785,7 @@ async function handleFarmRequestInContext(
   if (
     farmOpenAPIReference &&
     farmOpenAPIReference.specRoute &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.specRoute)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.specRoute)
   ) {
     const method = request.method.toUpperCase();
     const specResponse = method === "GET" || method === "HEAD"
@@ -7808,7 +7809,7 @@ async function handleFarmRequestInContext(
 
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     const method = request.method.toUpperCase();
     const response = method === "GET" || method === "HEAD"
