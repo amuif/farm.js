@@ -1,5 +1,7 @@
 // @vitest-environment node
 
+import React, { createElement, Suspense } from "react";
+import { renderToReadableStream } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../config";
 import {
@@ -477,6 +479,93 @@ describe("htmlToMarkdown", () => {
     expect(
       markdown('<main><script>const t = "<div hidden>";</script><div><p>Kept</p></div></main>'),
     ).toBe("Kept\n");
+  });
+
+  it("reads streamed Suspense content in place of its fallback", async () => {
+    const resolved = new Set<string>();
+    function Slow({ id, ms, children }: { id: string; ms: number; children: React.ReactNode }) {
+      if (!resolved.has(id)) {
+        throw new Promise<void>((resolve) =>
+          setTimeout(() => {
+            resolved.add(id);
+            resolve();
+          }, ms),
+        );
+      }
+      return createElement("section", null, children);
+    }
+    const page = createElement(
+      "html",
+      null,
+      createElement(
+        "body",
+        null,
+        createElement(
+          "main",
+          null,
+          createElement("h1", null, "Title"),
+          createElement(
+            Suspense,
+            { fallback: createElement("p", null, "Loading outer...") },
+            createElement(
+              Slow,
+              { id: "outer", ms: 5 },
+              createElement("p", null, "Outer content"),
+              createElement(
+                Suspense,
+                { fallback: createElement("p", null, "Loading inner...") },
+                createElement(Slow, { id: "inner", ms: 30 }, createElement("p", null, "Inner")),
+              ),
+            ),
+          ),
+          createElement("p", null, "After"),
+        ),
+      ),
+    );
+    const html = await new Response(await renderToReadableStream(page)).text();
+    expect(html).toContain('<div hidden id="S:');
+
+    expect(htmlToMarkdown(html, { includeMetadata: false })).toBe(
+      "# Title\n\nOuter content\n\nInner\n\nAfter\n",
+    );
+  });
+
+  it("pairs streamed segments by React's instructions, not by matching numbers", () => {
+    const html =
+      '<main><!--$?--><template id="B:0"></template><p>Loading</p><!--/$--><p>Tail</p></main>' +
+      '<div hidden id="S:0"><p>Wrong segment</p></div>' +
+      '<div hidden id="S:1"><p>Ready <template id="P:2"></template></p></div>' +
+      '<div hidden id="S:2">now</div>' +
+      '<script>$RS("S:2","P:2")</script><script>$RC("B:0","S:1")</script>';
+
+    expect(htmlToMarkdown(html, { includeMetadata: false })).toBe("Ready now\n\nTail\n");
+    // Without an instruction, the fallback stays and hidden segments stay out.
+    expect(
+      htmlToMarkdown(html.replace(/<script>[^<]*<\/script>/g, ""), { includeMetadata: false }),
+    ).toBe("Loading\n\nTail\n");
+  });
+
+  it("removes many hidden elements in work that grows linearly with the page", () => {
+    const regexpExec = RegExp.prototype.exec;
+    const countExecs = (count: number) => {
+      const html = `<main>${Array.from({ length: count }, (_, index) => `<div hidden><p>v${index}</p>`).join("")}</main>`;
+      let calls = 0;
+      RegExp.prototype.exec = function (this: RegExp, input: string) {
+        calls += 1;
+        return regexpExec.call(this, input);
+      };
+      try {
+        htmlToMarkdown(html, { includeMetadata: false });
+      } finally {
+        RegExp.prototype.exec = regexpExec;
+      }
+      return calls;
+    };
+
+    const small = countExecs(500);
+    const large = countExecs(2000);
+    // Four times the elements: about four times the regex steps, not sixteen.
+    expect(large / small).toBeLessThan(5);
   });
 
   it("keeps content that is only described as hidden, or can be revealed", () => {
