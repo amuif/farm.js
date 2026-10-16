@@ -2,28 +2,66 @@ import { describe, expect, it, vi } from "vitest";
 import { FarmDataCache } from "../cache";
 
 describe("cache invalidation pruning", () => {
-  it("stops reading entries at the first stale dependency without materializing the cache", () => {
-    const cache = new FarmDataCache();
-    cache.set("stale", "old", { tags: ["products"] });
-    for (let index = 0; index < 1_000; index++) cache.set(`other-${index}`, index);
-    cache.revalidateTag("products");
+  it("never scans the whole cache when invalidating per-item tags or writing", () => {
+    const cache = new FarmDataCache({ maxEntries: 2_048 });
+    for (let index = 0; index < 1_024; index++) {
+      cache.set(`item-${index}`, index, { tags: [`item:${index}`] });
+    }
     const entries = (cache as any).entries as Map<string, unknown>;
-    const values = entries.values.bind(entries);
+    const versions = (cache as any).invalidatedTagVersions as Map<string, number>;
+    let scans = 0;
+    const spies = [entries, versions].flatMap((map) =>
+      (["values", "keys", "entries", Symbol.iterator, "forEach"] as const).map((method) => {
+        const original = (map as any)[method].bind(map);
+        return vi.spyOn(map as any, method as any).mockImplementation((...args: unknown[]) => {
+          scans++;
+          return original(...args);
+        });
+      }),
+    );
+    try {
+      for (let index = 0; index < 1_024; index++) {
+        expect(cache.revalidateTag(`item:${index}`)).toBe(1);
+      }
+      cache.set("unrelated", "new");
+      cache.set("item-0", "fresh", { tags: ["item:0"] });
+      cache.delete("item-1");
+      expect(scans).toBe(0);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    expect(versions.size).toBe(1_022);
+    expect(versions.has("item:0")).toBe(false);
+    expect(versions.has("item:1")).toBe(false);
+    expect(cache.get("item-0")).toBe("fresh");
+    expect(cache.get("item-2")).toBeUndefined();
+    expect(cache.get("item-2", { allowStale: true })).toBe(2);
+  });
+
+  it("stops reading a tag's entries at the first stale dependency", () => {
+    const cache = new FarmDataCache();
+    for (let index = 0; index < 1_000; index++) {
+      cache.set(`stale-${index}`, index, { tags: ["products"] });
+    }
+    cache.revalidateTag("products");
+    const tagged = (cache as any).entriesByTag.get("products") as Set<unknown>;
+    const iterate = tagged[Symbol.iterator].bind(tagged);
     let reads = 0;
-    const spy = vi.spyOn(entries, "values").mockImplementation(function* () {
-      for (const entry of values()) {
+    const spy = vi.spyOn(tagged, Symbol.iterator).mockImplementation(function* () {
+      for (const entry of iterate()) {
         reads++;
         yield entry;
       }
-    } as typeof entries.values);
+    } as (typeof tagged)[typeof Symbol.iterator]);
     try {
-      cache.set("unrelated", "new");
+      cache.delete("stale-0");
       expect(reads).toBe(1);
     } finally {
       spy.mockRestore();
     }
-    expect(cache.get("stale")).toBeUndefined();
-    expect(cache.get("stale", { allowStale: true })).toBe("old");
+    expect((cache as any).invalidatedTagVersions.has("products")).toBe(true);
+    expect(cache.get("stale-1")).toBeUndefined();
+    expect(cache.get("stale-1", { allowStale: true })).toBe(1);
   });
 
   it("stops reading active generations once an invalidated fill is found", async () => {
@@ -51,7 +89,6 @@ describe("cache invalidation pruning", () => {
     const generations = (cache as any).activeGenerations as Set<unknown>;
     await ready;
     expect(generations.size).toBe(10);
-    cache.revalidateTag("products");
     const iterate = generations[Symbol.iterator].bind(generations);
     let reads = 0;
     const spy = vi.spyOn(generations, Symbol.iterator).mockImplementation(function* () {
@@ -61,7 +98,7 @@ describe("cache invalidation pruning", () => {
       }
     } as (typeof generations)[typeof Symbol.iterator]);
     try {
-      cache.set("unrelated", "new");
+      cache.revalidateTag("products");
       expect(reads).toBe(1);
     } finally {
       spy.mockRestore();
