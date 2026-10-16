@@ -76,6 +76,7 @@ import {
   stripFarmLocaleFromPathname,
 } from "../i18n/routing";
 import type { ResolvedFarmI18nConfig } from "../i18n/types";
+import { stripFarmBasePath } from "../base-path";
 import { appendFarmRedirectQuery } from "../redirect-query";
 import { createRouteSlotContainerId, parseRouteSlotFile } from "./route-slots";
 import { getFarmRendererComponentExtensions } from "../renderer";
@@ -1434,7 +1435,10 @@ export class RouteManager {
 
   private toRoutePathname(pathname: string): string {
     const i18n = this.getI18nConfig();
-    return i18n ? stripFarmLocaleFromPathname(pathname, i18n) : pathname;
+    // Locale stripping removes the basePath too; production strips it the same way.
+    return i18n
+      ? stripFarmLocaleFromPathname(pathname, i18n)
+      : stripFarmBasePath(pathname, this.config.basePath);
   }
 
   private localizeRedirectDestination(destination: string, locale?: string): string {
