@@ -1,4 +1,6 @@
+import path from "node:path";
 import { defineConfig, type Options } from "tsup";
+import { restoreDynamicImportsInDirectory } from "./scripts/restore-cjs-dynamic-imports";
 
 const entry = {
   index: "src/index.ts",
@@ -124,6 +126,10 @@ export const farmPackageBuildOptions = {
   },
   outExtension({ format }) {
     return { js: format === "cjs" ? ".cjs" : ".mjs" };
+  },
+  // Splitting converts CommonJS dynamic imports to require(); restore import().
+  async onSuccess() {
+    await restoreDynamicImportsInDirectory(path.join(process.cwd(), "dist"));
   },
 } satisfies Options;
 
