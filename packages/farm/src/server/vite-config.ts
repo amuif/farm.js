@@ -164,3 +164,88 @@ export function mergeFarmViteConfig(
     },
   };
 }
+
+type ViteExternal = NonNullable<NonNullable<ViteUserConfig["ssr"]>["external"]>;
+
+function mergeExternal(
+  farmValue: ViteExternal | undefined,
+  userValue: ViteExternal | undefined,
+): ViteExternal | undefined {
+  if (farmValue === undefined) return userValue;
+  if (userValue === undefined) return farmValue;
+  if (farmValue === true || userValue === true) return true;
+  return Array.from(new Set([...farmValue, ...userValue]));
+}
+
+/**
+ * Merge the app's `vite` config into a production client or server build the
+ * way development merges it, keeping the options Farm owns for that build:
+ * `root`, `base`, `mode`, `appType`, `publicDir`, the build's
+ * output location and format (`outDir`, `emptyOutDir`, `ssr`, `ssrEmitAssets`,
+ * `write`, `lib`, `watch`, `rollupOptions.input`, `rollupOptions.output`), and
+ * every `build`, `define`, `esbuild`, and Rollup option Farm sets explicitly.
+ *
+ * App plugins are left out: the caller places `vite.plugins` among Farm's own
+ * plugins so their order relative to Farm's transforms stays stable.
+ */
+export function mergeFarmProductionViteConfig(
+  farmConfig: ViteUserConfig,
+  userConfig: ViteUserConfig = {},
+): ViteUserConfig {
+  const {
+    plugins: _plugins,
+    root: _root,
+    base: _base,
+    mode: _mode,
+    appType: _appType,
+    publicDir: _publicDir,
+    build: userBuild = {},
+    css: userCss,
+    define: userDefine,
+    esbuild: userEsbuild,
+    ...shared
+  } = userConfig;
+  const {
+    outDir: _outDir,
+    emptyOutDir: _emptyOutDir,
+    ssr: _ssr,
+    ssrEmitAssets: _ssrEmitAssets,
+    write: _write,
+    lib: _lib,
+    watch: _watch,
+    rollupOptions: userRollupOptions,
+    rolldownOptions: userRolldownOptions,
+    ...userBuildOptions
+  } = userBuild;
+  const {
+    input: _input,
+    output: _output,
+    ...userBundlerOptions
+  } = {
+    ...userRollupOptions,
+    ...userRolldownOptions,
+  } as NonNullable<ViteUserConfig["build"]>["rollupOptions"] & object;
+  const merged = mergeFarmViteConfig(farmConfig, shared);
+
+  return {
+    ...merged,
+    build: {
+      ...userBuildOptions,
+      ...farmConfig.build,
+      rollupOptions: {
+        ...userBundlerOptions,
+        ...farmConfig.build?.rollupOptions,
+      },
+    },
+    css: farmConfig.css || userCss ? { ...farmConfig.css, ...userCss } : undefined,
+    define: farmConfig.define || userDefine ? { ...userDefine, ...farmConfig.define } : undefined,
+    esbuild:
+      typeof userEsbuild === "object" && farmConfig.esbuild !== false
+        ? { ...userEsbuild, ...farmConfig.esbuild }
+        : (farmConfig.esbuild ?? userEsbuild),
+    ssr: {
+      ...merged.ssr,
+      external: mergeExternal(farmConfig.ssr?.external, userConfig.ssr?.external),
+    },
+  };
+}

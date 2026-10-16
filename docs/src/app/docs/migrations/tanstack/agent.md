@@ -63,9 +63,9 @@ the TanStack devtools plugin. Farm's React renderer adds no `@vitejs/plugin-reac
 plugin breaks hydration on every route with "@vitejs/plugin-react can't detect preamble".
 
 1. Delete `vite.config.ts` (or move it out of the project root for reference).
-2. Move only options you still need into `farm.config.ts` under `vite`. In `farm dev` the whole
-   `vite` object is merged; in `farm build` only `vite.plugins` is applied, so do not rely on
-   `vite.resolve` or other keys for production.
+2. Move only options you still need into `farm.config.ts` under `vite`. The `vite` object is
+   merged in `farm dev` and in both `farm build` passes, except the build options Farm owns (see
+   `/docs/configuration#vite-config`).
 3. Never re-add `tanstackStart()`, `@vitejs/plugin-react`, the TanStack devtools Vite plugin,
    Nitro or hosting Vite plugins, or `@tailwindcss/vite` (Farm enables Tailwind itself).
 4. `resolve: { tsconfigPaths: true }` is not needed for the starter: Farm aliases `@/` to the

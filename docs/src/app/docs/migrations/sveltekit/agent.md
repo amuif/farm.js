@@ -125,8 +125,8 @@ Keep the SvelteKit scripts under other names (for example `"dev:kit": "vite dev 
 
 Farm aliases `@/` to the source directory (`src`) in dev and production builds. Replace every
 `$lib/` import with `@/lib/` (for example with a project-wide find and replace). A custom alias in
-`farm.config.ts` `vite.resolve.alias` reaches `farm dev` only: the production client and SSR builds
-read `vite.plugins` from `farm.config.ts` and nothing else from that block.
+`farm.config.ts` `vite.resolve.alias` applies to `farm dev` and to the production client and SSR
+builds.
 
 Gate: `pnpm exec farm generate` succeeds and writes `src/farm.d.ts`.
 

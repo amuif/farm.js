@@ -23,7 +23,7 @@ import {
   resolveFarmClientCacheAdapterEntry,
   type ClientCachePersistenceEntryCode,
 } from "../client-cache-persistence-build";
-import type { Rollup } from "vite";
+import type { Rollup, UserConfig as ViteUserConfig } from "vite";
 import os from "os";
 import path from "path";
 import { constants as fsConstants, existsSync, readFileSync, realpathSync } from "fs";
@@ -101,7 +101,7 @@ import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build
 import { adaptTailwindVitePlugin } from "../build/vite-plugin-compat";
 import { mergeFarmFontCss } from "../font-vite";
 import type { FarmIslandStrategy } from "../island";
-import { createFarmSourceAlias } from "../server/vite-config";
+import { createFarmSourceAlias, mergeFarmProductionViteConfig } from "../server/vite-config";
 import { DEFAULT_NOT_FOUND_STYLES } from "../components/not-found-styles";
 import { createFarmThemeCssPlugin } from "../theme/vite";
 import { resolveFarmInstrumentationFile } from "../instrumentation";
@@ -1723,7 +1723,7 @@ async function buildClient(
   }
 
   try {
-    await viteBuild({
+    const clientViteConfig: ViteUserConfig = {
       root,
       // Vite otherwise falls back to <root>/public, silently dropping every
       // asset in a custom config.publicDir from the production client output.
@@ -1891,7 +1891,9 @@ async function buildClient(
           "@farm.js/core/headers",
         ],
       },
-    });
+    };
+    // The app's `vite` block applies to production as it does in development.
+    await viteBuild(mergeFarmProductionViteConfig(clientViteConfig, config.vite));
     await mergeBuiltFontCss(outputDir);
     await validateClientBuildOutput(root, srcDir, outputDir);
   } finally {
@@ -4432,7 +4434,7 @@ async function buildSSRInMemory(
       ];
 
   try {
-    await viteBuild({
+    const serverViteConfig: ViteUserConfig = {
       root,
       build: {
         target: "esnext",
@@ -4609,7 +4611,8 @@ async function buildSSRInMemory(
         // Route modules and the renderer adapter must share one runtime instance.
         dedupe: [...(config.renderer.dedupe || [])],
       },
-    });
+    };
+    await viteBuild(mergeFarmProductionViteConfig(serverViteConfig, config.vite));
   } finally {
     if (postcssConfigDir) {
       try {

@@ -952,6 +952,101 @@ export default function Page() {
     }
   }, 120_000);
 
+  it("applies the app's vite config to the client and server builds", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "vendor"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "vendor", "user-alias-target.ts"),
+        `export const aliasedLabel = "user alias resolved";`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "marker.module.css"),
+        `.title { color: rgb(1, 2, 3); }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "user-vite-marker.tsx"),
+        `
+"use client";
+
+import { aliasedLabel } from "user-vite-alias";
+import styles from "./marker.module.css";
+
+declare const __USER_VITE_FLAG__: string;
+
+export default function UserViteMarker() {
+  return <p className={styles.title} data-user-vite={__USER_VITE_FLAG__}>{aliasedLabel}</p>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import UserViteMarker from "./user-vite-marker";
+
+export default function Page() {
+  return <main>prebuilt SSR output <UserViteMarker /></main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-user-vite-config-test",
+          vite: {
+            define: { __USER_VITE_FLAG__: JSON.stringify("user-define-applied") },
+            resolve: {
+              alias: { "user-vite-alias": path.join(root, "vendor", "user-alias-target.ts") },
+            },
+            css: { modules: { generateScopedName: "user-vite-[local]" } },
+            // Options Farm owns for the production output stay under Farm's control.
+            root: path.join(root, "elsewhere"),
+            base: "/elsewhere/",
+            mode: "development",
+            build: {
+              outDir: "elsewhere",
+              emptyOutDir: false,
+              ssr: true,
+              write: false,
+              rollupOptions: {
+                input: "missing-entry.js",
+                output: { format: "cjs", entryFileNames: "elsewhere.js" },
+              },
+            },
+          },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      const clientJavaScript = await readAllClientJavaScript(root);
+      expect(clientJavaScript).toContain("user-define-applied");
+      expect(clientJavaScript).toContain("user alias resolved");
+      expect(clientJavaScript).not.toContain("__USER_VITE_FLAG__");
+      expect(
+        await fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
+      ).toContain(".user-vite-title");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toContain('data-user-vite="user-define-applied"');
+          expect(html).toContain("user alias resolved");
+          expect(html).toContain('class="user-vite-title"');
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("reads server env where the server runs instead of storing it in the build output", async () => {
     const root = await createProductionFixture();
     const previous = process.env.FARM_TEST_DATABASE_URL;
