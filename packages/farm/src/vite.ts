@@ -3744,15 +3744,17 @@ function generateProgrammaticRouteModule(
   }
 
   return `
-import {
-  createElement as __farmCreateElement,
-  Suspense as __farmSuspense,
-} from ${JSON.stringify(renderer.server)};
+import * as __farmRendererRuntime from ${JSON.stringify(renderer.server)};
 import {
   createLayoutModuleFromProgrammaticLayout as __farmCreateLayoutRouteModule,
   createRouteModuleFromProgrammaticPage as __farmCreatePageRouteModule,
 } from "@farm.js/core/routes";
 import * as __farmRoutesModule from ${JSON.stringify(routeFile)};
+
+const __farmCreateElement = __farmRendererRuntime.createElement;
+const __farmSuspense = __farmRendererRuntime.Suspense;
+// Optional hook: only renderers that need it export markFunctionComponent.
+const __farmMarkFunctionComponent = Reflect.get(__farmRendererRuntime, "markFunctionComponent");
 
 const __farmIsRouteDefinition = (value) => (
   value &&
@@ -3807,6 +3809,7 @@ const __farmRouteModule = __farmRoute.kind === "layout"
   : __farmCreatePageRouteModule(__farmRoute, {
       createElement: __farmCreateElement,
       Suspense: __farmSuspense,
+      markFunctionComponent: __farmMarkFunctionComponent,
     });
 
 export const metadata = __farmRouteModule.metadata;

@@ -974,7 +974,10 @@ export function parseProgrammaticRoutePath(
 
 export function createRouteModuleFromProgrammaticPage(
   route: ProgrammaticPageRoute,
-  rendererRuntime?: Pick<FarmServerRendererRuntime, "createElement" | "Suspense">,
+  rendererRuntime?: Pick<
+    FarmServerRendererRuntime,
+    "createElement" | "Suspense" | "markFunctionComponent"
+  >,
 ): RouteModule {
   const mod: RouteModule = {
     default: createProgrammaticPageComponent(route, rendererRuntime),
@@ -1060,7 +1063,10 @@ export function scanProgrammaticPagePaths(source: string): string[] {
 
 function createProgrammaticPageComponent(
   route: ProgrammaticPageRoute,
-  rendererRuntime?: Pick<FarmServerRendererRuntime, "createElement" | "Suspense">,
+  rendererRuntime?: Pick<
+    FarmServerRendererRuntime,
+    "createElement" | "Suspense" | "markFunctionComponent"
+  >,
 ): ComponentType<PageProps> {
   if (
     !route.params &&
@@ -1082,6 +1088,10 @@ function createProgrammaticPageComponent(
     }
     return rendererRuntime.createElement(...args);
   };
+  // These wrappers return a Farm element tree, so a renderer that cannot tell
+  // them from its own function components needs them marked.
+  const markFunctionComponent = <T>(component: T): T =>
+    rendererRuntime?.markFunctionComponent?.(component) ?? component;
   const Component = route.component;
 
   if (route.pending) {
@@ -1107,7 +1117,9 @@ function createProgrammaticPageComponent(
         throw error;
       }
     };
-    const PageContent = FarmProgrammaticPageContent as unknown as ComponentType<PageProps>;
+    const PageContent = markFunctionComponent(
+      FarmProgrammaticPageContent,
+    ) as unknown as ComponentType<PageProps>;
     const FarmProgrammaticPage = function FarmProgrammaticPage(props: PageProps) {
       return createElement(
         rendererRuntime!.Suspense,
@@ -1118,7 +1130,7 @@ function createProgrammaticPageComponent(
       );
     };
 
-    return FarmProgrammaticPage as unknown as ComponentType<PageProps>;
+    return markFunctionComponent(FarmProgrammaticPage) as unknown as ComponentType<PageProps>;
   }
 
   const FarmProgrammaticPageContent = async function FarmProgrammaticPageContent(props: PageProps) {
@@ -1145,7 +1157,7 @@ function createProgrammaticPageComponent(
     }
   };
 
-  return FarmProgrammaticPageContent as unknown as ComponentType<PageProps>;
+  return markFunctionComponent(FarmProgrammaticPageContent) as unknown as ComponentType<PageProps>;
 }
 
 type ProgrammaticRoutePropsResource =

@@ -881,6 +881,50 @@ describe("programmatic routes", () => {
     expect(resolvedContent.type).toBe(ProductPage);
     expect(resolvedContent.props.data).toBe(resolvedProps.data);
   });
+
+  it("marks its wrapper components for renderers that tell them apart from their own", () => {
+    const marked = new WeakSet<object>();
+    const runtime = {
+      ...createTestRendererRuntime(),
+      markFunctionComponent<T>(component: T): T {
+        marked.add(component as object);
+        return component;
+      },
+    };
+    function ProductPage() {
+      return null;
+    }
+    function Pending() {
+      return null;
+    }
+
+    const plain = createRouteModuleFromProgrammaticPage(
+      createRoute("/plain", { component: ProductPage as any }),
+      runtime,
+    );
+    expect(plain.default).toBe(ProductPage);
+    expect(marked.has(ProductPage)).toBe(false);
+
+    const withData = createRouteModuleFromProgrammaticPage(
+      createRoute("/data", { data: { main: async () => ({}) }, component: ProductPage as any }),
+      runtime,
+    );
+    expect(marked.has(withData.default as object)).toBe(true);
+
+    const withPending = createRouteModuleFromProgrammaticPage(
+      createRoute("/pending", {
+        data: { main: async () => ({}) },
+        pending: Pending,
+        component: ProductPage as any,
+      }),
+      runtime,
+    );
+    const Page = withPending.default as any;
+    expect(marked.has(Page)).toBe(true);
+    const boundary = Page({ params: {}, searchParams: Promise.resolve({}), path: "/pending" });
+    expect(marked.has(boundary.props.children.type)).toBe(true);
+    expect(marked.has(Pending)).toBe(false);
+  });
 });
 
 function createRouteModuleFromProgrammaticPageForTest(

@@ -12,10 +12,11 @@ import VueCompat, {
   ErrorBoundary,
   createElement,
   isValidElement,
+  markFunctionComponent,
   materializeVueElement,
 } from "./runtime";
 
-export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement };
+export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement, markFunctionComponent };
 
 export interface FarmVueRoot {
   render(element: unknown): void;

@@ -5,13 +5,14 @@ import {
   defineRendererDescriptorConformance,
   defineRendererServerConformance,
 } from "@farm.js/renderer-tests";
-import { defineComponent, h } from "vue";
+import { defineComponent, h, type FunctionalComponent } from "vue";
 import { describe, expect, it } from "vitest";
 import { vue } from "../index";
 import * as serverRuntime from "../server";
 import {
   createElement,
   generateHydrationScript,
+  markFunctionComponent,
   renderToPipeableStream,
   renderToReadableStream,
   renderToString,
@@ -83,8 +84,9 @@ describe("Vue renderer", () => {
   });
 
   it("materializes plain function components before handing them to Vue", async () => {
-    const Layout = ({ children }: { children?: unknown }) =>
-      createElement("section", { class: "function-layout" }, children);
+    const Layout = markFunctionComponent(({ children }: { children?: unknown }) =>
+      createElement("section", { class: "function-layout" }, children),
+    );
 
     const html = await renderToString(
       createElement(Layout, { children: createElement("p", null, "Function route") }),
@@ -94,11 +96,28 @@ describe("Vue renderer", () => {
   });
 
   it("reports async function components instead of rendering a promise", async () => {
-    const AsyncComponent = async () => createElement("p", null, "not supported");
+    const AsyncComponent = markFunctionComponent(async () =>
+      createElement("p", null, "not supported"),
+    );
 
     await expect(renderToString(createElement(AsyncComponent, null))).rejects.toThrow(
       "does not support async function components",
     );
+  });
+
+  it("renders native Vue functional components with their slots and attrs", async () => {
+    const Emphasis: FunctionalComponent = (_props, ctx) =>
+      h("em", ctx.attrs, ctx.slots.default?.());
+
+    const html = await renderToString(
+      createElement(
+        Emphasis,
+        { className: "native", "data-kind": "functional" },
+        createElement("span", null, "slotted"),
+      ),
+    );
+
+    expect(html).toContain('<em data-kind="functional" class="native"><span>slotted</span></em>');
   });
 
   it("reports a render error as a shell error", async () => {
