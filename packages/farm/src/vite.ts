@@ -1132,8 +1132,8 @@ export function farmPlugin(
 
       farmApp = new FarmApp(
         {
-          root: server.config.root,
           ...options,
+          root: resolveDevelopmentRoot(options.root, server.config.root),
         },
         server,
       );
@@ -3701,6 +3701,25 @@ function runFarmMiddlewareWithNavigation(
       throw error;
     }
   });
+}
+
+/**
+ * Vite 8.2+ resolves its root through symlinks, so watcher events, module ids
+ * and `server.config.root` use the real path. Keep Farm on the same spelling
+ * when both name one directory, or source-root checks and route URLs diverge.
+ */
+function resolveDevelopmentRoot(farmRoot: string | undefined, viteRoot: string): string {
+  if (!farmRoot) return viteRoot;
+  // Same directory spelled with native separators: keep Farm's spelling.
+  if (path.resolve(farmRoot) === path.resolve(viteRoot)) return farmRoot;
+  try {
+    if (fs.realpathSync(farmRoot) === fs.realpathSync(viteRoot)) {
+      return path.resolve(viteRoot);
+    }
+  } catch {
+    // A missing root fails later with Farm's own error.
+  }
+  return farmRoot;
 }
 
 function isFarmClientVirtualId(id: string): boolean {

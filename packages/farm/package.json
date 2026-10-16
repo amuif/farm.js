@@ -712,7 +712,7 @@
     "supports-color": "^10.2.2",
     "tailwindcss": "4.3.3",
     "unstorage": "2.0.0-alpha.10",
-    "vite": "8.1.5",
+    "vite": "8.3.4",
     "zod": "^4.1.12"
   },
   "devDependencies": {

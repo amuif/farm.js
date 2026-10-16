@@ -25,7 +25,9 @@ afterEach(async () => {
 });
 
 async function createProject(): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-client-entry-hmr-"));
+  const root = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "farm-client-entry-hmr-")),
+  );
   temporaryRoots.add(root);
 
   await fs.mkdir(path.join(root, "node_modules", "@farm.js"), { recursive: true });
@@ -54,6 +56,14 @@ export default function Layout({ children }) {
   );
 
   return root;
+}
+
+/** Serve the project through a directory symlink, as Vite still reports real paths. */
+async function linkProject(root: string): Promise<string> {
+  const link = `${root}-link`;
+  await fs.symlink(root, link, "junction");
+  temporaryRoots.add(link);
+  return link;
 }
 
 describe("development client entry HMR teardown", () => {
@@ -102,8 +112,10 @@ export { Counter };`,
 export default async function Page() { return <Counter />; }`,
     );
 
+    // Vite 8.2+ resolves its root through symlinks; Farm must follow it or
+    // the hot update below never matches the source root it planned from.
     const server = await createServer({
-      root,
+      root: await linkProject(root),
       images: { provider: "none" },
       vite: { optimizeDeps: { noDiscovery: true, include: [] } },
     } as never);
