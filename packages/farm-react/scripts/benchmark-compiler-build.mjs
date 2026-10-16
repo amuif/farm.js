@@ -1,16 +1,30 @@
 // Build core, CLI and React first. Node 24+ (registerHooks), no public cache flag.
 // Runs real Farm builds sequentially; the baseline disables only build reuse.
+// With BASE_REF=<ref>, keep reuse enabled and compare that revision's compiler
+// source against the working-tree compiler, with all other build code fixed.
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cpus, loadavg, release, tmpdir } from "node:os";
 
 if (process.env.FARM_CACHE_BENCH_CHILD) {
+  // Load in both variants so diagnostic setup overhead is symmetrical.
+  const comparedCompilers = process.env.FARM_COMPILER_BASELINE
+    ? await Promise.all(
+        [process.env.FARM_COMPILER_BASELINE, process.env.FARM_COMPILER_CANDIDATE].map(
+          (path) => import(pathToFileURL(path).href),
+        ),
+      )
+    : undefined;
+  globalThis.__farmComparedCompile =
+    comparedCompilers?.[
+      process.env.FARM_CACHE_BENCH_CHILD === "baseline" ? 0 : 1
+    ].compileReactModule;
   const stats = { compiles: 0, transforms: 0, scopes: [], loaded: [] };
   globalThis.__farmBuildCacheProbe = stats;
   registerHooks({
@@ -22,7 +36,10 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
       const replacements = [
         [
           "async function compileReactModule(code, id, options) {",
-          "async function compileReactModule(code, id, options) { globalThis.__farmBuildCacheProbe.compiles++;",
+          "async function compileReactModule(code, id, options) { globalThis.__farmBuildCacheProbe.compiles++;" +
+            (comparedCompilers
+              ? " return globalThis.__farmComparedCompile(code, id, options);"
+              : ""),
         ],
         [
           "const cache = options.buildLifetime",
@@ -33,7 +50,7 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
           "dispose() { globalThis.__farmBuildCacheProbe.scopes.push({ entries: this.size, bytes: this.retainedBytes });",
         ],
       ];
-      if (process.env.FARM_CACHE_BENCH_CHILD === "baseline")
+      if (!comparedCompilers && process.env.FARM_CACHE_BENCH_CHILD === "baseline")
         replacements.push([
           "function createFarmRendererPlugin(options = {}) {",
           "function createFarmRendererPlugin(options = {}) { options = {...options, buildLifetime: undefined};",
@@ -54,6 +71,40 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
   const output = await mkdtemp(join(tmpdir(), "farm-compiler-build-bench-"));
   const pairs = Number(process.env.PAIRS || 5);
   assert(Number.isInteger(pairs) && pairs >= 3 && pairs <= 20, "PAIRS must be 3–20");
+  let baselineCompilerPath;
+  let candidateCompilerPath;
+  if (process.env.BASE_REF) {
+    const source = execFileSync(
+      "git",
+      ["show", `${process.env.BASE_REF}:packages/farm-react/src/compiler.ts`],
+      { cwd: workspace, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+    );
+    const require = createRequire(join(workspace, "packages/farm-react/package.json"));
+    const { transformWithEsbuild } = require("vite");
+    baselineCompilerPath = join(output, "baseline-compiler.mjs");
+    candidateCompilerPath = join(output, "candidate-compiler.mjs");
+    for (const [compilerSource, compilerPath] of [
+      [source, baselineCompilerPath],
+      [
+        await readFile(join(workspace, "packages/farm-react/src/compiler.ts"), "utf8"),
+        candidateCompilerPath,
+      ],
+    ]) {
+      const transformed = await transformWithEsbuild(compilerSource, "compiler.ts", {
+        loader: "ts",
+        target: "esnext",
+      });
+      const importPattern = /(["'])@babel\/core\1/g;
+      assert.equal([...transformed.code.matchAll(importPattern)].length, 1);
+      await writeFile(
+        compilerPath,
+        transformed.code.replace(
+          importPattern,
+          JSON.stringify(pathToFileURL(require.resolve("@babel/core")).href),
+        ),
+      );
+    }
+  }
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   // Farm gives its generated client entry a fresh mkdtemp suffix per build.
   // Normalize only that filename in the comparison, never report contents.
@@ -83,6 +134,7 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
     cpu: cpus()[0].model,
     os: release(),
     pairs,
+    baselineCompilerRef: process.env.BASE_REF || null,
     output,
     apps: {},
   };
@@ -113,6 +165,8 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
               FARM_VITE_BUILDER: "rolldown",
               FARM_CACHE_BENCH_CHILD: mode,
               FARM_CACHE_BENCH_STATS: statsPath,
+              FARM_COMPILER_BASELINE: baselineCompilerPath || "",
+              FARM_COMPILER_CANDIDATE: candidateCompilerPath || "",
             },
             stdio: ["ignore", "pipe", "pipe"],
           },
@@ -133,7 +187,7 @@ if (process.env.FARM_CACHE_BENCH_CHILD) {
         assert.equal(code, 0, `Build failed: ${label}\n${log.slice(-3000)}`);
         const stats = JSON.parse(await readFile(statsPath, "utf8"));
         assert(stats.loaded.length > 0 && stats.compiles > 0, "Probe did not observe compilation");
-        if (mode === "candidate")
+        if (mode === "candidate" || baselineCompilerPath)
           assert(
             stats.compiles < stats.transforms && stats.scopes.length === 1,
             "No cross-graph reuse/disposal",
