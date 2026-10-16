@@ -1,6 +1,6 @@
 import type { FarmSchemaExtension } from "./schema-extend";
+import { fitSqlIndexName } from "./schema-sql-identifiers";
 import {
-  fitSqlIndexName,
   generateSqlStatements,
   getSqlColumnType,
   getSqlDefaultExpression,
