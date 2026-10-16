@@ -1822,6 +1822,9 @@ export function createFarmDocsHandler(
     const page = loadPage(contentDir, docs, request);
     if (!page) return null;
 
+    // A docs page URL serves Markdown or HTML depending on Accept, so shared caches
+    // must key it on Accept. An explicit .md URL always returns Markdown.
+    const negotiatesAccept = !requestUrl.pathname.endsWith(".md");
     if (shouldReturnMarkdown(request)) {
       const origin = new URL(request.url).origin;
       return omitFarmDocsHeadBody(
@@ -1837,6 +1840,7 @@ export function createFarmDocsHandler(
             headers: {
               "Content-Type": "text/markdown; charset=utf-8",
               "Cache-Control": "public, max-age=60",
+              ...(negotiatesAccept ? { Vary: "Accept" } : {}),
             },
           },
         ),
@@ -1870,6 +1874,7 @@ export function createFarmDocsHandler(
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+            Vary: "Accept",
             ...(fontPreloadHeader ? { Link: fontPreloadHeader } : {}),
           },
         },

@@ -796,6 +796,26 @@ describe("createFarmDocsHandler", () => {
     await expect(response?.text()).resolves.toContain("Use `farm dev` to start.");
   });
 
+  it("varies negotiated docs pages on Accept but not explicit markdown URLs", async () => {
+    const { root, docs } = await createDocsFixture();
+    const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
+
+    const html = await handler(new Request("http://farm.test/docs/guide"));
+    expect(html?.headers.get("content-type")).toContain("text/html");
+    expect(html?.headers.get("cache-control")).toContain("public");
+    expect(html?.headers.get("vary")).toBe("Accept");
+
+    const negotiated = await handler(
+      new Request("http://farm.test/docs/guide", { headers: { Accept: "text/markdown" } }),
+    );
+    expect(negotiated?.headers.get("content-type")).toContain("text/markdown");
+    expect(negotiated?.headers.get("vary")).toBe("Accept");
+
+    const explicit = await handler(new Request("http://farm.test/docs/guide.md"));
+    expect(explicit?.headers.get("content-type")).toContain("text/markdown");
+    expect(explicit?.headers.get("vary")).toBeNull();
+  });
+
   it("serves public @farming-labs/docs discovery routes", async () => {
     const { root, docs } = await createDocsFixture();
     const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });

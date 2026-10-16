@@ -197,6 +197,38 @@ describe("createMarkdownMirrorResponse", () => {
     await expect(response?.text()).resolves.toContain("# Pricing");
   });
 
+  it("keeps a private page private and varies on what the page varies on", async () => {
+    const config = resolveMarkdownConfig({ expose: ["/account"], cache: 60 });
+    const renderPage = () =>
+      new Response("<html><body><main><h1>Account</h1></main></body></html>", {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "private, no-store",
+          vary: "Cookie, Accept",
+        },
+      });
+
+    const negotiated = await createMarkdownMirrorResponse({
+      request: new Request("http://farm.test/account", {
+        headers: { Accept: "text/markdown", Cookie: "session=a" },
+      }),
+      config,
+      routeExists: () => true,
+      renderPage,
+    });
+    expect(negotiated?.headers.get("cache-control")).toBe("private, no-store");
+    expect(negotiated?.headers.get("vary")).toBe("Accept, Cookie");
+
+    const explicit = await createMarkdownMirrorResponse({
+      request: new Request("http://farm.test/account.md", { headers: { Cookie: "session=a" } }),
+      config,
+      routeExists: () => true,
+      renderPage,
+    });
+    expect(explicit?.headers.get("cache-control")).toBe("private, no-store");
+    expect(explicit?.headers.get("vary")).toBe("Cookie");
+  });
+
   it("returns null when the target page route does not exist", async () => {
     const config = resolveMarkdownConfig({
       expose: ["/pricing"],

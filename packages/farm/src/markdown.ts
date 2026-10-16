@@ -196,8 +196,21 @@ export async function createMarkdownMirrorResponse(
   if (!hasMarkdownExtension) {
     headersOut.set("Vary", "Accept");
   }
+  // The mirror is rendered from the same request, cookies included, so it varies on
+  // whatever the page varies on. Accept is excluded: the page render always asked for HTML.
+  for (const token of pageResponse.headers.get("vary")?.split(",") ?? []) {
+    const name = token.trim();
+    if (name && name.toLowerCase() !== "accept") appendHeaderToken(headersOut, "Vary", name);
+  }
+  // A page that must not be shared keeps that policy for its Markdown mirror.
+  const pageCacheControl = pageResponse.headers.get("cache-control");
   const cache = target.route?.cache ?? options.config?.cache ?? false;
-  headersOut.set("Cache-Control", createMarkdownCacheHeader(cache));
+  headersOut.set(
+    "Cache-Control",
+    pageCacheControl && isPrivateCacheControl(pageCacheControl)
+      ? pageCacheControl
+      : createMarkdownCacheHeader(cache),
+  );
 
   return new Response(options.request.method === "HEAD" ? null : markdown, {
     status: pageResponse.status,
@@ -530,6 +543,13 @@ function routeMatches(pattern: string, pathname: string): boolean {
 function isHtmlResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type") ?? "";
   return contentType.includes("text/html");
+}
+
+function isPrivateCacheControl(value: string): boolean {
+  return value.split(",").some((directive) => {
+    const name = directive.split("=", 1)[0]!.trim().toLowerCase();
+    return name === "private" || name === "no-store";
+  });
 }
 
 function createMarkdownCacheHeader(cache: number | false): string {

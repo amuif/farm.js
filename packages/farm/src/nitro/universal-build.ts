@@ -8371,12 +8371,15 @@ async function handleFarmRequestInContext(
         const sharedCacheControl = getRouteSharedCacheControl(route, pprCanCache);
         const responseHeaders = {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": renderedPage.stream || hasRequestScopedRender || !sharedCacheControl
-            ? "private, no-store"
-            : sharedCacheControl,
+          "Cache-Control": sharedCacheControl,
           ...(farmFontPreloadHeader ? { "Link": farmFontPreloadHeader } : {}),
           ...(pprConfig.enabled ? getPPRHeaders(pprCanCache ? "miss" : "bypass", pprConfig) : {}),
         };
+        // An error status or a request-scoped render is never shareable, even when
+        // the PPR shell headers would otherwise grant a shared max-age.
+        if (renderedPage.stream || hasRequestScopedRender || !sharedCacheControl) {
+          responseHeaders["Cache-Control"] = "private, no-store";
+        }
         const farmI18nSnapshot = getFarmI18nSnapshot();
         let html = renderedPage.html;
         
