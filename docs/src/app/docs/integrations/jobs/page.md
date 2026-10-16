@@ -122,7 +122,7 @@ const queued = await api.jobs.countTokens.trigger({
 });
 ```
 
-Reserved keys are `$`-prefixed (`$value`, `$input`, `$options`, `$schedule`), so an object input is free to use ordinary field names such as `value` or `input` without colliding with the envelope.
+Reserved keys are `$`-prefixed (`$value`, `$input`, `$options`, `$schedule`), so an object input is free to use ordinary field names such as `value` or `input` without colliding with the envelope. `$value` is read as the scalar wrapper only when it is the sole payload key; an object that carries other fields is delivered whole. An empty object body delivers `{}`, and a task whose input is an array can send the array as the whole body (or as a batch item).
 
 The older `{ input, options }` body is still accepted but is **deprecated**. The inline shape above,
 with `$input` for collision-prone object inputs, is the canonical API.
@@ -239,6 +239,8 @@ await api.jobs.sendWelcomeEmail.schedule({
   },
 });
 ```
+
+`$options` launch options (`idempotencyKey`, `tags`, `debounce`) also apply to a schedule. Tags from both are combined, and a value set on `$schedule` wins over the same `$options` field. `$schedule` alone sets the timing.
 
 ```ts
 await api.jobs.sendWelcomeEmail.cancel({
