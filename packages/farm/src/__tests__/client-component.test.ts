@@ -325,6 +325,32 @@ describe("client component path resolution", () => {
         islandStrategy: null,
       });
     });
+
+    it.each([
+      ["a catch-all pattern with no matching file", { "*": ["src/*"] }, {}],
+      [
+        "a pattern that only maps the package's types",
+        { "ui-kit": ["./src/types/ui-kit.d.ts"] },
+        { "src/types/ui-kit.d.ts": "export declare function Button(): null;\n" },
+      ],
+    ])("falls back to the package when tsconfig paths has %s", (_name, paths, files) => {
+      const root = writeAliasFixture({
+        "tsconfig.json": JSON.stringify({ compilerOptions: { paths } }),
+        "node_modules/ui-kit/package.json": JSON.stringify({
+          name: "ui-kit",
+          exports: "./dist/index.js",
+        }),
+        "node_modules/ui-kit/dist/index.js":
+          '"use client";\nexport function Button() { return null; }\n',
+        "src/app/page.tsx":
+          'import { Button } from "ui-kit";\nexport default function Page() { return <Button />; }\n',
+        ...files,
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root).shouldHydrate).toBe(
+        true,
+      );
+    });
   });
 
   it.each([

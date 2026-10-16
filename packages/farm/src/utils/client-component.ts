@@ -1570,7 +1570,9 @@ function resolveImportedModule(
     return { path: resolveImportedModuleSourcePath(importerPath, specifier, root), local: true };
   }
   const aliased = resolveProjectAliasSourcePath(specifier, root);
-  if (aliased !== undefined) return { path: aliased, local: true };
+  if (aliased) return { path: aliased, local: true };
+  // Like TypeScript, fall back to node_modules when a matching alias has no
+  // source file, e.g. `"*": ["src/*"]` or a `paths` entry that only maps types.
   return { path: resolvePackageModuleSourcePath(importerPath, specifier, root), local: false };
 }
 
@@ -1587,8 +1589,8 @@ const PROJECT_ALIAS_FILES = ["tsconfig.json", "jsconfig.json", "package.json"];
 /**
  * Resolve an app alias the way the bundler does: tsconfig/jsconfig `paths`,
  * then package.json `imports`, then Farm's default `@/` source alias.
- * Returns undefined when no alias matches, so the caller treats the specifier
- * as a package.
+ * Returns undefined when no alias matches and null when an alias matches but
+ * has no source file; the caller treats the specifier as a package either way.
  */
 function resolveProjectAliasSourcePath(
   specifier: string,
@@ -1606,11 +1608,13 @@ function resolveProjectAliasSourcePath(
   if (!match) return undefined;
   // Normalize so a `/`-separated capture yields the same path as a relative
   // import on Windows (`src\components\nav`, not `src\components/nav`).
-  return resolveSourceCandidate(
+  const resolved = resolveSourceCandidate(
     match.alias.targets.map((target) =>
       path.normalize(match.alias.wildcard ? target.replace("*", match.captured) : target),
     ),
   );
+  // A declaration file only maps types; the bundler loads the real module.
+  return resolved && /\.d\.[cm]?ts$/.test(resolved) ? null : resolved;
 }
 
 function matchProjectImportAlias(alias: ProjectImportAlias, specifier: string): string | null {
