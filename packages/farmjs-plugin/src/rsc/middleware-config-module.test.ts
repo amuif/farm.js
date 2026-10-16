@@ -60,4 +60,58 @@ export default { middleware: { matcher: "/private" }, ...shared };`;
       reason: "a config spread after middleware may override it",
     });
   });
+
+  it("rejects a top-level statement that changes the middleware matcher", () => {
+    const source = `
+import { defineConfig } from "@farm.js/core";
+const matcher = [];
+matcher.push("/admin");
+export default defineConfig({
+  middleware: { matcher, handler() {} },
+});`;
+
+    expect(extract(source)).toEqual({
+      kind: "unsupported",
+      reason:
+        'the top-level statement `matcher.push("/admin");` would not run with the extracted middleware',
+    });
+  });
+
+  it("rejects middleware assigned after the config object is built", () => {
+    const source = `
+const config = { middleware: [] };
+config.middleware.push({ matcher: "/admin", handler() {} });
+export default config;`;
+
+    expect(extract(source)).toMatchObject({ kind: "unsupported" });
+  });
+
+  it("rejects a side-effect import the extracted module would drop", () => {
+    const source = `
+import "./register-guards.js";
+export default { middleware: { matcher: "/admin", handler() {} } };`;
+
+    expect(extract(source)).toEqual({
+      kind: "unsupported",
+      reason:
+        'the side-effect import `import "./register-guards.js";` would not run with the extracted middleware',
+    });
+  });
+
+  it("keeps directives, re-exports and declaration-only configs working", () => {
+    const source = `
+"use strict";
+import { defineConfig } from "@farm.js/core";
+export * from "./shared.js";
+export const matcher = ["/admin"];
+function handler() {}
+class Guard {}
+export default defineConfig({ middleware: { matcher, handler } });`;
+
+    const result = extract(source);
+    expect(result.kind).toBe("module");
+    if (result.kind !== "module") return;
+    expect(result.code).toContain('const matcher = ["/admin"];');
+    expect(result.code).toContain("function handler() {}");
+  });
 });
