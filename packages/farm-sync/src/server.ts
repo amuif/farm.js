@@ -85,7 +85,7 @@ export async function executeSyncOperation(
 
   switch (body.operation) {
     case "list":
-      return listRows(client, resolved, scope, body.since ?? null);
+      return listRows(client, resolved, scope, body.since);
     case "insert":
       return insertRow(client, resolved, scope, body.input);
     case "update":
@@ -122,19 +122,43 @@ async function listRows(
   client: SyncOrmModelClient,
   resolved: ResolvedSyncModel,
   scope: Record<string, unknown>,
-  since: string | null,
+  since: unknown,
 ): Promise<SyncListResult> {
   const cursorField = resolved.cursorField;
-  const incremental = Boolean(cursorField && since);
+  const sinceDate = parseSince(since);
+  const incremental = Boolean(cursorField && sinceDate);
   const where: Record<string, unknown> = { ...scope };
-  if (incremental) where[cursorField!] = { gt: new Date(since!) };
+  // `gte`, not `gt`: the cursor has millisecond precision, so a row written in
+  // the same millisecond as the cursor row but after the previous list would
+  // otherwise never be sent. Resending the cursor row itself is harmless, the
+  // client upserts by key.
+  if (incremental) where[cursorField!] = { gte: sinceDate };
 
   const rows = await client.findMany({ where });
+  if (!incremental) {
+    return { rows, cursor: cursorField ? nextCursor(rows, cursorField, null) : null, full: true };
+  }
+
+  // A delta cannot carry deletions, so it also lists every key the caller can
+  // still see. Read after the rows, so a row inserted in between is at worst
+  // absent from `rows` (and picked up by the next delta), never pruned.
+  const visible = await client.findMany({ where: scope, select: { [resolved.key]: true } });
   return {
     rows,
-    cursor: cursorField ? nextCursor(rows, cursorField, since) : null,
-    full: !incremental,
+    cursor: nextCursor(rows, cursorField!, since as string),
+    full: false,
+    keys: visible.map((row) => row[resolved.key]),
   };
+}
+
+/** A cursor the client echoes back; anything else is a malformed request. */
+function parseSince(since: unknown): Date | null {
+  if (since === undefined || since === null) return null;
+  const date = typeof since === "string" ? new Date(since) : null;
+  if (!date || !Number.isFinite(date.getTime())) {
+    throw new SyncOperationError("invalid_input", "`since` must be an ISO timestamp or null.");
+  }
+  return date;
 }
 
 function nextCursor(

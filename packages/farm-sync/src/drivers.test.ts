@@ -153,7 +153,9 @@ describe.each([
     expect(first.cursor).toBeTruthy();
     expect(first.full).toBe(true);
 
-    // Nothing changed since that cursor, so the delta is empty.
+    // Nothing changed since that cursor. The cursor row itself is resent (the
+    // filter is inclusive so same-millisecond writes are not skipped) and the
+    // client upserts it by key.
     const delta: any = await executeSyncOperation({
       body: { model: "tasks", operation: "list", since: first.cursor },
       models: resolved,
@@ -162,7 +164,8 @@ describe.each([
       context,
     });
     expect(delta.full).toBe(false);
-    expect(delta.rows).toHaveLength(0);
+    expect(delta.rows.map((row: any) => row.id)).toEqual(["c1"]);
+    expect(delta.cursor).toBe(first.cursor);
 
     await new Promise((resolve) => setTimeout(resolve, 5));
     await executeSyncOperation({
@@ -182,6 +185,45 @@ describe.each([
     });
     expect(afterWrite.rows).toHaveLength(1);
     expect(afterWrite.rows[0].title).toBe("touched");
+  });
+
+  it("lists the keys still in scope with a delta, so deletions reach synced clients", async () => {
+    const orm = await makeOrm();
+    const resolved = models();
+    for (const [id, listId] of [
+      ["k1", "list-a"],
+      ["k2", "list-a"],
+      ["k3", "list-b"],
+    ]) {
+      await executeSyncOperation({
+        body: { model: "tasks", operation: "insert", input: { id, title: id } },
+        models: resolved,
+        orm,
+        request,
+        context: { listId },
+      });
+    }
+
+    const first: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list" },
+      models: resolved,
+      orm,
+      request,
+      context,
+    });
+
+    // Removed outside sync, straight through the database client.
+    await orm.tasks!.deleteMany({ where: { id: "k2" } });
+
+    const delta: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list", since: first.cursor },
+      models: resolved,
+      orm,
+      request,
+      context,
+    });
+    expect(delta.full).toBe(false);
+    expect(delta.keys).toEqual(["k1"]);
   });
 
   it("cannot reach a row belonging to another scope", async () => {

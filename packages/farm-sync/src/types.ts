@@ -41,6 +41,11 @@ export type SyncListResult = {
   cursor: string | null;
   /** True when the server sent a full snapshot rather than a delta. */
   full: boolean;
+  /**
+   * Every key the caller can currently see, sent with a delta so the client can
+   * drop rows that were deleted or left its scope since the last list.
+   */
+  keys?: unknown[];
 };
 
 export type SyncErrorCode =

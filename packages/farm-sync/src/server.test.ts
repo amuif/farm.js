@@ -42,14 +42,21 @@ function makeOrm(rows: Record<string, unknown>[] = []) {
         ? (expected as any[]).every((clause) => matches(row, clause))
         : expected && typeof expected === "object" && "gt" in expected
           ? new Date(row[field]).getTime() > new Date(expected.gt).getTime()
-          : row[field] === expected,
+          : expected && typeof expected === "object" && "gte" in expected
+            ? new Date(row[field]).getTime() >= new Date(expected.gte).getTime()
+            : row[field] === expected,
     );
 
   const orm: SyncOrmClient = {
     tasks: {
       async findMany(args) {
         calls.push({ op: "findMany", args });
-        return store.filter((row) => matches(row, (args as any)?.where));
+        const found = store.filter((row) => matches(row, (args as any)?.where));
+        const select = (args as any)?.select as Record<string, boolean> | undefined;
+        if (!select) return found;
+        return found.map((row) =>
+          Object.fromEntries(Object.keys(select).map((field) => [field, row[field]])),
+        );
       },
       async create({ data }) {
         calls.push({ op: "create", args: data });
@@ -162,6 +169,85 @@ describe("executeSyncOperation", () => {
     expect(result.rows.map((row: any) => row.title)).toEqual(["new"]);
     expect(result.full).toBe(false);
   });
+
+  it("lists every key still visible to the caller with a delta, scoped by the row filter", async () => {
+    const { orm, store } = makeOrm([
+      { id: "1", title: "unchanged", listId: "list-a", updatedAt: "2026-01-01T00:00:00.000Z" },
+      { id: "2", title: "deleted", listId: "list-a", updatedAt: "2026-01-01T00:00:00.000Z" },
+      { id: "3", title: "changed", listId: "list-a", updatedAt: "2026-02-01T00:00:00.000Z" },
+      { id: "4", title: "theirs", listId: "list-b", updatedAt: "2026-02-01T00:00:00.000Z" },
+    ]);
+    // Deleted straight in the database, so no sync write ever reported it.
+    store.splice(1, 1);
+
+    const result: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list", since: "2026-01-15T00:00:00.000Z" },
+      models: models(),
+      orm,
+      request,
+      context,
+    });
+
+    expect(result.rows.map((row: any) => row.id)).toEqual(["3"]);
+    expect(result.keys).toEqual(["1", "3"]);
+  });
+
+  it("does not send keys with a full snapshot", async () => {
+    const { orm } = makeOrm([{ id: "1", title: "a", listId: "list-a" }]);
+    const result: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list" },
+      models: models(),
+      orm,
+      request,
+      context,
+    });
+    expect(result.full).toBe(true);
+    expect(result).not.toHaveProperty("keys");
+  });
+
+  it("still sends a row written in the same millisecond as the cursor", async () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const { orm, store } = makeOrm([{ id: "1", title: "first", listId: "list-a", updatedAt: at }]);
+
+    const first: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list" },
+      models: models(),
+      orm,
+      request,
+      context,
+    });
+    expect(first.cursor).toBe(at);
+
+    // Committed after that list, within the same millisecond.
+    store.push({ id: "2", title: "same ms", listId: "list-a", updatedAt: at });
+
+    const next: any = await executeSyncOperation({
+      body: { model: "tasks", operation: "list", since: first.cursor },
+      models: models(),
+      orm,
+      request,
+      context,
+    });
+    expect(next.rows.map((row: any) => row.id)).toContain("2");
+    expect(next.cursor).toBe(at);
+  });
+
+  it.each([["not a date"], [42], [{ gt: "2026-01-01" }]])(
+    "rejects a malformed cursor %j as invalid input",
+    async (since) => {
+      const { orm, calls } = makeOrm();
+      await expect(
+        executeSyncOperation({
+          body: { model: "tasks", operation: "list", since: since as any },
+          models: models(),
+          orm,
+          request,
+          context,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_input", status: 400 });
+      expect(calls).toHaveLength(0);
+    },
+  );
 
   it("injects scope columns on insert and ignores client-supplied ones", async () => {
     const { orm, store } = makeOrm();
