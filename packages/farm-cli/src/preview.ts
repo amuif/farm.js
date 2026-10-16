@@ -408,7 +408,9 @@ export async function runPreviewTunnel(
           reject(error);
         }
       });
-      child.on("exit", (code, signal) => {
+      // "close" fires after stdout and stderr are drained. "exit" can arrive
+      // first (notably on Windows pipes), before the chunk that holds the URL.
+      child.on("close", (code, signal) => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
