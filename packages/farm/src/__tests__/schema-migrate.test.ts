@@ -305,6 +305,93 @@ describe("sql generation", () => {
     },
   );
 
+  it("keeps long Postgres index names distinct after the 63-byte limit", () => {
+    const longSchema = defineSchema({
+      models: {
+        memberships: {
+          name: "organization_membership_invitation_records",
+          fields: {
+            id: { type: "uuid", primaryKey: true },
+            organizationIdentifier: { type: "string", name: "organization_identifier" },
+            invitedEmailAddress: { type: "string", name: "invited_email_address" },
+            invitedPhoneNumber: { type: "string", name: "invited_phone_number" },
+          },
+          constraints: [
+            { type: "unique", fields: ["organizationIdentifier", "invitedEmailAddress"] },
+            { type: "unique", fields: ["organizationIdentifier", "invitedPhoneNumber"] },
+            { type: "index", fields: ["id"], name: "short_name_idx" },
+          ],
+        },
+      },
+    });
+    const indexNames = (dialect: FarmSqlDialect) =>
+      generateSqlStatements(collectSchemaModels([["app", longSchema]]), dialect)
+        .filter((statement) => statement.kind === "index")
+        .map((statement) => statement.target);
+
+    const names = indexNames("postgres");
+    expect(names).toHaveLength(3);
+    // What Postgres keeps of each name is what makes two indexes the same index.
+    const stored = names.map((name) => Buffer.from(name).subarray(0, 63).toString());
+    expect(new Set(stored).size).toBe(3);
+    for (const name of names) expect(Buffer.byteLength(name)).toBeLessThanOrEqual(63);
+    expect(names[0]).toMatch(
+      /^organization_membership_invitation_records_organizatio_[0-9a-f]{8}$/,
+    );
+    // Deterministic, and names within the limit are untouched.
+    expect(indexNames("postgres")).toEqual(names);
+    expect(names[2]).toBe("short_name_idx");
+    // Only Postgres truncates silently; other dialects keep the full name.
+    expect(indexNames("sqlite")[0]).toBe(
+      "organization_membership_invitation_records_organization_identifier_invited_email_address_unique",
+    );
+  });
+
+  itWithPostgres("creates every long-named unique index in Postgres", async () => {
+    const { Client } = requireModule("pg") as {
+      Client: new (options: { connectionString: string }) => {
+        connect(): Promise<void>;
+        end(): Promise<void>;
+        query(sql: string): Promise<{ rows: Array<Record<string, unknown>> }>;
+      };
+    };
+    const table = `farm_long_index_names_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const longSchema = defineSchema({
+      models: {
+        invitations: {
+          name: table,
+          fields: {
+            id: { type: "uuid", primaryKey: true },
+            organization: { type: "string", name: "organization_identifier_value" },
+            email: { type: "string", name: "invited_email_address" },
+            phone: { type: "string", name: "invited_phone_number" },
+          },
+          constraints: [
+            { type: "unique", fields: ["organization", "email"] },
+            { type: "unique", fields: ["organization", "phone"] },
+          ],
+        },
+      },
+    });
+    const client = new Client({ connectionString: postgresTestUrl! });
+    await client.connect();
+    try {
+      for (const statement of generateSqlStatements(
+        collectSchemaModels([["app", longSchema]]),
+        "postgres",
+      )) {
+        await client.query(statement.sql);
+      }
+      const { rows } = await client.query(
+        `SELECT indexname FROM pg_indexes WHERE tablename = '${table}' AND indexdef LIKE 'CREATE UNIQUE INDEX%' AND indexname NOT LIKE '%_pkey'`,
+      );
+      expect(rows).toHaveLength(2);
+    } finally {
+      await client.query(`DROP TABLE IF EXISTS "${table}"`);
+      await client.end();
+    }
+  });
+
   it("uses the mapped table and column names, not the model keys", () => {
     const sql = generateSqlStatements(models(), "postgres")
       .map((statement) => statement.sql)

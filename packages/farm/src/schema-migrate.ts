@@ -1,5 +1,6 @@
 import type { FarmSchemaExtension } from "./schema-extend";
 import {
+  fitSqlIndexName,
   generateSqlStatements,
   getSqlColumnType,
   getSqlDefaultExpression,
@@ -269,11 +270,12 @@ export async function planSchemaMigration(
         continue;
       }
       const columns = index.columns.map((column) => quoteSqlIdentifier(dialect, column)).join(", ");
+      const name = fitSqlIndexName(dialect, index.name);
       upgrades.push({
         kind: "index",
         table: model.modelName,
-        target: index.name,
-        sql: `CREATE INDEX${dialect === "mysql" ? "" : " IF NOT EXISTS"} ${quoteSqlIdentifier(dialect, index.name)} ON ${quoteTableName(dialect, model.modelName)} (${columns});`,
+        target: name,
+        sql: `CREATE INDEX${dialect === "mysql" ? "" : " IF NOT EXISTS"} ${quoteSqlIdentifier(dialect, name)} ON ${quoteTableName(dialect, model.modelName)} (${columns});`,
       });
     }
 
