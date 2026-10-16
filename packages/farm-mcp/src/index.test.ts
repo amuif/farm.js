@@ -618,4 +618,35 @@ describe("apiMcp", () => {
     expect(payload.result.isError).toBe(true);
     expect(payload.result.content[0].text).toContain('"status":400');
   });
+
+  it("hides an endpoint handler's thrown error and logs it", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const leaky = route.get("/api/leaky", {
+      mcp: { name: "leaky" },
+      handler() {
+        throw new Error("connect postgres://admin:hunter2@db.internal failed");
+      },
+    });
+    const routes = mergePluginAPIRoutes(
+      [{ path: leaky.path, methods: [leaky.method], endpoints: { GET: leaky.endpoint } }],
+      [apiMcp({ allowUnauthenticated: true })],
+    );
+    const endpoint = routes.find((entry) => entry.path === "/api/mcp")!.endpoints.POST;
+    try {
+      const payload = await readMCP(
+        await sendMCP(endpoint, {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "leaky", arguments: {} },
+        }),
+      );
+      expect(payload.result.isError).toBe(true);
+      expect(payload.result.content[0].text).toBe("Farm API tool invocation failed.");
+      expect(JSON.stringify(payload)).not.toContain("hunter2");
+      expect(consoleError).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

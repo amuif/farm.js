@@ -23,10 +23,11 @@ import type {
   FarmMCPExecuteContext,
   FarmMCPServerFunction,
 } from "@farm.js/core";
-import { parseRouteSchema } from "@farm.js/core/api/runtime";
+import { isEndpointFailure, parseRouteSchema } from "@farm.js/core/api/runtime";
 import {
   _describeServerFunction,
   _invokeServerFunction,
+  isServerFnFailure,
   type ServerFunctionDescriptor,
 } from "@farm.js/core/server-fn";
 import { emitFarmEvent } from "@farm.js/core/observability";
@@ -246,6 +247,8 @@ async function invokeTool(
   sourceRequest: Request | undefined,
   signal: AbortSignal,
 ) {
+  let request: Request;
+  let routeParams: Record<string, string | string[]>;
   try {
     const params = asRecord(input.params, "params");
     const pathname = interpolatePath(tool.route.path, params);
@@ -259,18 +262,24 @@ async function invokeTool(
     const body = input.body === undefined ? undefined : JSON.stringify(input.body);
     if (body !== undefined) headers.set("content-type", "application/json");
 
-    const request = new Request(url, {
+    request = new Request(url, {
       method: tool.route.method,
       headers,
       body: tool.route.method === "GET" || tool.route.method === "HEAD" ? undefined : body,
       signal,
     });
-    const routeParams = Object.fromEntries(
+    routeParams = Object.fromEntries(
       Object.entries(params).map(([key, value]) => [
         key,
         Array.isArray(value) ? value.map(String) : String(value),
       ]),
     );
+  } catch (error) {
+    // Mapping errors describe the caller's own arguments.
+    return toolError(error instanceof Error ? error.message : "Invalid tool arguments.");
+  }
+
+  try {
     const response = await tool.route.invoke(request, routeParams);
     const mediaType = response.headers.get("content-type")?.split(";", 1)[0].trim() ?? "";
     if (
@@ -291,7 +300,7 @@ async function invokeTool(
       structuredContent: { result },
     };
   } catch (error) {
-    return toolError(error instanceof Error ? error.message : "Farm API tool invocation failed.");
+    return unexpectedToolError(tool, error, signal, "Farm API tool invocation failed.");
   }
 }
 
@@ -300,13 +309,22 @@ async function invokeStandaloneTool(
   input: unknown,
   context: FarmMCPExecuteContext,
 ) {
+  if (context.signal.aborted) return toolError("MCP tool call was cancelled.");
+  let parsed: unknown;
   try {
-    context.signal.throwIfAborted();
     // JSON Schema advertises the wire shape; the original validator owns async
     // refinements, defaults, and transforms, just as it does for API endpoints.
-    const parsed = await parseRouteSchema(tool.definition.inputSchema, input);
+    parsed = await parseRouteSchema(tool.definition.inputSchema, input);
+  } catch (error) {
+    // Validator issues describe the caller's own arguments. An exception thrown inside a
+    // refinement or transform is an application error and can carry private data.
+    if (isValidationError(error)) return toolError(error.message);
+    return unexpectedToolError(tool, error, context.signal, "Farm MCP tool execution failed.");
+  }
+  let result: unknown;
+  try {
     context.signal.throwIfAborted();
-    let result = await tool.definition.execute(parsed, context);
+    result = await tool.definition.execute(parsed, context);
     context.signal.throwIfAborted();
     if (tool.definition.outputSchema !== undefined) {
       try {
@@ -320,10 +338,35 @@ async function invokeStandaloneTool(
       }
       context.signal.throwIfAborted();
     }
+  } catch (error) {
+    // A declared failure is public by design, the same as from a server function tool.
+    if (isEndpointFailure(error) || isServerFnFailure(error)) {
+      const { code, status, message, data } = error;
+      return toolError(JSON.stringify({ error: { code, status, message, data } }));
+    }
+    return unexpectedToolError(tool, error, context.signal, "Farm MCP tool execution failed.");
+  }
+  try {
     return toJSONToolResult(result, "Standalone MCP tools");
   } catch (error) {
     return toolError(error instanceof Error ? error.message : "Farm MCP tool execution failed.");
   }
+}
+
+function isValidationError(error: unknown): error is Error {
+  return error instanceof Error && Array.isArray((error as { issues?: unknown }).issues);
+}
+
+/** Undeclared errors can carry private data: log them and return a generic message. */
+function unexpectedToolError(
+  tool: BoundTool,
+  error: unknown,
+  signal: AbortSignal,
+  message: string,
+) {
+  if (signal.aborted) return toolError("MCP tool call was cancelled.");
+  console.error(`[Farm.js] MCP tool "${tool.config.name}" failed:`, error);
+  return toolError(message);
 }
 
 /** Serializes a tool's return value, rejecting anything that is not plain JSON data. */

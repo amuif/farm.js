@@ -453,7 +453,11 @@ export function createServerFn(options: {
     try {
       input = await _parseServerFnSchema(options.input, rawInput, "input");
     } catch (cause) {
-      throw labelInputErrors ? new ServerFnInputError(cause) : cause;
+      // Only a validation result describes the caller's input. Anything else thrown while
+      // parsing, such as an exception inside a refinement or transform, is an application error.
+      throw labelInputErrors && isSchemaValidationFailure(cause)
+        ? new ServerFnInputError(cause)
+        : cause;
     }
     const executionContext = getServerActionExecutionContext();
     const request = executionContext?.request ?? _resolveCurrentRequest();
@@ -740,6 +744,16 @@ export async function _parseServerFnSchema(
   throw new TypeError(`${owner} ${contract} must provide parse, parseAsync, or safeParse`);
 }
 
+// Errors a safeParse result reported as a validation failure, as opposed to exceptions it threw.
+const schemaValidationFailures = new WeakSet<object>();
+
+function isSchemaValidationFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  return (
+    schemaValidationFailures.has(error) || Array.isArray((error as { issues?: unknown }).issues)
+  );
+}
+
 function unwrapSafeParseResult(result: unknown) {
   if (
     result &&
@@ -747,7 +761,9 @@ function unwrapSafeParseResult(result: unknown) {
     "success" in result &&
     (result as { success: boolean }).success === false
   ) {
-    throw (result as { error?: unknown }).error;
+    const error = (result as { error?: unknown }).error;
+    if (error && typeof error === "object") schemaValidationFailures.add(error);
+    throw error;
   }
 
   if (

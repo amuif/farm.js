@@ -133,6 +133,30 @@ describe("server functions as MCP tools", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("hides an exception thrown inside an input refinement", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const handler = vi.fn(() => ({ ok: true }));
+    const claim = createServerFn({
+      input: z.object({ slug: z.string() }).refine(() => {
+        throw new Error("connect postgres://admin:hunter2@db.internal failed");
+      }),
+      mcp: { name: "claim_slug" },
+      handler,
+    });
+    const endpoint = mount({ tools: [claim], authorize });
+
+    const result = await call(endpoint, "tools/call", {
+      name: "claim_slug",
+      arguments: { slug: "farm" },
+    });
+
+    expect(result.result.isError).toBe(true);
+    expect(result.result.content[0].text).toBe("Server function failed.");
+    expect(JSON.stringify(result)).not.toContain("hunter2");
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("returns declared failures and redirects, and hides undeclared errors", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const book = createServerFn({

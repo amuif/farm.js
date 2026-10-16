@@ -84,6 +84,46 @@ describe("server functions invoked outside the action transport", () => {
     expect(error).toMatchObject({ ok: false, reason: "error" });
   });
 
+  it("reports an exception thrown while parsing input as an error, not an input failure", async () => {
+    const secret = new Error("connect postgres://admin:hunter2@db.internal failed");
+    const refined = createServerFn({
+      input: z.object({ slug: z.string() }).refine(() => {
+        throw secret;
+      }),
+      handler: () => null,
+    });
+    const parseOnly = createServerFn({
+      input: {
+        parse: () => {
+          throw secret;
+        },
+      },
+      handler: () => null,
+    });
+
+    for (const fn of [refined, parseOnly]) {
+      expect(await _invokeServerFunction(fn, { slug: "farm" }, request())).toEqual({
+        ok: false,
+        reason: "error",
+        error: secret,
+      });
+    }
+
+    const issues = [{ path: ["slug"], message: "Slug is taken" }];
+    const thrownIssues = createServerFn({
+      input: {
+        parse: () => {
+          throw Object.assign(new Error("Slug is taken"), { issues });
+        },
+      },
+      handler: () => null,
+    });
+    expect(await _invokeServerFunction(thrownIssues, {}, request())).toMatchObject({
+      ok: false,
+      reason: "input",
+    });
+  });
+
   it("passes the caller's request to middleware and handlers", async () => {
     const whoami = createServerFn({
       handler: ({ request }) => request?.headers.get("authorization") ?? null,

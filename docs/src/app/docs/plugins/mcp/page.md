@@ -153,7 +153,11 @@ including async refinements, defaults, and transforms. The first argument is typ
 
 Return JSON-serializable application data, not a `Response`, stream, or MCP protocol envelope.
 Farm returns its JSON as text content and as `structuredContent: { result: data }`, matching
-endpoint-backed tools. Validation and execution failures become tool errors. Only authorized
+endpoint-backed tools. Validation and execution failures become tool errors. Input that fails the
+schema returns the validator's message. A thrown `EndpointFailure` or a server function's declared
+failure returns `{ "error": { "code", "status", "message", "data" } }`. Any other error, including
+one thrown inside a refinement or transform, returns `Farm MCP tool execution failed.` and is logged
+on the server, so an exception message never reaches the agent. Only authorized
 tools can reach validation or execution. Keep definitions and their provider SDKs server-only.
 Use a shared database or storage backend for data read by both routes and standalone tools;
 config and route modules can be loaded independently, and module-local state is not a shared store.
@@ -210,7 +214,8 @@ true`). Set the hints in `mcp` when the function is safe to repeat or only reads
 - A failure declared in `errors` returns `{ "error": { "code", "status", "message", "data" } }`, and
   `redirect()` returns `{ "redirect": { "url", "status" } }`, both as tool errors.
 - Any other error returns `Server function failed.`, the same sanitized message the browser gets.
-  The error itself is logged on the server.
+  That includes an exception thrown inside an input refinement or transform. The error itself is
+  logged on the server.
 
 Only functions listed in `mcp.tools` are exposed, and only through `authorize`. Adding `mcp` metadata
 alone publishes nothing, and functions keep working for your UI either way.
@@ -368,7 +373,9 @@ export const projectsRoute = route.post("/api/projects", {
 Both route APIs keep the HTTP method and path next to the handler, so there is no separate
 `"METHOD /api/path"` MCP map to synchronize.
 
-An MCP call runs the endpoint validator, middleware, handler, and error mapping exactly once. It also
+An MCP call runs the endpoint validator, middleware, handler, and error mapping exactly once. A
+non-2xx response becomes a tool error with its status and body. An error the handler throws instead
+returns `Farm API tool invocation failed.` and is logged on the server. It also
 forwards the original request's cookies and authorization header, so the route sees the same
 credentials as the MCP boundary. Tool arguments cannot replace security-sensitive credentials or
 request-provenance headers such as `Host`, `Origin`, `Referer`, `Forwarded`, or `X-Forwarded-*`.
