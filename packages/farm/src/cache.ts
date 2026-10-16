@@ -249,7 +249,10 @@ interface FarmCacheStaleEntry {
 
 export class FarmDataCache {
   private entries = new Map<string, InternalFarmCacheEntry>();
-  private inflight = new Map<string, Promise<unknown>>();
+  private inflight = new Map<
+    string,
+    { promise: Promise<unknown>; tags: readonly string[]; startVersion: number }
+  >();
   private invalidatedTagVersions = new Map<string, number>();
   private activeGenerations = new Set<{ tags: ReadonlySet<string>; createdVersion: number }>();
   private version = 0;
@@ -624,27 +627,37 @@ export class FarmDataCache {
       return cached.value;
     }
 
-    const inflight = this.inflight.get(key) as Promise<T> | undefined;
-    if (inflight) {
+    const inflight = this.inflight.get(key);
+    if (inflight && !this.wasInvalidatedSince(inflight.tags, inflight.startVersion)) {
       emitFarmEvent({ type: "cache.dedupe", key });
-      return inflight;
+      return inflight.promise as Promise<T>;
     }
 
     const tags = Array.from(normalizeCacheOptionsTags(options));
     const generation = this.generation;
+    const startVersion = this.version;
     const promise = this.fillCacheEntry(key, producer, options, tags, generation)
       .catch((error) => {
         emitFarmEvent({ type: "cache.error", key, operation: "set", error });
         throw error;
       })
       .finally(() => {
-        if (this.inflight.get(key) === promise) {
+        if (this.inflight.get(key)?.promise === promise) {
           this.inflight.delete(key);
         }
       });
 
-    this.inflight.set(key, promise);
+    this.inflight.set(key, { promise, tags, startVersion });
     return promise;
+  }
+
+  /** A fill that started before one of its tags was invalidated cannot satisfy later readers. */
+  private wasInvalidatedSince(tags: readonly string[], version: number): boolean {
+    for (const tag of tags) {
+      const invalidatedVersion = this.invalidatedTagVersions.get(tag);
+      if (invalidatedVersion !== undefined && invalidatedVersion > version) return true;
+    }
+    return false;
   }
 
   private async fillCacheEntry<T>(
