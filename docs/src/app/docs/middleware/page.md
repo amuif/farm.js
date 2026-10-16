@@ -215,6 +215,10 @@ exactly like `/dashboard` does. This is what makes a matcher safe to gate access
 with. An encoded slash stays inside its own segment, so `%2F` never splits one
 segment into two and reaches `ctx.params` still encoded.
 
+A trailing slash is equivalent too: the router serves `/api/admin/users/` from the
+same handler as `/api/admin/users`, so a `/api/admin/users` matcher runs for both.
+`exclude` patterns stay exact, so a trailing slash can add a guard but never skip one.
+
 That pathname is relative to the app's `basePath`. With `basePath: "/console"`, a request for
 `/console/dashboard` meets a `/dashboard` matcher and runs `src/app/dashboard/middleware.ts`;
 leave the base path out of matchers.

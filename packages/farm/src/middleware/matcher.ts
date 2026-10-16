@@ -118,7 +118,7 @@ function parseColonParam(segment: string): { name: string; modifier?: string } {
   };
 }
 
-function compilePathPattern(pattern: string): CompiledPathPattern {
+function compilePathPattern(pattern: string, trailingSlash = false): CompiledPathPattern {
   const params: string[] = [];
   const segments = pattern.split("/").filter(Boolean);
 
@@ -163,9 +163,23 @@ function compilePathPattern(pattern: string): CompiledPathPattern {
 
   return {
     kind: "path",
-    regex: new RegExp(`^${parts.join("")}$`),
+    regex: new RegExp(`^${parts.join("")}${trailingSlash ? "/?" : ""}$`),
     params,
   };
+}
+
+/**
+ * Compile a config `matcher` entry. Every route matcher drops a trailing slash,
+ * so `/api/admin/users/` reaches the same API handler (and the same page, via
+ * its redirect) as `/api/admin/users`. A guard written as the exact path has to
+ * run for both, or the trailing slash walks past it. `exclude` keeps the exact
+ * comparison so a trailing slash can only add a guard, never remove one.
+ */
+function compileMatcherPattern(pattern: string | RegExp): CompiledPattern {
+  if (typeof pattern === "string" && pattern !== "*" && !pattern.endsWith("(.*)")) {
+    return compilePathPattern(pattern, true);
+  }
+  return compilePattern(pattern);
 }
 
 function compilePattern(pattern: string | RegExp): CompiledPattern {
@@ -191,7 +205,7 @@ export function compileMiddlewareConfig(config: MiddlewareConfig): CompiledMiddl
   const compiled = {
     matcher: config.matcher
       ? toMatcherList(config.matcher).map((matcher) =>
-          typeof matcher === "function" ? matcher : compilePattern(matcher),
+          typeof matcher === "function" ? matcher : compileMatcherPattern(matcher),
         )
       : undefined,
     exclude: config.exclude?.map(compilePattern),
