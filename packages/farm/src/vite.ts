@@ -5498,6 +5498,11 @@ async function hydrate() {
       pendingPageHydrationController = hydrationController;
       await hydrateFarmIsolatedClientBoundaries(rootContainer, hydrationController.signal);
       if (hydrationController.signal.aborted) return;
+      // The rest of the document is static server HTML with nothing to hydrate, so
+      // stop holding its clicks and submits once the load-strategy islands are live.
+      // Deferred islands capture their own interactions, and held targets outside an
+      // island are not replayed into DOM no client code owns.
+      markFarmHydrated();
       return;
     }`
         : ""
