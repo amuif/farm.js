@@ -1682,28 +1682,33 @@ test("ignores vendor documentation URLs before a built-in tunnel is ready", asyn
   assert.equal(publicUrl, "https://actual-preview.trycloudflare.com");
 });
 
-test("reads tunnel output that arrives after the tunnel process exits", async () => {
-  // Launcher shims exit while the process they started still holds stdout, and
-  // on Windows "exit" can arrive before the last chunk is read. Either way the
-  // URL is in output that lands after the "exit" event.
-  const announce =
-    "setTimeout(() => process.stdout.write('tunnel ready at https://late-preview.trycloudflare.com\\n'), 100);";
-  const script =
-    "const { spawn } = require('node:child_process');" +
-    `spawn(process.execPath, ['-e', ${JSON.stringify(announce)}], { stdio: ['ignore', 'inherit', 'inherit'] });` +
-    "process.exit(0);";
+test(
+  "reads tunnel output that arrives after the tunnel process exits",
+  // The grandchild reproduction relies on POSIX pipe inheritance; on Windows
+  // the noisy-prologue test below covers the same "exit"-before-drain race.
+  { skip: process.platform === "win32" },
+  async () => {
+    // A launcher can exit while the process it started still holds stdout, so
+    // the URL lands in output that arrives after the "exit" event.
+    const announce =
+      "setTimeout(() => process.stdout.write('tunnel ready at https://late-preview.trycloudflare.com\\n'), 100);";
+    const script =
+      "const { spawn } = require('node:child_process');" +
+      `spawn(process.execPath, ['-e', ${JSON.stringify(announce)}], { stdio: ['ignore', 'inherit', 'inherit'] });` +
+      "process.exit(0);";
 
-  const plan = {
-    command: process.execPath,
-    args: ["-e", script],
-    target: { localUrl: "http://127.0.0.1:3000", host: "127.0.0.1", port: 3000, source: "port" },
-    requestedName: "late-preview",
-    requestedHostname: "late-preview.preview.farmjs.dev",
-  };
+    const plan = {
+      command: process.execPath,
+      args: ["-e", script],
+      target: { localUrl: "http://127.0.0.1:3000", host: "127.0.0.1", port: 3000, source: "port" },
+      requestedName: "late-preview",
+      requestedHostname: "late-preview.preview.farmjs.dev",
+    };
 
-  const publicUrl = await runPreviewTunnel(plan, 10_000);
-  assert.equal(publicUrl, "https://late-preview.trycloudflare.com");
-});
+    const publicUrl = await runPreviewTunnel(plan, 10_000);
+    assert.equal(publicUrl, "https://late-preview.trycloudflare.com");
+  },
+);
 
 test("finds the preview URL after a noisy tunnel prologue", async () => {
   // The scan buffer is bounded, so a tunnel that prints a lot before announcing
