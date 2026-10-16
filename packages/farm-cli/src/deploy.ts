@@ -134,7 +134,7 @@ async function resolveFarmDeployContext(options: DeployFarmOptions) {
   const root = path.resolve(options.root || process.cwd());
   const mode = "production";
   const userConfig = await loadConfig(root, undefined, mode);
-  const config = await resolveConfig({ root, ...userConfig }, mode);
+  const config = await resolveConfig({ ...userConfig, root }, mode);
 
   // Determine platform and preset
   const cliTarget = options.vercel

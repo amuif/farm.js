@@ -94,7 +94,7 @@ export async function explainFarmRoute(
 ): Promise<FarmRouteExplanation> {
   const root = path.resolve(options.root || process.cwd());
   const userConfig = await loadConfig(root, options.configPath, "production");
-  const config = await resolveConfig({ root, ...userConfig }, "production");
+  const config = await resolveConfig({ ...userConfig, root }, "production");
   const normalizedPathname = normalizePathname(pathname, config.basePath || "/");
   const candidates = discoverMatchingPages(config, normalizedPathname);
   const page = candidates.sort(

@@ -48,7 +48,7 @@ export async function loadFarmCronConfig(
     throw new Error("No Farm config found. Create farm.config.ts before configuring cron routes.");
   }
 
-  const resolvedConfig = await resolveConfig({ root, ...userConfig }, "development");
+  const resolvedConfig = await resolveConfig({ ...userConfig, root }, "development");
   return resolvedConfig.cron;
 }
 
