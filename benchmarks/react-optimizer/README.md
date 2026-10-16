@@ -56,7 +56,9 @@ BENCH_TRIALS=1 BENCH_WARMUPS=1 BENCH_ITERATIONS=2 npm run bench
 ```
 
 Results are written to `results/latest.json` and `results/latest.md`. The exact Million and React
-versions are pinned in `package.json`; Farm is built from the enclosing checkout.
+versions are pinned in `package.json`; Farm is built from the enclosing checkout. Vite is pinned
+to the version shipped by core. The existing reference results retain their original Vite 5
+toolchain; rerun the benchmark before comparing results with the current Vite 8 build.
 
 ## What Farm should carry forward
 
