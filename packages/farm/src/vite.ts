@@ -145,6 +145,7 @@ import {
   isReactRenderer,
   loadFarmRendererVitePlugins,
   REACT_RENDERER,
+  resolveFarmComponentExtensions,
   resolveFarmRenderer,
 } from "./renderer";
 import type { FarmRenderer } from "./renderer";
@@ -1246,11 +1247,19 @@ export function farmPlugin(
           .map((layer) => layer.configFile?.replace(/\\/g, "/"))
           .filter((file): file is string => Boolean(file)),
       );
-      const isPageFile = (file: string) => {
+      // Every file the route type generator reads: page, layout, loading and error modules.
+      const routeModuleExtensions = new Set([
+        ...resolveFarmComponentExtensions(farmConfig.renderer.componentExtensions),
+        ".md",
+        ".mdx",
+      ]);
+      const isRouteModuleFile = (file: string) => {
         const normalized = file.replace(/\\/g, "/");
+        const match = /\/(?:page|layout|loading|error)(\.[^./]+)$/.exec(normalized);
         return (
           appDirSlugs.some((appDir) => normalized.startsWith(`${appDir}/`)) &&
-          /page\.(ts|tsx|js|jsx|md|mdx)$/.test(normalized)
+          !!match &&
+          routeModuleExtensions.has(match[1].toLowerCase())
         );
       };
       const isApiRouteFile = (file: string) => {
@@ -1316,6 +1325,14 @@ export function farmPlugin(
       };
       ["add", "change", "unlink"].forEach((ev) => {
         server.watcher.on(ev as "add", (file: string) => {
+          if (ev === "add") {
+            // Vite keeps an unresolved import in the cached SSR transform and rethrows the
+            // importer's recorded evaluation error, so a module that imported a missing file
+            // stays broken after the file appears. Vite only retries this for the client graph.
+            for (const mod of server.moduleGraph.idToModuleMap.values()) {
+              if (mod.ssrError) server.moduleGraph.invalidateModule(mod);
+            }
+          }
           const normalizedFile = file.replace(/\\/g, "/");
           const configChanged =
             isFarmConfigFile(file, farmConfig.root) || layerConfigFiles.has(normalizedFile);
@@ -1326,7 +1343,7 @@ export function farmPlugin(
           const typeArtifacts: TypeArtifactSelection = configChanged
             ? ALL_TYPE_ARTIFACTS
             : {
-                routes: (ev !== "change" && isPageFile(file)) || programmaticRouteChanged,
+                routes: (ev !== "change" && isRouteModuleFile(file)) || programmaticRouteChanged,
                 api: isApiRouteFile(file) || programmaticRouteChanged,
                 env: false,
                 images: false,
