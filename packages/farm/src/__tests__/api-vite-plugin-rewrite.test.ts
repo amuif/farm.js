@@ -29,6 +29,7 @@ interface DevHarness {
   dispatch(
     url: string,
     rewriteTo?: string | null,
+    headers?: Record<string, string>,
   ): Promise<{
     status: number;
     body: string | null;
@@ -74,7 +75,7 @@ async function createDevHarness(
   if (!handlerFn) throw new Error("dev middleware was not registered");
 
   return {
-    async dispatch(url, rewriteTo = null) {
+    async dispatch(url, rewriteTo = null, headers = { host: "localhost:3000" }) {
       (server as any).__farmMiddleware__ = {
         waitForDiscovery: async () => {},
         async execute(req: any) {
@@ -88,7 +89,7 @@ async function createDevHarness(
       const req = {
         url,
         method: "GET",
-        headers: { host: "localhost:3000" },
+        headers,
       };
       const res: any = {
         statusCode: 200,
@@ -292,5 +293,19 @@ describe("dev API dispatch after middleware rewrites", () => {
     const result = await harness.dispatch("/api/v1/users", "/dashboard");
     expect(result.passedToNext).toBe(true);
     expect(result.body).toBeNull();
+  });
+
+  it("dispatches the request path, not a path smuggled in the Host header", async () => {
+    const harness = await createDevHarness({
+      public: `export const GET = async () => Response.json({ route: "public" });\n`,
+      "admin/users": `export const GET = async () => Response.json({ route: "admin" });\n`,
+    });
+
+    // Middleware matched /api/public, so the dispatch must stay there.
+    const result = await harness.dispatch("/api/public", null, {
+      host: "localhost:3000/api/admin/users#",
+    });
+    expect(result.passedToNext).toBe(false);
+    expect(JSON.parse(result.body ?? "")).toEqual({ route: "public" });
   });
 });

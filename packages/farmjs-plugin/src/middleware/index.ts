@@ -19,6 +19,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { createRequire } from "node:module";
 import { _withAfterNodeMiddleware } from "@farm.js/core/after";
 import { devServableFileExists } from "../dev-static.js";
+import { resolveDevRequestURL, resolveViteHtmlFallbackUrl } from "../dev-request.js";
 import { matchesMiddlewareConfig } from "@farm.js/core/middleware";
 import type { MiddlewareConfig } from "@farm.js/core/middleware";
 import { middlewareMatchesPath, parseCookies, serializeCookie } from "./matching.js";
@@ -186,7 +187,7 @@ function createContext(
   res: ServerResponse,
   viteServer?: ViteDevServer,
 ): MiddlewareContext {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const url = resolveDevRequestURL(req);
   const headers = new Map<string, string>();
   const data = new Map<string, any>();
   const cookies = createCookieJar(req, res);
@@ -515,8 +516,17 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
       return () => {
         server.middlewares.use(
           _withAfterNodeMiddleware(async (req, res, next) => {
-            const url = req.url || "/";
-            const pathname = url.split("?")[0];
+            // Run middleware for the URL the client sent, not Vite's SPA
+            // fallback rewrite, then hand Vite its rewrite back so it still
+            // serves the HTML shell (unless middleware rewrote the request).
+            const fallbackUrl = req.url;
+            const requestedUrl = resolveViteHtmlFallbackUrl(req, server.config.base);
+            if (requestedUrl) req.url = requestedUrl;
+            const passThrough = (error?: unknown) => {
+              if (requestedUrl && req.url === requestedUrl) req.url = fallbackUrl;
+              return error === undefined ? next() : next(error);
+            };
+            const pathname = resolveDevRequestURL(req).pathname;
 
             // Skip Vite internal requests and real static assets. Dotted
             // paths that don't map to a file on disk are app routes (route
@@ -529,14 +539,14 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
                 !pathname.endsWith("/") &&
                 devServableFileExists(pathname, [server.config.publicDir, server.config.root]))
             ) {
-              return next();
+              return passThrough();
             }
 
             // @farm.js/plugin/api runs middleware itself for the requests it
             // serves, because it may be registered ahead of this hook. Running
             // it here as well executed every middleware twice per API request.
             if ((server as any).__farmApi__ && pathname.startsWith("/api/")) {
-              return next();
+              return passThrough();
             }
 
             try {
@@ -555,10 +565,10 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
               // Fail the request, as core's dev server does. Carrying on would
               // render the page a throwing auth check was meant to protect.
               console.error("[FARM] Middleware error:", e);
-              return next(e);
+              return passThrough(e);
             }
 
-            next();
+            passThrough();
           }),
         );
       };
