@@ -703,16 +703,42 @@ function readTsconfigSourceAlias(root: string): string | null {
   const tsconfigPath = path.join(root, "tsconfig.json");
   if (!existsSync(tsconfigPath)) return null;
   try {
-    const raw = readFileSync(tsconfigPath, "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/^\s*\/\/.*$/gm, "")
-      .replace(/,(\s*[}\]])/g, "$1");
+    const raw = stripJsonComments(readFileSync(tsconfigPath, "utf8")).replace(/,(\s*[}\]])/g, "$1");
     const target = JSON.parse(raw)?.compilerOptions?.paths?.["@/*"]?.[0];
     if (typeof target !== "string") return null;
     return /^(\.\/)?src\/\*$/.test(target) ? null : target;
   } catch {
     return null;
   }
+}
+
+/**
+ * Drop `//` and block comments outside string literals. A regex would treat the
+ * "@/*" alias and a later "include" glob as one block comment and corrupt the JSON.
+ */
+function stripJsonComments(source: string): string {
+  let output = "";
+  let inString = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (inString) {
+      output += char;
+      if (char === "\\") output += source[++index] ?? "";
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+      output += char;
+    } else if (char === "/" && source[index + 1] === "/") {
+      while (index < source.length && source[index] !== "\n") index++;
+      output += "\n";
+    } else if (char === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end === -1 ? source.length : end + 1;
+    } else {
+      output += char;
+    }
+  }
+  return output;
 }
 
 function transformNextContent(content: string) {

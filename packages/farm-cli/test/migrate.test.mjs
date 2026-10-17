@@ -327,7 +327,8 @@ test("rewrites Next imports in shared code outside the App Router", async () => 
     await writeFile(path.join(root, "content", "guide.mdx"), guide, "utf8");
     await writeFile(
       path.join(root, "tsconfig.json"),
-      `{\n  // Next's default alias\n  "compilerOptions": { "paths": { "@/*": ["./*"] } },\n}\n`,
+      // Next's generated tsconfig: the "include" globs follow the "@/*" alias.
+      `{\n  // Next's default alias\n  "compilerOptions": { "paths": { "@/*": ["./*"] } },\n  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],\n}\n`,
       "utf8",
     );
     await writeFile(path.join(root, "next.config.ts"), "export default {};\n", "utf8");
