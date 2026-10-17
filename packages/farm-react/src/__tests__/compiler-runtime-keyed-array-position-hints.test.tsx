@@ -1,3 +1,4 @@
+import { observeWeakMapSets } from "./observe-weak-map-sets";
 import React, { StrictMode, useState } from "react";
 import { act } from "react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
@@ -372,12 +373,7 @@ describe("compiled keyed-array position hints", () => {
     await act(async () => root.render(<harness.Table />));
     const retained = container.querySelector('[data-key="b"]');
     let indexWrites = 0;
-    const originalSet = WeakMap.prototype.set;
-    vi.spyOn(WeakMap.prototype, "set").mockImplementation(function (
-      this: WeakMap<object, unknown>,
-      key: object,
-      value: unknown,
-    ) {
+    observeWeakMapSets((key, value) => {
       if (
         value !== null &&
         typeof value === "object" &&
@@ -386,7 +382,6 @@ describe("compiled keyed-array position hints", () => {
       ) {
         indexWrites += 1;
       }
-      return originalSet.call(this, key, value);
     });
     for (const [method, label] of [
       [harness.withReplace, "Beta with"],

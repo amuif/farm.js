@@ -30,7 +30,7 @@ afterEach(async () => {
   );
 });
 
-describe.sequential("writeSearchIndex", () => {
+describe("writeSearchIndex", { concurrent: false }, () => {
   it("creates a real Pagefind bundle from selected static pages", async () => {
     const { outputDir, publicDir } = await createOutput();
     await mkdir(path.join(publicDir, "docs"), { recursive: true });

@@ -1,3 +1,4 @@
+import { observeWeakMapSets } from "./observe-weak-map-sets";
 import React, { StrictMode, act } from "react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -42,16 +43,10 @@ afterEach(async () => {
 
 function trackRowIndexWrites() {
   const writes = { count: 0 };
-  const original = WeakMap.prototype.set;
-  vi.spyOn(WeakMap.prototype, "set").mockImplementation(function (
-    this: WeakMap<object, unknown>,
-    key: object,
-    value: unknown,
-  ) {
+  observeWeakMapSets((key, value) => {
     if (value && typeof value === "object" && "element" in value && value.element === key) {
       writes.count += 1;
     }
-    return original.call(this, key, value);
   });
   return writes;
 }

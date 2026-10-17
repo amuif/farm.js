@@ -1,9 +1,9 @@
-import { bench, describe, expect } from "vitest";
+import { test, expect } from "vitest";
 import { ClientRouteManifest } from "../api/client-routes";
 import { ClientRouteManifest as Previous } from "./controls/client-route-manifest";
 
 for (const count of [1, 1_000, 10_000])
-  describe(`${count} client routes`, () => {
+  test(`${count} client routes`, async ({ bench }) => {
     const routes = [
       { path: "/api/health", methods: ["GET"] },
       ...Array.from({ length: count }, (_, i) => ({
@@ -23,14 +23,18 @@ for (const count of [1, 1_000, 10_000])
     expect(indexed.bind("/api/resource-0", { id: "one" })).toEqual(
       previous.bind("/api/resource-0", { id: "one" }),
     );
-    bench("previous static resolve + binding", () => call(previous));
-    bench("indexed static resolve + binding", () => call(indexed));
+    await bench.compare(
+      bench("previous static resolve + binding", () => call(previous)),
+      bench("indexed static resolve + binding", () => call(indexed)),
+    );
     if (count === 1_000) {
-      bench("previous construction", () => {
-        new Previous(routes);
-      });
-      bench("indexed construction", () => {
-        new ClientRouteManifest(routes);
-      });
+      await bench.compare(
+        bench("previous construction", () => {
+          new Previous(routes);
+        }),
+        bench("indexed construction", () => {
+          new ClientRouteManifest(routes);
+        }),
+      );
     }
   });

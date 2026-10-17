@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { bench, describe } from "vitest";
+import { test } from "vitest";
 import {
   matchRoute,
   matchRouteParts,
@@ -24,22 +24,26 @@ assert.deepEqual(scanWithSharedParts(), scanWithRepeatedParsing());
 assert.deepEqual(findLayoutsWithSharedParts(), findLayoutsWithRequestSort());
 let _benchmarkSink: unknown;
 
-describe("route table scan", () => {
-  bench("shared decoded pathname", () => {
-    _benchmarkSink = scanWithSharedParts();
-  });
-  bench("per-candidate pathname parsing control", () => {
-    _benchmarkSink = scanWithRepeatedParsing();
-  });
+test("route table scan", async ({ bench }) => {
+  await bench.compare(
+    bench("shared decoded pathname", () => {
+      _benchmarkSink = scanWithSharedParts();
+    }),
+    bench("per-candidate pathname parsing control", () => {
+      _benchmarkSink = scanWithRepeatedParsing();
+    }),
+  );
 });
 
-describe("layout matching", () => {
-  bench("discovery-time layout order", () => {
-    _benchmarkSink = findLayoutsWithSharedParts();
-  });
-  bench("per-request layout sort control", () => {
-    _benchmarkSink = findLayoutsWithRequestSort();
-  });
+test("layout matching", async ({ bench }) => {
+  await bench.compare(
+    bench("discovery-time layout order", () => {
+      _benchmarkSink = findLayoutsWithSharedParts();
+    }),
+    bench("per-request layout sort control", () => {
+      _benchmarkSink = findLayoutsWithRequestSort();
+    }),
+  );
 });
 
 function scanWithSharedParts() {
