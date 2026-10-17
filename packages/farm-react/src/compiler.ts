@@ -1503,6 +1503,9 @@ function keyedMapUpdatePipeline(
   return outerCallbacks.reverse();
 }
 
+// Hint passes may borrow the unchanged root when their eligibility set is empty.
+// Callers adopt a returned root only after a positive rewrite count and successful
+// reanalysis. Any pass that can mutate still clones before traversing.
 function rewriteKeyedMapUpdateHints(
   root: t.JSXElement,
   hintedStateIndices: ReadonlySet<number>,
@@ -1510,7 +1513,7 @@ function rewriteKeyedMapUpdateHints(
   helperIdentifier: t.Identifier,
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number } {
-  if (hintedStateIndices.size === 0) return { root: t.cloneNode(root, true), count: 0 };
+  if (hintedStateIndices.size === 0) return { root, count: 0 };
   const file = expressionFile(t.cloneNode(root, true));
   let count = 0;
   traverse(file, {
@@ -1596,7 +1599,7 @@ function rewriteKeyedArrayAppendHints(
   helperIdentifier: t.Identifier,
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number } {
-  if (hintedStateIndices.size === 0) return { root: t.cloneNode(root, true), count: 0 };
+  if (hintedStateIndices.size === 0) return { root, count: 0 };
   const file = expressionFile(t.cloneNode(root, true));
   let count = 0;
   traverse(file, {
@@ -1699,7 +1702,7 @@ function rewriteKeyedArrayPrependHints(
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -1810,7 +1813,7 @@ function rewriteKeyedArrayRollingWindowHints(
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -1993,7 +1996,7 @@ function rewriteKeyedArrayPositionHints(
 } {
   if (hintedStateIndices.size === 0) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       count: 0,
       batchInsertCount: 0,
       windowReplaceCount: 0,
@@ -2167,7 +2170,7 @@ function rewriteKeyedArrayReorderHints(
   helperIdentifier: t.Identifier,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -2406,7 +2409,7 @@ function rewriteKeyedArrayReorderPipelineHints(
 } {
   if (hintedStateIndices.size === 0) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       filterCount: 0,
       mapCount: 0,
       mapReorderCount: 0,
@@ -3886,7 +3889,7 @@ function rewriteKeyedArraySortHints(
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -3973,7 +3976,7 @@ function rewriteKeyedArraySliceHints(
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -4058,7 +4061,7 @@ function rewriteKeyedArrayFilterHints(
   safeGlobals: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number; stateIndices: ReadonlySet<number> } {
   if (hintedStateIndices.size === 0) {
-    return { root: t.cloneNode(root, true), count: 0, stateIndices: new Set() };
+    return { root, count: 0, stateIndices: new Set() };
   }
   const file = expressionFile(t.cloneNode(root, true));
   const stateIndices = new Set<number>();
@@ -4508,7 +4511,7 @@ function rewriteKeyedCollectionUpdateHints(
   mutationHelper: t.Identifier,
   globalCollections: ReadonlySet<string>,
 ): { root: t.JSXElement; count: number } {
-  if (targetKinds.size === 0) return { root: t.cloneNode(root, true), count: 0 };
+  if (targetKinds.size === 0) return { root, count: 0 };
   const file = expressionFile(t.cloneNode(root, true));
   let count = 0;
 
