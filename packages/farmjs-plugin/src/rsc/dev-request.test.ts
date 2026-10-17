@@ -9,6 +9,7 @@ import { linkRscFixtureDependencies } from "./test-fixture-dependencies.js";
 async function dispatchRscDevRequest(
   headers: Record<string, string>,
   url = "/dashboard",
+  runnable = true,
 ): Promise<{ status: number; request?: Request; context?: { clientAddress?: string } }> {
   const root = mkdtempSync(path.join(tmpdir(), "farm-dev-rsc-request-"));
   const previousSSRLoader = (globalThis as any).__VITE_RSC_LOAD_SSR__;
@@ -38,7 +39,7 @@ async function dispatchRscDevRequest(
       environments: {
         rsc: {
           pluginContainer: { resolveId: async () => ({ id: "test-entry" }) },
-          runner: { import: async () => ({ default: { fetch } }) },
+          runner: runnable ? { import: async () => ({ default: { fetch } }) } : undefined,
         },
       },
     };
@@ -99,4 +100,10 @@ it("keeps the request path when the Host header carries one", async () => {
   const result = await dispatchRscDevRequest({ host: "farm.test/admin#" }, "/dashboard");
 
   expect(new URL(result.request!.url).pathname).toBe("/dashboard");
+});
+
+it("reports a non-runnable RSC environment instead of silently using Node SSR", async () => {
+  const result = await dispatchRscDevRequest({ host: "farm.test" }, "/dashboard", false);
+  expect(result.status).toBe(500);
+  expect(result.request).toBeUndefined();
 });

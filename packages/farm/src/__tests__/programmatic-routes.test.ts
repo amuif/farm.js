@@ -253,9 +253,15 @@ describe("programmatic routes", () => {
 
     const manager = new RouteManager(createConfig(root), {
       config: { root },
-      ssrLoadModule: async (filePath: string) => {
-        expect(filePath).toBe("/src/farm.routes.js");
-        return { default: manifest };
+      environments: {
+        ssr: {
+          runner: {
+            import: async (filePath: string) => {
+              expect(filePath).toBe("/src/farm.routes.js");
+              return { default: manifest };
+            },
+          },
+        },
       },
     } as any);
     manager.setRendererRuntime(createTestRendererRuntime() as any);
@@ -310,7 +316,7 @@ describe("programmatic routes", () => {
     ]);
     const manager = new RouteManager(createConfig(root), {
       config: { root },
-      ssrLoadModule: async () => ({ default: manifest }),
+      environments: { ssr: { runner: { import: async () => ({ default: manifest }) } } },
     } as any);
     manager.setRendererRuntime(createTestRendererRuntime() as any);
 
@@ -328,7 +334,7 @@ describe("programmatic routes", () => {
     ]);
     const manager = new RouteManager(createConfig(root), {
       config: { root },
-      ssrLoadModule: async () => ({ default: manifest }),
+      environments: { ssr: { runner: { import: async () => ({ default: manifest }) } } },
     } as any);
     manager.setRendererRuntime(createTestRendererRuntime() as any);
 
@@ -347,15 +353,21 @@ describe("programmatic routes", () => {
     fs.writeFileSync(routesFile, "export {};\n");
 
     const manager = new RouteManager(createConfig(root), {
-      ssrLoadModule: async () => ({
-        default: defineRoutes(({ page }) => [
-          page("/about", {
-            component: function AboutOverride() {
-              return null;
-            },
-          }),
-        ]),
-      }),
+      environments: {
+        ssr: {
+          runner: {
+            import: async () => ({
+              default: defineRoutes(({ page }) => [
+                page("/about", {
+                  component: function AboutOverride() {
+                    return null;
+                  },
+                }),
+              ]),
+            }),
+          },
+        },
+      },
     } as any);
 
     await expect(manager.discoverRoutes()).rejects.toThrow('Duplicate page route "/about"');
@@ -410,9 +422,15 @@ describe("programmatic routes", () => {
 
     const manager = new RouteManager(createConfig(root), {
       config: { root },
-      ssrLoadModule: async (filePath: string) => {
-        expect(filePath).toBe("/src/farm.route.tsx");
-        return { Route: ProductRoute };
+      environments: {
+        ssr: {
+          runner: {
+            import: async (filePath: string) => {
+              expect(filePath).toBe("/src/farm.route.tsx");
+              return { Route: ProductRoute };
+            },
+          },
+        },
       },
     } as any);
     manager.setRendererRuntime(createTestRendererRuntime() as any);
@@ -520,7 +538,7 @@ describe("programmatic routes", () => {
     });
 
     const manager = new RouteManager(createConfig(root), {
-      ssrLoadModule: async () => ({ Route: ProductRoute }),
+      environments: { ssr: { runner: { import: async () => ({ Route: ProductRoute }) } } },
     } as any);
 
     await manager.discoverRoutes();

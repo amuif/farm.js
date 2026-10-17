@@ -142,3 +142,13 @@ describe("Farm Vite type artifacts", () => {
     }
   });
 });
+
+it("declares client and SSR development environments without adding production builds", () => {
+  const plugin = farmPlugin();
+  const configure = plugin.config as Function;
+  expect(configure({}, { command: "serve", mode: "development" }).environments).toEqual({
+    client: {},
+    ssr: {},
+  });
+  expect(configure({}, { command: "build", mode: "production" }).environments).toBeUndefined();
+});

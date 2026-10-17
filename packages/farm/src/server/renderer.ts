@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 import * as fs from "fs";
 import * as https from "https";
 import { isIP } from "net";
@@ -584,7 +585,7 @@ export class ServerRenderer {
     const loaded = isReactRenderer(this.config.renderer)
       ? await import("../renderer/react/server")
       : this.viteServer
-        ? await this.viteServer.ssrLoadModule(this.config.renderer.server)
+        ? await loadFarmDevModule(this.viteServer, this.config.renderer.server)
         : await import(
             pathToFileURL(
               resolveFarmRendererModule(
@@ -1980,7 +1981,7 @@ export class ServerRenderer {
               )
             : provider.component.module;
           const providerModule = this.viteServer
-            ? await this.viteServer.ssrLoadModule(providerModuleId)
+            ? await loadFarmDevModule(this.viteServer, providerModuleId)
             : await importRuntimeModule(
                 provider.component.module.startsWith(".")
                   ? pathToFileURL(path.resolve(this.config.root, provider.component.module)).href
