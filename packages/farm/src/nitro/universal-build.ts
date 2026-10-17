@@ -10252,7 +10252,7 @@ async function stageSharpRuntime(
       ...packageJson.dependencies,
       ...packageJson.optionalDependencies,
     };
-    await Promise.all([
+    await settleAllOrThrow([
       fs.cp(packageDir, targetDir, {
         recursive: true,
         force: true,
@@ -10311,6 +10311,19 @@ async function installStagedSharpRuntime(
   );
 }
 
+/**
+ * Wait for every operation, then throw the first failure. A plain Promise.all rejects while its
+ * siblings still write, so cleanup that follows races them and fails with ENOTEMPTY, hiding the
+ * real error.
+ */
+async function settleAllOrThrow(operations: Promise<unknown>[]): Promise<void> {
+  const results = await Promise.allSettled(operations);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
+}
+
 async function mergeStagedDirectory(
   sourceDir: string,
   targetDir: string,
@@ -10319,7 +10332,7 @@ async function mergeStagedDirectory(
   await fs.mkdir(targetDir, { recursive: true });
   const entries = await fs.readdir(sourceDir, { withFileTypes: true });
 
-  await Promise.all(
+  await settleAllOrThrow(
     entries.map(async (entry) => {
       const sourcePath = path.join(sourceDir, entry.name);
       const targetPath = path.join(targetDir, entry.name);
@@ -10420,20 +10433,29 @@ async function writeNitroOutputPackage(
   );
 }
 
-function resolvePackageJson(parentRequire: NodeJS.Require, packageName: string): string | null {
+/** @internal The package.json of a dependency, as staged into a server output. */
+export function resolvePackageJson(
+  parentRequire: NodeJS.Require,
+  packageName: string,
+): string | null {
+  let metadataModule: string | undefined;
   for (const request of [`${packageName}/package.json`, `${packageName}/package`]) {
     try {
-      return parentRequire.resolve(request);
+      const resolved = parentRequire.resolve(request);
+      // A `./package` export can be a module rather than the manifest (Sharp's wasm
+      // packages map it to export/package.cjs). Only a JSON file is the manifest itself.
+      if (resolved.endsWith(".json")) return resolved;
+      metadataModule ??= resolved;
     } catch {
       // Try the next package metadata export.
     }
   }
 
   // Some modern packages, including Sharp 0.35+, do not export their
-  // package.json. Resolve their entry point and walk back to the package root
-  // so production staging keeps working without requiring a legacy export.
+  // package.json. Resolve their entry point (or metadata module) and walk back
+  // to the package root so production staging works without a legacy export.
   try {
-    let directory = path.dirname(parentRequire.resolve(packageName));
+    let directory = path.dirname(metadataModule ?? parentRequire.resolve(packageName));
     while (directory !== path.dirname(directory)) {
       const candidate = path.join(directory, "package.json");
       if (existsSync(candidate)) {
