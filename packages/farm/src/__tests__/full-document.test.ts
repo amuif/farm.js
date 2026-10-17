@@ -7,6 +7,7 @@ import React from "react";
 import { renderToPipeableStream } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  classifyFarmDocumentPrefix,
   composeFarmFullDocument,
   ensureFarmDocumentHead,
   ensureFarmDocumentRoot,
@@ -166,6 +167,69 @@ describe.each([
     );
   });
 
+  it("finds a wrapped document behind the head elements React hoists ahead of it", async () => {
+    // A create-app style root layout: its own document, with charset and viewport metas.
+    const tree = React.createElement(
+      "div",
+      { "data-farm-layout-boundary": "true", style: { display: "contents" } },
+      React.createElement(
+        "html",
+        { lang: "en" },
+        React.createElement(
+          "head",
+          null,
+          React.createElement("meta", { charSet: "utf-8" }),
+          React.createElement("meta", { name: "viewport", content: "width=device-width" }),
+          React.createElement("script", { dangerouslySetInnerHTML: { __html: "boot()" } }),
+        ),
+        React.createElement("body", null, React.createElement("main", null, "hello")),
+      ),
+    );
+    const chunks: Buffer[] = [];
+    const destination = new Writable({
+      write(chunk, _encoding, done) {
+        chunks.push(Buffer.from(chunk));
+        done();
+      },
+    });
+    const completed = finished(destination);
+    const stream = renderToPipeableStream(tree, {
+      onAllReady() {
+        stream.pipe(destination);
+      },
+      onError(error) {
+        destination.destroy(error instanceof Error ? error : new Error(String(error)));
+      },
+    });
+    await completed;
+    const markup = Buffer.concat(chunks).toString("utf8");
+
+    // React writes the metas before Farm's wrapper, not inside the layout's <head>.
+    expect(markup.indexOf("<meta")).toBeLessThan(markup.indexOf("<div"));
+    expect(extract(markup)).toBe(
+      '<html lang="en"><head><meta charSet="utf-8"/>' +
+        '<meta name="viewport" content="width=device-width"/><script>boot()</script></head>' +
+        "<body><main>hello</main></body></html>",
+    );
+  });
+
+  it("returns hoisted elements to a document that renders no <head>", () => {
+    expect(
+      extract(
+        '<link rel="preload" as="image" href="/a.png"/><div style="display:contents">' +
+          "<html><body>x</body></html></div>",
+      ),
+    ).toBe(
+      '<html><head><link rel="preload" as="image" href="/a.png"/></head><body>x</body></html>',
+    );
+  });
+
+  it("does not take a fragment layout that starts with head elements for a document", () => {
+    expect(
+      extract('<meta charSet="utf-8"/><div style="display:contents"><main>x</main></div>'),
+    ).toBeNull();
+  });
+
   it("preserves a real React Suspense reveal after Unicode content", async () => {
     let release!: () => void;
     let ready = false;
@@ -259,6 +323,16 @@ describe("full-document detection", () => {
 
   it("recognises a raw <!DOCTYPE> document", () => {
     expect(isFarmFullDocument("<!DOCTYPE html><html><body>x</body></html>")).toBe(true);
+  });
+
+  it("waits past a first chunk that holds only wrappers and hoisted head elements", () => {
+    const hoisted = '<meta charSet="utf-8"/><meta name="viewport" content="width=device-width"/>';
+    expect(classifyFarmDocumentPrefix(hoisted)).toBe("pending");
+    expect(classifyFarmDocumentPrefix(`${hoisted}<div style="display:contents">`)).toBe("pending");
+    expect(
+      classifyFarmDocumentPrefix(`${hoisted}<div style="display:contents"><html lang="en">`),
+    ).toBe("document");
+    expect(classifyFarmDocumentPrefix(`${hoisted}${fragmentMarkup}`)).toBe("fragment");
   });
 
   it("opensFarmFullDocument sees a streamed prefix before </html> arrives", () => {

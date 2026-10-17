@@ -17,8 +17,8 @@ import { logger, toViteModuleId } from "../utils";
 import { collectDevStylesheetUrls, resolveDevGlobalStylesheetHref } from "./dev-styles";
 import {
   composeFarmFullDocument,
+  classifyFarmDocumentPrefix,
   extractFarmFullDocument,
-  opensFarmFullDocument,
   removeFarmDocumentTitles,
 } from "./full-document";
 import {
@@ -281,6 +281,8 @@ function warnSuppressedAsyncHydrationOnce(modulePath: string, reason?: string): 
 // route is seen to be full-document it is served through the buffered path
 // (which composes the document correctly) on every subsequent request.
 const fullDocumentRoutes = new Set<string>();
+/** Whether a root layout function returns its own `<html>` document. */
+const documentLayouts = new WeakMap<object, boolean>();
 
 function hasRequestHeader(req: FarmRequest, name: string): boolean {
   const value = req.headers[name.toLowerCase()];
@@ -2811,6 +2813,46 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
     }
   }
 
+  /**
+   * Whether the root layout returns its own `<html>` document, checked as the client's layout
+   * boundary checks it: call a plain synchronous layout and look at what it returns. Knowing
+   * this up front keeps a route's first request on the buffered path too; a layout this cannot
+   * call (async, a class, or one using hooks) falls back to detection from the stream.
+   */
+  private async rootLayoutRendersDocument(): Promise<boolean> {
+    if (typeof this.routeManager.getLayouts !== "function") return false;
+    const rootLayout = this.routeManager.getLayouts().get("/");
+    if (!rootLayout) return false;
+    try {
+      const Layout = (await this.routeManager.loadLayoutModule(rootLayout.modulePath)).default;
+      if (
+        typeof Layout !== "function" ||
+        Layout.prototype?.isReactComponent ||
+        Layout.constructor?.name === "AsyncFunction"
+      ) {
+        return false;
+      }
+      const cached = documentLayouts.get(Layout);
+      if (cached !== undefined) return cached;
+      let rendersDocument = false;
+      try {
+        const rendered = (Layout as (props: { children: null; params: object }) => unknown)({
+          children: null,
+          params: {},
+        });
+        rendersDocument =
+          this.rendererRuntime.isValidElement(rendered) &&
+          (rendered as { type?: unknown }).type === "html";
+      } catch {
+        rendersDocument = false;
+      }
+      documentLayouts.set(Layout, rendersDocument);
+      return rendersDocument;
+    } catch {
+      return false;
+    }
+  }
+
   private async renderWithSSR(
     element: any,
     req: FarmRequest,
@@ -2829,9 +2871,13 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
     const fullDocumentRouteKey =
       options.observabilityRoute || (req as any).__FARM_ROUTE__ || req.url || "/";
     // A full-document layout can't be composed once the stream's shell is
-    // flushed, so a route previously seen to render one is served through the
-    // buffered path, which produces a valid single document.
-    if (!renderToPipeableStream || fullDocumentRoutes.has(fullDocumentRouteKey)) {
+    // flushed, so a route known to render one is served through the buffered
+    // path, which produces a valid single document.
+    if (
+      !renderToPipeableStream ||
+      fullDocumentRoutes.has(fullDocumentRouteKey) ||
+      (await this.rootLayoutRendersDocument())
+    ) {
       return this.renderBufferedSSR(element, req, res, clearMiddlewareData, options);
     }
 
@@ -3059,14 +3105,18 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
 
           let firstChunk = true;
           let checkedFullDocument = false;
+          let documentPrefix = "";
           const cspNonceRewriter = cspNonce ? createFarmCspNonceRewriter(cspNonce) : undefined;
           const cspStreamDecoder = cspNonceRewriter ? new TextDecoder() : undefined;
           const recordRenderedChunk = (chunkText: string) => {
             if (!chunkText) return;
             if (!checkedFullDocument) {
-              checkedFullDocument = true;
-              if (opensFarmFullDocument(chunkText)) {
-                fullDocumentRoutes.add(fullDocumentRouteKey);
+              documentPrefix += chunkText;
+              const prefix = classifyFarmDocumentPrefix(documentPrefix);
+              if (prefix !== "pending") {
+                checkedFullDocument = true;
+                documentPrefix = "";
+                if (prefix === "document") fullDocumentRoutes.add(fullDocumentRouteKey);
               }
             }
             htmlParts.push(chunkText);

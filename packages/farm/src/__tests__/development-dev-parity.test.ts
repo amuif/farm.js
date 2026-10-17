@@ -104,6 +104,76 @@ export default function Page() {
     expect(server.config.optimizeDeps.exclude ?? []).not.toContain("better-call");
   }, 60_000);
 
+  it("serves a create-app document layout as one document from the first request", async () => {
+    const root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-document-")),
+    );
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "src/components/counter.tsx",
+      `"use client";
+import { useState } from "react";
+export function Counter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount(count + 1)}>count {count}</button>;
+}`,
+    );
+    // React hoists these metas ahead of Farm's layout boundary when it renders the tree.
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `export default function Layout({ children }) {
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta content="width=device-width, initial-scale=1" name="viewport" />
+      </head>
+      <body className="app">{children}</body>
+    </html>
+  );
+}`,
+    );
+    await writeModule(
+      root,
+      "src/app/page.tsx",
+      `import { Counter } from "../components/counter";
+export default function Page() {
+  return <main><Counter /></main>;
+}`,
+    );
+
+    const server = await createServer({ root, images: { provider: "none" } });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+
+    for (const attempt of ["first", "second"]) {
+      const response = await fetch(`http://localhost:${address.port}/`, {
+        headers: { accept: "text/html" },
+      });
+      const html = await response.text();
+      expect({ attempt, documents: html.match(/<html[\s>]/gi)?.length }).toEqual({
+        attempt,
+        documents: 1,
+      });
+      expect(html).toMatch(/<head>[\s\S]*<meta charSet="utf-8"\/>[\s\S]*<\/head>/);
+      expect(html).toContain('<body class="app">');
+      expect(html).toMatch(/count (?:<!-- -->)?0/);
+    }
+  }, 60_000);
+
   it("keeps an @ alias from the app's own Vite config", async () => {
     const root = await fs.realpath(
       await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-alias-")),

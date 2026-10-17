@@ -6490,13 +6490,32 @@ function createFarmDocumentStream(contentStream, prefix, suffix, onComplete) {
 }
 
 function stripFarmDocumentWrappers(markup) {
-  let output = markup.replace(/^\\s+/, "");
+  return peelFarmDocumentPrefix(markup).inner;
+}
+
+// Farm's display:contents wrappers, and the head elements React 19 hoists in front of them
+// (charset, viewport, preloads, titles) when the layout's <html> is not the render root.
+function peelFarmDocumentPrefix(markup) {
+  let inner = markup.replace(/^\\s+/, "");
+  let hoisted = "";
   const wrapper = /^<div\\b[^>]*style=["']display\\s*:\\s*contents["'][^>]*>/i;
+  const hoistable = /^(?:<(?:meta|link|base)\\b[^>]*>|<title\\b[^>]*>[\\s\\S]*?<\\/title>)/i;
   let match;
-  while ((match = wrapper.exec(output))) {
-    output = output.slice(match[0].length).replace(/^\\s+/, "");
+  while ((match = wrapper.exec(inner) || hoistable.exec(inner))) {
+    if (!/^<div/i.test(match[0])) hoisted += match[0];
+    inner = inner.slice(match[0].length).replace(/^\\s+/, "");
   }
-  return output;
+  return { inner: inner, hoisted: hoisted };
+}
+
+function restoreFarmHoistedHead(document, hoisted) {
+  if (!hoisted) return document;
+  if (/<head[\\s>]/i.test(document)) {
+    return document.replace(/<head\\b[^>]*>/i, function(open) { return open + hoisted; });
+  }
+  return document.replace(/<html\\b[^>]*>/i, function(open) {
+    return open + "<head>" + hoisted + "</head>";
+  });
 }
 
 function opensFarmFullDocument(markup) {
@@ -6506,6 +6525,7 @@ function opensFarmFullDocument(markup) {
 
 function extractFarmFullDocument(markup) {
   if (!opensFarmFullDocument(markup)) return null;
+  const hoisted = peelFarmDocumentPrefix(markup).hoisted;
   const start = markup.search(/<!doctype|<html[\\s>]/i);
   const lower = markup.toLowerCase();
   let closeIndex = lower.lastIndexOf("</html>");
@@ -6533,7 +6553,7 @@ function extractFarmFullDocument(markup) {
       return streamedTail + "</body>";
     });
   }
-  return document;
+  return restoreFarmHoistedHead(document, hoisted);
 }
 
 function ensureFarmDocumentHead(markup) {
