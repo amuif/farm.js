@@ -45,6 +45,16 @@ describe("metadata head rendering", () => {
     expect(renderMetadataHead(page).title).toBe("Getting started — Docs");
   });
 
+  it("uses an absolute title as written, past the parent template", () => {
+    const root = mergeMetadata(undefined, {
+      title: { default: "Acme", template: "%s | Acme" },
+    });
+    const home = mergeMetadata(root, { title: { absolute: "Acme — build things" } });
+
+    expect(renderMetadataHead(home).title).toBe("Acme — build things");
+    expect(renderMetadataHead({ title: { absolute: "Alone" } }).title).toBe("Alone");
+  });
+
   it("keeps the fallback available when only an Apple touch icon is configured", () => {
     const rendered = renderMetadataHead({
       icons: {

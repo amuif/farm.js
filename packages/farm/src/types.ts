@@ -595,7 +595,8 @@ export type MetadataJsonLd = object;
 
 export interface Metadata {
   metadataBase?: string | URL;
-  title?: string | { default?: string; template?: string };
+  /** `absolute` names a page exactly, past any parent `template` (as in Next.js). */
+  title?: string | { default?: string; template?: string; absolute?: string };
   description?: string;
   keywords?: string | string[];
   /**

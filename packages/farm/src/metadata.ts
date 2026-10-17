@@ -96,6 +96,12 @@ function mergeMetadataTitle(base: Metadata["title"], next: Metadata["title"]): M
 
   if (!isRecord(next)) return next;
 
+  const absoluteTitle = normalizeContent(next.absolute);
+  if (absoluteTitle) {
+    const { absolute: _absolute, ...rest } = next;
+    return { ...rest, default: absoluteTitle };
+  }
+
   const defaultTitle = normalizeContent(next.default) ?? resolveMetadataTitle(base);
   return {
     ...next,
@@ -523,7 +529,7 @@ function hasMetadataImages(value: unknown): boolean {
 export function resolveMetadataTitle(title: Metadata["title"]): string | undefined {
   if (typeof title === "string") return title;
   if (isRecord(title)) {
-    return normalizeContent(title.default);
+    return normalizeContent(title.absolute) ?? normalizeContent(title.default);
   }
   return undefined;
 }

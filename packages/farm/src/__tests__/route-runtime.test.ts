@@ -37,6 +37,9 @@ describe("route runtime controls", () => {
       maxDuration: 30,
     });
 
+    expect(normalizeFarmRouteRuntimeConfig({ runtime: "nodejs" as any })).toEqual({
+      runtime: "node",
+    });
     expect(() => normalizeFarmRouteRuntimeConfig({ runtime: "worker" as any })).toThrow(
       'runtime must be "auto", "node", or "edge"',
     );
