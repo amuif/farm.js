@@ -178,24 +178,23 @@ const COMPILER_KEYED_COMMITTED_ITEM_SNAPSHOTS = /* @__PURE__ */ new WeakMap<
   object,
   readonly unknown[]
 >();
-const NATIVE_ARRAY_PROTOTYPE = Array.prototype;
-const NATIVE_ARRAY_ITERATOR = Array.prototype[Symbol.iterator];
-const NATIVE_ARRAY_FILTER = Array.prototype.filter;
-const NATIVE_ARRAY_MAP = Array.prototype.map;
-const NATIVE_ARRAY_SLICE = Array.prototype.slice;
-const NATIVE_ARRAY_TO_SPLICED = (
-  Array.prototype as unknown as { toSpliced?: (...args: readonly unknown[]) => unknown }
-).toSpliced;
-const NATIVE_ARRAY_WITH = (
-  Array.prototype as unknown as { with?: (...args: readonly unknown[]) => unknown }
-).with;
-const NATIVE_ARRAY_TO_REVERSED = (
-  Array.prototype as unknown as { toReversed?: (...args: readonly unknown[]) => unknown }
-).toReversed;
-const NATIVE_ARRAY_TO_SORTED = (
-  Array.prototype as unknown as { toSorted?: (...args: readonly unknown[]) => unknown }
-).toSorted;
-const NATIVE_REFLECT_APPLY = Reflect.apply;
+const NATIVE_ARRAY_PROTOTYPE = /* @__PURE__ */ (() => Array.prototype)();
+const NATIVE_ARRAY_ITERATOR = /* @__PURE__ */ (() => Array.prototype[Symbol.iterator])();
+const NATIVE_ARRAY_FILTER = /* @__PURE__ */ (() => Array.prototype.filter)();
+const NATIVE_ARRAY_MAP = /* @__PURE__ */ (() => Array.prototype.map)();
+const NATIVE_ARRAY_SLICE = /* @__PURE__ */ (() => Array.prototype.slice)();
+const NATIVE_ARRAY_TO_SPLICED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toSpliced?: (...args: readonly unknown[]) => unknown })
+    .toSpliced)();
+const NATIVE_ARRAY_WITH = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { with?: (...args: readonly unknown[]) => unknown }).with)();
+const NATIVE_ARRAY_TO_REVERSED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toReversed?: (...args: readonly unknown[]) => unknown })
+    .toReversed)();
+const NATIVE_ARRAY_TO_SORTED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toSorted?: (...args: readonly unknown[]) => unknown })
+    .toSorted)();
+const NATIVE_REFLECT_APPLY = /* @__PURE__ */ (() => Reflect.apply)();
 
 function compilerObject(value: unknown): object | undefined {
   return (typeof value === "object" && value !== null) || typeof value === "function"
@@ -3831,11 +3830,13 @@ function keyedIdentityTargetSnapshot(value: unknown): CompilerKeyedIdentityTarge
     : { eligible: false };
 }
 
-const NATIVE_SET_PROTOTYPE = Set.prototype;
-const NATIVE_SET_ADD = Set.prototype.add;
-const NATIVE_SET_DELETE = Set.prototype.delete;
-const NATIVE_SET_HAS = Set.prototype.has;
-const NATIVE_SET_VALUES = Set.prototype.values;
+// Capture intrinsics at module evaluation, while allowing bundlers to omit each
+// snapshot when its optional collection feature is unused.
+const NATIVE_SET_PROTOTYPE = /* @__PURE__ */ (() => Set.prototype)();
+const NATIVE_SET_ADD = /* @__PURE__ */ (() => Set.prototype.add)();
+const NATIVE_SET_DELETE = /* @__PURE__ */ (() => Set.prototype.delete)();
+const NATIVE_SET_HAS = /* @__PURE__ */ (() => Set.prototype.has)();
+const NATIVE_SET_VALUES = /* @__PURE__ */ (() => Set.prototype.values)();
 const KEYED_COLLECTION_SNAPSHOT_MAX_DEPTH = 64;
 
 function materializeKeyedMembershipSnapshot(
@@ -3969,12 +3970,12 @@ function keyedMembershipChangedKeys(
   return keys;
 }
 
-const NATIVE_MAP_PROTOTYPE = Map.prototype;
-const NATIVE_MAP_GET = Map.prototype.get;
-const NATIVE_MAP_HAS = Map.prototype.has;
-const NATIVE_MAP_SET = Map.prototype.set;
-const NATIVE_MAP_DELETE = Map.prototype.delete;
-const NATIVE_MAP_ENTRIES = Map.prototype.entries;
+const NATIVE_MAP_PROTOTYPE = /* @__PURE__ */ (() => Map.prototype)();
+const NATIVE_MAP_GET = /* @__PURE__ */ (() => Map.prototype.get)();
+const NATIVE_MAP_HAS = /* @__PURE__ */ (() => Map.prototype.has)();
+const NATIVE_MAP_SET = /* @__PURE__ */ (() => Map.prototype.set)();
+const NATIVE_MAP_DELETE = /* @__PURE__ */ (() => Map.prototype.delete)();
+const NATIVE_MAP_ENTRIES = /* @__PURE__ */ (() => Map.prototype.entries)();
 
 function isSafeKeyedMapLookupValue(value: unknown): boolean {
   return (
@@ -7028,10 +7029,12 @@ const keyedAppendOnlyUpdateRuntime: KeyedUpdateRuntime = {
   reconcile: () => undefined,
 };
 
-const keyedFilterUpdateRuntime: KeyedUpdateRuntime = {
+// These immutable compositions have no observable effects. Mark their creation
+// as pure so unused feature chains can be removed by Rollup and Rolldown alike.
+const keyedFilterUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   filter: reconcileCompilerKeyedArrayFilter,
-};
+}))();
 
 // Only selected when the compiler emits removal hints without map/append hints.
 // Other updates continue through the existing full keyed reconciliation path.
@@ -7042,10 +7045,10 @@ const keyedFilterOnlyUpdateRuntime: KeyedUpdateRuntime = {
   filter: reconcileCompilerKeyedArrayFilter,
 };
 
-const keyedPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrepend,
-};
+}))();
 
 // Compiler-proven prepend-only hints omit map/append fast paths, not fallback.
 const keyedPrependOnlyUpdateRuntime: KeyedUpdateRuntime = {
@@ -7055,87 +7058,88 @@ const keyedPrependOnlyUpdateRuntime: KeyedUpdateRuntime = {
   prepend: reconcileCompilerKeyedArrayPrepend,
 };
 
-const keyedFilterPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedFilterPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrepend,
-};
+}))();
 
-const keyedStructuralPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedStructuralPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterPrependUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependWithStructural,
-};
+}))();
 
-const keyedPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPosition,
-};
+}))();
 
-const keyedBatchPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedBatchPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithBatch,
-};
+}))();
 
-const keyedWindowPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithWindow,
-};
+}))();
 
-const keyedReorderUpdateRuntime: KeyedUpdateRuntime = {
+const keyedReorderUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   reorder: reconcileCompilerKeyedArrayReorder,
-};
+}))();
 
-const keyedMapReorderUpdateRuntime: KeyedUpdateRuntime = {
+const keyedMapReorderUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   reorder: reconcileCompilerKeyedArrayReorderWithMap,
-};
+}))();
 
-const keyedCompleteUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterPrependUpdateRuntime,
   rollingWindow: reconcileCompilerKeyedArrayRollingWindow,
-};
+}))();
 
-const keyedEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteUpdateRuntime,
   position: reconcileCompilerKeyedArrayPosition,
   reorder: reconcileCompilerKeyedArrayReorderWithMapAndStructural,
-};
+}))();
 
-const keyedBatchEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedBatchEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedEveryUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithBatch,
-};
+}))();
 
-const keyedWindowEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedEveryUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithWindow,
-};
+}))();
 
-const keyedWindowEveryStructuralAppendUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowEveryStructuralAppendUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedWindowEveryUpdateRuntime,
   append: reconcileCompilerKeyedArrayAppendWithStructural,
-};
+}))();
 
-const keyedWindowEveryStructuralAppendMapUpdateRuntime: KeyedUpdateRuntime = {
-  ...keyedWindowEveryStructuralAppendUpdateRuntime,
-  append: reconcileCompilerKeyedArrayAppendMapWithStructural,
-  commit: commitCompilerKeyedCollectionWithItemSnapshot,
-};
+const keyedWindowEveryStructuralAppendMapUpdateRuntime: KeyedUpdateRuntime =
+  /* @__PURE__ */ (() => ({
+    ...keyedWindowEveryStructuralAppendUpdateRuntime,
+    append: reconcileCompilerKeyedArrayAppendMapWithStructural,
+    commit: commitCompilerKeyedCollectionWithItemSnapshot,
+  }))();
 
-const keyedCompleteCompatibilityUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteCompatibilityUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedWindowEveryStructuralAppendMapUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependWithStructural,
-};
+}))();
 
-const keyedCompleteStructuralPrependMapUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteStructuralPrependMapUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteCompatibilityUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependMapWithStructural,
-};
+}))();
 
-const keyedMappedRollingWindowUpdateRuntime: KeyedUpdateRuntime = {
+const keyedMappedRollingWindowUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteStructuralPrependMapUpdateRuntime,
   rollingWindow: reconcileCompilerKeyedArrayMappedRollingWindow,
-};
+}))();
 
 interface KeyedRowsRuntimeOptions {
   conditionals?: KeyedRowConditionalRuntime;
@@ -12206,10 +12210,6 @@ export function createCompiledComponentWithFeatures<Props>(
       }
     }
 
-    private captureRoot = (root: Element | null) => {
-      this.root = root;
-    };
-
     private refreshDefinition = () => {
       if (this.mounted) this.forceUpdate();
     };
@@ -12483,30 +12483,25 @@ export function createCompiledComponentWithFeatures<Props>(
       }
       let renderedElement: React.ReactElement;
       const captureCommittedRoot = (root: Element | null) => {
-        this.captureRoot(root);
-        if (!root) return;
-        renderCells.commit();
-        this.renderedDefinition = currentDefinition;
-        this.renderedElement = renderedElement;
+        this.root = root;
+        if (root) {
+          renderCells.commit();
+          this.renderedDefinition = currentDefinition;
+          this.renderedElement = renderedElement;
+        }
       };
-      if (element.type === this.blockRuntime.KeyedRanges) {
+      if (
+        element.type === this.blockRuntime.KeyedRanges ||
+        element.type === this.blockRuntime.ConditionalRanges ||
+        element.type === this.blockRuntime.MixedRanges
+      ) {
         renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerKeyedRangesBlockProps>,
-          {
-            rootRef: captureCommittedRoot,
-          },
-        );
-      } else if (element.type === this.blockRuntime.ConditionalRanges) {
-        renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerConditionalRangesBlockProps>,
+          element as React.ReactElement<
+            | CompilerKeyedRangesBlockProps
+            | CompilerConditionalRangesBlockProps
+            | CompilerMixedRangesBlockProps
+          >,
           { rootRef: captureCommittedRoot },
-        );
-      } else if (element.type === this.blockRuntime.MixedRanges) {
-        renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerMixedRangesBlockProps>,
-          {
-            rootRef: captureCommittedRoot,
-          },
         );
       } else if (typeof element.type !== "string") {
         throw new TypeError(

@@ -135,6 +135,9 @@ const [
 ]);
 
 const forbiddenDirectMarkers = [
+  "Array.prototype",
+  "Set.prototype",
+  "Map.prototype",
   "FarmCompiledConditionalBlock",
   "FarmCompiledHostConditionalBlock",
   "FarmCompiledKeyedListBlock",
