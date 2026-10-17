@@ -25,6 +25,7 @@ import { FARM_VERSION } from "../version";
 import { getFarmAppDirectories } from "../layers";
 import { createCliColors } from "../cli-colors";
 import { createFarmThemeCssPlugin } from "../theme/vite";
+import { loadTailwindVitePlugin } from "../build/tailwind";
 import {
   createFarmInstrumentationLifecycle,
   loadFarmInstrumentation,
@@ -254,14 +255,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     if (shouldUseProjectPostcss) {
       logger.info("📦 Using project PostCSS/Tailwind configuration");
     } else {
-      try {
-        const tailwindcss = (await import("@tailwindcss/vite")).default;
-        tailwindVitePlugin = tailwindcss();
-      } catch (error) {
-        logger.warn(
-          `Tailwind plugin auto-enable failed; continuing without it: ${(error as Error).message}`,
-        );
-      }
+      tailwindVitePlugin = await loadTailwindVitePlugin();
     }
 
     const server = await createViteServer(

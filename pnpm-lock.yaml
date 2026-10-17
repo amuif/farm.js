@@ -317,6 +317,9 @@ importers:
       '@farm.js/cli':
         specifier: workspace:*
         version: link:../../packages/farm-cli
+      '@tailwindcss/vite':
+        specifier: ^4.3.3
+        version: 4.3.3(vite@8.3.4)
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.13
@@ -1054,6 +1057,9 @@ importers:
       '@farm.js/cli':
         specifier: workspace:*
         version: link:../../packages/farm-cli
+      '@tailwindcss/vite':
+        specifier: ^4.3.3
+        version: 4.3.3(vite@8.3.4)
       tailwindcss:
         specifier: ^4.0.0
         version: 4.1.18
@@ -1373,6 +1379,9 @@ importers:
       '@farm.js/cli':
         specifier: workspace:*
         version: link:../../packages/farm-cli
+      '@tailwindcss/vite':
+        specifier: ^4.3.3
+        version: 4.3.3(vite@8.3.4)
       tailwindcss:
         specifier: ^4.0.0
         version: 4.1.18
@@ -1401,6 +1410,9 @@ importers:
       '@farm.js/cli':
         specifier: workspace:*
         version: link:../../packages/farm-cli
+      '@tailwindcss/vite':
+        specifier: ^4.3.3
+        version: 4.3.3(vite@8.3.4)
       '@types/react':
         specifier: ^18.2.45
         version: 18.3.26
@@ -1809,6 +1821,9 @@ importers:
       '@farm.js/cli':
         specifier: workspace:*
         version: link:../../packages/farm-cli
+      '@tailwindcss/vite':
+        specifier: ^4.3.3
+        version: 4.3.3(vite@8.3.4)
       tailwindcss:
         specifier: ^4.0.0
         version: 4.1.18
@@ -1969,9 +1984,6 @@ importers:
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
-      '@tailwindcss/vite':
-        specifier: 4.3.3
-        version: 4.3.3(vite@8.3.4)
       '@vercel/og':
         specifier: 1.0.1
         version: 1.0.1(@types/node@22.20.5)
@@ -2020,9 +2032,6 @@ importers:
       supports-color:
         specifier: ^10.2.2
         version: 10.2.2
-      tailwindcss:
-        specifier: 4.3.3
-        version: 4.3.3
       unstorage:
         specifier: 2.0.0-alpha.10
         version: 2.0.0-alpha.10
@@ -2052,6 +2061,9 @@ importers:
       '@opentelemetry/sdk-trace-base':
         specifier: 2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
+      '@tailwindcss/vite':
+        specifier: 4.3.3
+        version: 4.3.3(vite@8.3.4)
       '@types/react':
         specifier: ^18.2.45
         version: 18.3.26
@@ -2070,6 +2082,9 @@ importers:
       react-dom:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
+      tailwindcss:
+        specifier: 4.3.3
+        version: 4.3.3
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.30)(supports-color@10.2.2)(typescript@5.9.3)
@@ -10995,6 +11010,7 @@ packages:
       magic-string: 0.30.21
       source-map-js: 1.2.1
       tailwindcss: 4.3.3
+    dev: true
 
   /@tailwindcss/oxide-android-arm64@4.3.3:
     resolution: {integrity: sha512-Y85A2gmPSkl5Ve5qR86GL4HT509cFqQh1aes9p3sSkyTPwt0Pppf3GkwGe4JPACcRYjgJIEhQgM6dBClnr0NYw==}
@@ -11002,6 +11018,7 @@ packages:
     cpu: [arm64]
     os: [android]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-darwin-arm64@4.3.3:
@@ -11010,6 +11027,7 @@ packages:
     cpu: [arm64]
     os: [darwin]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-darwin-x64@4.3.3:
@@ -11018,6 +11036,7 @@ packages:
     cpu: [x64]
     os: [darwin]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-freebsd-x64@4.3.3:
@@ -11026,6 +11045,7 @@ packages:
     cpu: [x64]
     os: [freebsd]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-linux-arm-gnueabihf@4.3.3:
@@ -11034,6 +11054,7 @@ packages:
     cpu: [arm]
     os: [linux]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-linux-arm64-gnu@4.3.3:
@@ -11042,6 +11063,7 @@ packages:
     cpu: [arm64]
     os: [linux]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-linux-arm64-musl@4.3.3:
@@ -11050,6 +11072,7 @@ packages:
     cpu: [arm64]
     os: [linux]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-linux-x64-gnu@4.3.3:
@@ -11058,6 +11081,7 @@ packages:
     cpu: [x64]
     os: [linux]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-linux-x64-musl@4.3.3:
@@ -11066,6 +11090,7 @@ packages:
     cpu: [x64]
     os: [linux]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-wasm32-wasi@4.3.3:
@@ -11073,6 +11098,7 @@ packages:
     engines: {node: '>=14.0.0'}
     cpu: [wasm32]
     requiresBuild: true
+    dev: true
     optional: true
     bundledDependencies:
       - '@napi-rs/wasm-runtime'
@@ -11088,6 +11114,7 @@ packages:
     cpu: [arm64]
     os: [win32]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide-win32-x64-msvc@4.3.3:
@@ -11096,6 +11123,7 @@ packages:
     cpu: [x64]
     os: [win32]
     requiresBuild: true
+    dev: true
     optional: true
 
   /@tailwindcss/oxide@4.3.3:
@@ -11114,6 +11142,7 @@ packages:
       '@tailwindcss/oxide-wasm32-wasi': 4.3.3
       '@tailwindcss/oxide-win32-arm64-msvc': 4.3.3
       '@tailwindcss/oxide-win32-x64-msvc': 4.3.3
+    dev: true
 
   /@tailwindcss/vite@4.3.3(vite@8.3.4):
     resolution: {integrity: sha512-yYU8cogLeSh/ms2jh8Fj7jaba/EWa7Ja6GoUqYZaraEuCI5YS6ms6ObZgjjedm+jm6XZjdNRWBpPP6Z86oOxcw==}
@@ -11124,6 +11153,7 @@ packages:
       '@tailwindcss/oxide': 4.3.3
       tailwindcss: 4.3.3
       vite: 8.3.4(@types/node@22.20.5)(yaml@2.9.0)
+    dev: true
 
   /@tanstack/query-core@5.104.0:
     resolution: {integrity: sha512-JrC2r/JQlXt7khBSdUpsgxNvybzOg+aITa+ARRMlP2AFo93Y8vIqz077rp+e61mJetSZ0T6AJbwW1JHer1vrPQ==}

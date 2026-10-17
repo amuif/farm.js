@@ -64,7 +64,7 @@ export default defineConfig({});
 
 4. Update `tsconfig.json`: set `"paths": { "@/*": ["./src/*"] }`, remove the `{ "name": "next" }` plugin, set `"jsx": "react-jsx"`, and set `"include": ["src", "farm.config.ts"]` (drop `next-env.d.ts` and `.next/types/**/*.ts`).
 5. Add `.farm/` and `.output/` to `.gitignore`.
-6. Tailwind v4: Farm enables `@tailwindcss/vite` automatically; keep `tailwindcss` installed and `@import "tailwindcss";` in the global CSS. Delete `postcss.config.*` when it only loads `@tailwindcss/postcss`, and remove `@tailwindcss/postcss`. Reason: development always adds Farm's Tailwind plugin, while a production build that finds a project PostCSS config uses it and skips the built-in plugin, so keeping the file makes dev and prod diverge. Remove any Tailwind or Turbopack loader configured in `next.config` (for example `@tailwindcss/turbopack`); `next.config` is not read by Farm.
+6. Tailwind v4: Farm enables `@tailwindcss/vite` automatically; install it with `pnpm add -D @tailwindcss/vite`, keep `tailwindcss` installed, and keep `@import "tailwindcss";` in the global CSS. Delete `postcss.config.*` when it only loads `@tailwindcss/postcss`, and remove `@tailwindcss/postcss`. Reason: development always adds Farm's Tailwind plugin, while a production build that finds a project PostCSS config uses it and skips the built-in plugin, so keeping the file makes dev and prod diverge. Remove any Tailwind or Turbopack loader configured in `next.config` (for example `@tailwindcss/turbopack`); `next.config` is not read by Farm.
 
 Verify: `pnpm install` succeeds and `pnpm ls @farm.js/core` prints the pinned version.
 
@@ -775,13 +775,13 @@ Register integrations in a server-only `src/lib/integrations.ts` and pass the ob
 
 ### Styling
 
-| Next.js                                | Farm                                                    | Status      |
-| -------------------------------------- | ------------------------------------------------------- | ----------- |
-| Global CSS imported in the root layout | Same                                                    | `same`      |
-| CSS modules (`*.module.css`)           | Same (Vite)                                             | `same`      |
-| Tailwind v4 via `@tailwindcss/postcss` | Built-in `@tailwindcss/vite`; delete `postcss.config.*` | `different` |
-| Tailwind loader in `next.config`       | Delete                                                  | `different` |
-| Sass                                   | Install `sass`; Vite compiles `.scss`                   | `same`      |
+| Next.js                                | Farm                                                                 | Status      |
+| -------------------------------------- | -------------------------------------------------------------------- | ----------- |
+| Global CSS imported in the root layout | Same                                                                 | `same`      |
+| CSS modules (`*.module.css`)           | Same (Vite)                                                          | `same`      |
+| Tailwind v4 via `@tailwindcss/postcss` | Built-in `@tailwindcss/vite` (install it); delete `postcss.config.*` | `different` |
+| Tailwind loader in `next.config`       | Delete                                                               | `different` |
+| Sass                                   | Install `sass`; Vite compiles `.scss`                                | `same`      |
 
 ### Deployment
 

@@ -13,6 +13,7 @@ import type { FarmConfig, FarmRequest } from "./types";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FarmApp } from "./app";
 import { logger, toPosixPath, toViteModuleId } from "./utils";
+import { loadTailwindVitePlugin } from "./build/tailwind";
 import {
   FARM_NODE_RESPONSE_END_PENDING,
   type FarmPlugin,
@@ -5807,7 +5808,7 @@ function generateClientManifest(bundle: any): Record<string, any> {
 }
 
 export async function defineConfig(config: FarmVitePluginOptions = {}): Promise<UserConfig> {
-  const tailwindcss = (await import("@tailwindcss/vite")).default;
+  const tailwindVitePlugin = await loadTailwindVitePlugin();
   const appRoot = path.resolve(config.root || process.cwd());
   if (config.extends?.length) {
     const { config: layeredConfig } = await import("./layers").then(({ resolveFarmLayers }) =>
@@ -5994,7 +5995,7 @@ export async function defineConfig(config: FarmVitePluginOptions = {}): Promise<
   return {
     plugins: [
       createFarmThemeCssPlugin(config.theme, config.basePath),
-      tailwindcss(),
+      tailwindVitePlugin,
       ...(rendererVitePlugins as any[]),
       viteBrowserExternalPlugin,
       farmI18nClientBridgePlugin(),

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -1368,3 +1377,80 @@ test("generates starters that start the built server and deploy to Vercel explic
 function escapeRegExp(input) {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/**
+ * Feature packages that @farm.js/core declares as optional peers. A starter that
+ * uses the feature must declare the package, or it breaks on a clean install.
+ */
+const optionalCorePeers = [
+  {
+    name: "@tailwindcss/vite",
+    section: "devDependencies",
+    async isUsed(generatedDir) {
+      const stylesheets = await readGeneratedFiles(generatedDir, /\.css$/);
+      return stylesheets.some((source) => /@import\s+["']tailwindcss["']/.test(source));
+    },
+  },
+];
+
+async function readGeneratedFiles(directory, pattern) {
+  const sources = [];
+  for (const entry of await readdir(directory, { withFileTypes: true, recursive: true })) {
+    const parent = entry.parentPath ?? entry.path;
+    if (!entry.isFile() || !pattern.test(entry.name) || parent.includes("node_modules")) continue;
+    sources.push(await readFile(path.join(parent, entry.name), "utf8"));
+  }
+  return sources;
+}
+
+test("generated starters declare the optional core peers their features use", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-optional-peers-"));
+  const starters = [
+    ...["basic", "auth", "better-auth", "react-compiler"].map((template) => ({ template })),
+    ...["preact", "solid", "svelte", "vue"].map((renderer) => ({ template: "basic", renderer })),
+    ...integrationTemplates.map(({ name }) => ({ template: name })),
+  ];
+  const used = new Set();
+
+  try {
+    for (const { template, renderer } of starters) {
+      const projectName = `${template}-${renderer || "react"}-app`;
+      execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          projectName,
+          "--template",
+          template,
+          ...(renderer ? ["--renderer", renderer] : []),
+          "--typescript",
+          "--skip-install",
+        ],
+        {
+          cwd: tempDir,
+          env: { ...process.env, npm_config_user_agent: "pnpm/11.18.0 npm/? node/v22.0.0" },
+          stdio: "pipe",
+        },
+      );
+      const generatedDir = path.join(tempDir, projectName);
+      const packageJson = JSON.parse(
+        await readFile(path.join(generatedDir, "package.json"), "utf8"),
+      );
+
+      for (const peer of optionalCorePeers) {
+        if (!(await peer.isUsed(generatedDir))) continue;
+        used.add(peer.name);
+        assert.equal(
+          typeof packageJson[peer.section]?.[peer.name],
+          "string",
+          `${projectName} uses ${peer.name} but does not declare it in ${peer.section}`,
+        );
+      }
+    }
+
+    // Guard against a detector that silently stops matching the starters.
+    assert.deepEqual([...used].sort(), optionalCorePeers.map(({ name }) => name).sort());
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

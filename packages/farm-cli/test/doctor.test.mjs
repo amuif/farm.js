@@ -326,6 +326,71 @@ test("reports loaded integrations and declared Farm packages that are not instal
   }
 });
 
+test("reports an optional feature package the app uses but has not installed", async () => {
+  const root = await createTempProject();
+
+  try {
+    await writeFile(path.join(root, "src/app/globals.css"), '@import "tailwindcss";\n');
+
+    const missing = await runFarmDoctor({ root, offline: true });
+    const missingCheck = missing.checks.find((entry) => entry.code === "OPTIONAL_PACKAGE_MISSING");
+    assert.equal(missingCheck?.status, "warn");
+    assert.equal(missingCheck?.title, "@tailwindcss/vite is not installed");
+    assert.match(missingCheck?.message || "", /src\/app\/globals\.css imports tailwindcss/);
+    assert.equal(
+      missingCheck?.action,
+      'Install "@tailwindcss/vite" to enable built-in Tailwind CSS support: pnpm add -D @tailwindcss/vite',
+    );
+
+    const packageDir = path.join(root, "node_modules/@tailwindcss/vite");
+    await mkdir(packageDir, { recursive: true });
+    await writeFile(
+      path.join(packageDir, "package.json"),
+      JSON.stringify({
+        name: "@tailwindcss/vite",
+        version: "4.3.3",
+        exports: { ".": "./index.mjs" },
+      }),
+    );
+
+    const installed = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      installed.checks.some((entry) => entry.code === "OPTIONAL_PACKAGE_MISSING"),
+      false,
+    );
+    assert.equal(
+      installed.checks.find((entry) => entry.code === "OPTIONAL_PACKAGE_INSTALLED")?.title,
+      "@tailwindcss/vite is installed",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skips optional feature packages the app does not use", async () => {
+  const root = await createTempProject();
+
+  try {
+    await writeFile(path.join(root, "src/app/globals.css"), "body { margin: 0; }\n");
+    const plain = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      plain.checks.some((entry) => entry.code.startsWith("OPTIONAL_PACKAGE_")),
+      false,
+    );
+
+    // A project PostCSS config owns Tailwind, so Farm's built-in plugin is unused.
+    await writeFile(path.join(root, "src/app/globals.css"), '@import "tailwindcss";\n');
+    await writeFile(path.join(root, "postcss.config.mjs"), "export default { plugins: {} };\n");
+    const postcss = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      postcss.checks.some((entry) => entry.code.startsWith("OPTIONAL_PACKAGE_")),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("checks beta registry tags only when requested and reports a stale beta", async () => {
   const root = await createTempProject();
   const typesPath = path.join(root, "src/farm.d.ts");

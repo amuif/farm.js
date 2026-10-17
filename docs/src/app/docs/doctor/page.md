@@ -67,6 +67,8 @@ Offline mode checks:
 - Generated route, API, environment, content, and i18n declarations are current.
 - The selected renderer's Vite, server, and client entrypoints resolve.
 - Configured integration entrypoints load, and declared Farm packages are installed.
+- Feature packages that Farm loads from the app, such as `@tailwindcss/vite` for a stylesheet that
+  imports `tailwindcss`, are installed when the app uses the feature.
 - The app directory or programmatic router contains page routes.
 - A root layout is available from the app or an extended layer.
 - Deployment target, preset, and output directory resolve.
@@ -132,6 +134,7 @@ Common diagnostic codes include:
 | `LOCAL_PACKAGES_MISSING`       | A local or workspace dependency cannot be resolved.          |
 | `GENERATED_ARTIFACTS_STALE`    | Committed generated declarations need `farm generate`.       |
 | `RENDERER_ENTRYPOINTS_MISSING` | A configured renderer export cannot be resolved.             |
+| `OPTIONAL_PACKAGE_MISSING`     | The app uses a feature whose package it has not installed.   |
 | `REGISTRY_BETA_MISSING`        | A required Farm package has no usable npm beta tag.          |
 | `FARM_BETA_STALE`              | An exact Farm dependency is behind the npm beta tag.         |
 

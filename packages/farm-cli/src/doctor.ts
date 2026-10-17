@@ -397,6 +397,7 @@ async function createProjectReport(
     collectRouterChecks(config, checks);
     await collectGeneratedArtifactChecks(config, options.configPath, root, checks);
     collectEntrypointChecks(config, root, checks);
+    collectOptionalPackageChecks(config, root, checks);
     report.target = collectDeploymentChecks(config, userConfig, checks);
     collectCronChecks(config, options.env || process.env, checks);
   }
@@ -985,6 +986,101 @@ function collectEntrypointChecks(
       action: "Run the selected package manager's install command.",
     });
   }
+}
+
+/**
+ * Feature packages that @farm.js/core declares as optional peers. An app that
+ * uses the feature must install the package itself.
+ */
+type OptionalFeaturePackage = {
+  name: string;
+  dev?: boolean;
+  purpose: string;
+  /** Whether core fails (`fail`) or keeps going without the feature (`warn`). */
+  missingStatus: "warn" | "fail";
+  /** Where the app uses the feature, or undefined when it does not. */
+  findUse(config: ResolvedFarmConfig, root: string): string | undefined;
+};
+
+const OPTIONAL_FEATURE_PACKAGES: readonly OptionalFeaturePackage[] = [
+  {
+    name: "@tailwindcss/vite",
+    dev: true,
+    purpose: "enable built-in Tailwind CSS support",
+    missingStatus: "warn",
+    findUse: findTailwindUse,
+  },
+];
+
+const POSTCSS_CONFIG_FILE =
+  /^(?:postcss\.config\.(?:[cm]?[jt]s|json)|\.postcssrc(?:\.(?:json|[cm]?[jt]s))?)$/;
+const TAILWIND_CSS_IMPORT = /@import\s+["']tailwindcss["']/;
+
+function collectOptionalPackageChecks(
+  config: ResolvedFarmConfig,
+  root: string,
+  checks: FarmDoctorCheck[],
+): void {
+  for (const feature of OPTIONAL_FEATURE_PACKAGES) {
+    const use = feature.findUse(config, root);
+    if (!use) continue;
+    if (isPackageInstalled(config.root, feature.name)) {
+      checks.push({
+        status: "pass",
+        code: "OPTIONAL_PACKAGE_INSTALLED",
+        title: `${feature.name} is installed`,
+        message: `${use}, and ${feature.name} resolves.`,
+      });
+      continue;
+    }
+    checks.push({
+      status: feature.missingStatus,
+      code: "OPTIONAL_PACKAGE_MISSING",
+      title: `${feature.name} is not installed`,
+      message: `${use}, but ${feature.name} does not resolve from ${toPosix(path.relative(root, config.root)) || "the app root"}.`,
+      action: `Install "${feature.name}" to ${feature.purpose}: pnpm add ${feature.dev ? "-D " : ""}${feature.name}`,
+    });
+  }
+}
+
+function isPackageInstalled(root: string, name: string): boolean {
+  try {
+    createRequire(path.join(root, "package.json")).resolve(`${name}/package.json`);
+    return true;
+  } catch (error) {
+    // The package is installed but does not export its manifest.
+    return (error as { code?: unknown }).code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
+  }
+}
+
+function findTailwindUse(config: ResolvedFarmConfig, root: string): string | undefined {
+  // A project PostCSS config replaces Farm's built-in Tailwind support.
+  if (readdirSync(config.root).some((file) => POSTCSS_CONFIG_FILE.test(file))) return undefined;
+  const stylesheet = findFile(path.join(config.root, config.srcDir), (file) =>
+    file.endsWith(".css") ? TAILWIND_CSS_IMPORT.test(readFileSync(file, "utf8")) : false,
+  );
+  return stylesheet ? `${toPosix(path.relative(root, stylesheet))} imports tailwindcss` : undefined;
+}
+
+function findFile(directory: string, matches: (file: string) => boolean): string | undefined {
+  if (!existsSync(directory)) return undefined;
+  const pending = [directory];
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current) continue;
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isFile() && matches(entryPath)) return entryPath;
+      if (
+        entry.isDirectory() &&
+        !entry.name.startsWith(".") &&
+        !WORKSPACE_SCAN_IGNORES.has(entry.name)
+      ) {
+        pending.push(entryPath);
+      }
+    }
+  }
+  return undefined;
 }
 
 type RegistryPackageMetadata = {

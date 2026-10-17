@@ -101,7 +101,7 @@ import {
 } from "../integration-provider-build";
 import type { TransformOptions } from "esbuild";
 import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
-import { adaptTailwindVitePlugin } from "../build/vite-plugin-compat";
+import { loadTailwindVitePlugin } from "../build/tailwind";
 import { mergeFarmFontCss } from "../font-vite";
 import type { FarmIslandStrategy } from "../island";
 import { createFarmSourceAlias, mergeFarmProductionViteConfig } from "../server/vite-config";
@@ -1729,15 +1729,10 @@ async function buildClient(
     const postcssConfigPath = path.join(clientEntryDir, "postcss.config.cjs");
     await fs.writeFile(postcssConfigPath, "module.exports = { plugins: [] };\n");
     postcssSearchPath = clientEntryDir;
-    try {
-      const tailwindVite = (await import("@tailwindcss/vite")).default;
-      tailwindVitePlugin = adaptTailwindVitePlugin(tailwindVite(), productionVite.builder);
-      logger.info("📦 Enabled built-in Tailwind support (@tailwindcss/vite)");
-    } catch (error) {
-      logger.warn(
-        `Tailwind plugin auto-enable failed; continuing without it: ${(error as Error).message}`,
-      );
-    }
+    tailwindVitePlugin = await loadTailwindVitePlugin({
+      builder: productionVite.builder,
+      announce: true,
+    });
   }
 
   try {
@@ -4213,14 +4208,10 @@ async function buildSSRInMemory(
       path.join(postcssConfigDir, "postcss.config.cjs"),
       "module.exports = { plugins: [] };\n",
     );
-    try {
-      const tailwindVite = (await import("@tailwindcss/vite")).default;
-      tailwindVitePlugin = adaptTailwindVitePlugin(tailwindVite(), productionVite.builder);
-    } catch (error) {
-      logger.warn(
-        `Tailwind plugin auto-enable failed for SSR; continuing without it: ${(error as Error).message}`,
-      );
-    }
+    tailwindVitePlugin = await loadTailwindVitePlugin({
+      builder: productionVite.builder,
+      label: "for SSR",
+    });
   }
 
   let ssrBundle: OutputBundle;

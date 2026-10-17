@@ -693,7 +693,6 @@
     "@jridgewell/trace-mapping": "0.3.31",
     "@mdx-js/mdx": "^3.1.1",
     "@opentelemetry/api": "1.9.1",
-    "@tailwindcss/vite": "4.3.3",
     "@vercel/og": "1.0.1",
     "better-call": "^1.0.19",
     "db0": "^0.3.4",
@@ -710,7 +709,6 @@
     "remark-gfm": "^4.0.1",
     "sugar-high": "^0.9.5",
     "supports-color": "^10.2.2",
-    "tailwindcss": "4.3.3",
     "unstorage": "2.0.0-alpha.10",
     "vite": "8.3.4",
     "zod": "^4.1.12"
@@ -720,21 +718,27 @@
     "@farm.js/renderer-tests": "workspace:*",
     "@opentelemetry/sdk-node": "0.221.0",
     "@opentelemetry/sdk-trace-base": "2.10.0",
+    "@tailwindcss/vite": "4.3.3",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
     "@vitest/coverage-v8": "5.0.5",
     "jsdom": "^25.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "tailwindcss": "4.3.3",
     "tsup": "^8.3.5",
     "typescript": "^5.3.3",
     "vitest": "5.0.5"
   },
   "peerDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "react": "^18.2.0 || ^19.0.0",
     "react-dom": "^18.2.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {
+    "@tailwindcss/vite": {
+      "optional": true
+    },
     "react": {
       "optional": true
     },
