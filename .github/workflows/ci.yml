@@ -593,7 +593,9 @@ jobs:
       - name: Install harness-only dependencies
         run: pnpm --dir benchmarks/frameworks --filter farmjs-framework-benchmarks install --frozen-lockfile --ignore-scripts
       - name: Verify benchmark correctness and reporting guards
-        run: node benchmarks/frameworks/run.mjs --self-check
+        run: |
+          node benchmarks/frameworks/run.mjs --self-check
+          node --test benchmarks/compiler-analysis/run.test.mjs
 
   lint:
     name: Lint
