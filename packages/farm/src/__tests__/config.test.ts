@@ -1222,6 +1222,41 @@ describe("resolveDocsConfig", () => {
     expect(docs.config).not.toHaveProperty("adapter");
   });
 
+  it("keeps React elements and callbacks for the adapter while config stays serializable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-docs-runtime-config-"));
+    try {
+      await fs.writeFile(
+        path.join(root, "docs.config.ts"),
+        `export default {
+  entry: "docs",
+  icons: { book: { $$typeof: Symbol.for("react.transitional.element"), type: "svg", props: {} } },
+  feedback: { onFeedback: () => "sent" },
+};
+`,
+      );
+      const docs = await resolveDocsConfig(
+        { config: { metadata: { description: "Docs" } } },
+        { root },
+      );
+
+      // What Farm serializes has neither the element's identity nor the callback.
+      expect(docs.config.icons?.book).not.toHaveProperty("$$typeof");
+      expect((docs.config as any).feedback).toEqual({});
+      // The adapter, which runs in process, gets them as written, with the same overrides.
+      const runtime = docs.runtimeConfig as any;
+      expect(runtime.icons.book.$$typeof).toBe(Symbol.for("react.transitional.element"));
+      expect(runtime.feedback.onFeedback()).toBe("sent");
+      expect(runtime).toMatchObject({
+        entry: "docs",
+        docsPath: "/docs",
+        metadata: { description: "Docs" },
+      });
+      expect(docs.configOverrides).toEqual({ metadata: { description: "Docs" } });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("normalizes a Farm docs entry route into docs config shape", async () => {
     const docs = await resolveDocsConfig({
       entry: "/docs",

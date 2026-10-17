@@ -765,6 +765,12 @@ function cloneSerializable(value: unknown, seen = new WeakSet<object>()): any {
   return undefined;
 }
 
+function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as Partial<T>;
+}
+
 function sanitizeDocsConfig(config: Partial<DocsConfig>): Partial<DocsConfig> {
   return cloneSerializable(config) || {};
 }
@@ -904,6 +910,19 @@ export async function resolveDocsConfig(
     ...inlineDocsConfig,
     ...directDocsConfig,
   };
+  // The adapter runs in this process, so it gets the config as written, React elements
+  // and functions included; serializing it is the adapter's call.
+  const runtimeDocsConfig: Partial<DocsConfig> = {
+    ...(loadedConfig?.config || {}),
+    ...(isRecord(docsOptions.config) ? docsOptions.config : {}),
+    ...omitUndefined({
+      ...docsOptions,
+      adapter: undefined,
+      enabled: undefined,
+      config: undefined,
+      configPath: undefined,
+    }),
+  };
 
   const explicitRoute = typeof docsOptions.entry === "string" ? docsOptions.entry : undefined;
   const configuredDocsPath =
@@ -935,6 +954,13 @@ export async function resolveDocsConfig(
       docsPath: entryRoute,
       ...(contentDir ? { contentDir } : {}),
     },
+    runtimeConfig: {
+      ...runtimeDocsConfig,
+      entry: docsEntry,
+      docsPath: entryRoute,
+      ...(contentDir ? { contentDir } : {}),
+    },
+    configOverrides: { ...inlineDocsConfig, ...directDocsConfig },
   };
 }
 

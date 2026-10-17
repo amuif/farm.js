@@ -74,7 +74,10 @@ import {
   isFarmDocsSearchEnabled,
   resolveFarmDocsSearchClientModule,
 } from "../docs/search-client";
-import { generateFarmDocsAdapterClientRuntime } from "../docs/adapter-client";
+import {
+  generateFarmDocsAdapterClientRuntime,
+  getFarmDocsAdapterConfigModule,
+} from "../docs/adapter-client";
 import { resolveFarmDocsFontAssets, toFarmDocsPublicFontAssets } from "../docs/fonts";
 import { compileFarmDocsManifest } from "../docs/compiler";
 import { compileFarmDocsAdapterEdgeManifest } from "../docs/adapter";
@@ -1704,6 +1707,7 @@ async function buildClient(
     getIntegrationProviders(config.integrations),
     config.basePath,
     generateClientCachePersistenceCode(resolveFarmClientCacheAdapterEntry(root, config.cache)),
+    adapterOwnsDocsRuntime ? getFarmDocsAdapterConfigModule(config.docs) : undefined,
   );
 
   // Write the client entry to a temporary file
@@ -2720,6 +2724,7 @@ function generateClientHydrationEntry(
   integrationProviders: ReturnType<typeof getIntegrationProviders> = [],
   basePath = "/",
   clientCachePersistence: ClientCachePersistenceEntryCode = { imports: "", init: "" },
+  docsConfigModule?: string,
 ): string {
   const toImportPath = (targetPath: string) => targetPath.replace(/\\/g, "/");
   const clientPluginEntry: FarmClientPluginEntryCode = generateFarmClientPluginEntryCode(
@@ -2809,7 +2814,10 @@ function isFarmDocsPath() {
   return false;
 }
 `;
-  const docsAdapterRuntime = generateFarmDocsAdapterClientRuntime(docsAdapterReact);
+  const docsAdapterRuntime = generateFarmDocsAdapterClientRuntime(
+    docsAdapterReact,
+    docsConfigModule,
+  );
 
   if (
     clientPages.length === 0 &&
@@ -4690,6 +4698,9 @@ export function generateFarmDocsRuntimeConfigExpression(
     contentDir: undefined,
     ...(precompiled ? { configPath: undefined } : {}),
     config: undefined,
+    // React elements and functions do not survive JSON. The server bundle imports the
+    // config module for those instead (see farmDocsConfigModule).
+    runtimeConfig: undefined,
   };
   const nestedConfig = {
     ...docs.config,
@@ -4712,7 +4723,7 @@ export function generateFarmDocsRuntimeConfigExpression(
         contentDir: farmDocsBundledContentDir,
       },
     }
-  : ${JSON.stringify(docs)}`;
+  : ${JSON.stringify({ ...docs, runtimeConfig: undefined })}`;
 }
 
 /**
@@ -5083,6 +5094,15 @@ function generateVirtualEntryCode(
     config.docs.adapter?.server &&
     config.docs.adapter.react,
   );
+  // The adapter renders icons, MDX components, and callbacks from the docs config, which
+  // JSON cannot carry, so the server bundle imports the config module itself.
+  const docsConfigModulePath =
+    adapterOwnsDocsRuntime &&
+    !hasPrecompiledDocs &&
+    config.docs.configPath &&
+    !config.docs.configPath.endsWith(".json")
+      ? config.docs.configPath
+      : undefined;
   const hasIsolatedClientGraphRuntime =
     isReactRenderer(config.renderer) && isolatedClientBoundaryModules.size > 0;
   const rendererStreamingCapabilities = getFarmRendererStreamingCapabilitiesForRuntime(
@@ -5534,7 +5554,11 @@ const isFarmDocsAPIRequest = (requestOrPathname) => {
       : adapterOwnsDocsRuntime
         ? `import { isFarmDocsAPIRequest } from "@farm.js/core/docs";
 import { createFarmDocsRuntimeHandler as createFarmDocsAdapterRuntimeHandler } from ${JSON.stringify(config.docs.adapter!.server)};
-import * as FarmDocsAdapterReact from ${JSON.stringify(config.docs.adapter!.react)};`
+import * as FarmDocsAdapterReact from ${JSON.stringify(config.docs.adapter!.react)};${
+            docsConfigModulePath
+              ? `\nimport * as farmDocsConfigModule from ${toVirtualEntryImportSpecifier(docsConfigModulePath)};`
+              : ""
+          }`
         : `import { createFarmDocsAPIHandler, createFarmDocsHandler, isFarmDocsAPIRequest } from "@farm.js/core/docs";`
     : "";
   const docsFontImport =
@@ -6053,7 +6077,11 @@ const farmDocsHandler = ${
         ? "farmDocsPrecompiledRuntime.handleDocsRequest"
         : adapterOwnsDocsRuntime
           ? `createFarmDocsAdapterRuntimeHandler({
-  ...farmDocsResolvedConfig.config,
+  ${
+    docsConfigModulePath
+      ? "...(farmDocsConfigModule.default || farmDocsConfigModule),\n  ...farmDocsResolvedConfig.configOverrides,"
+      : "...farmDocsResolvedConfig.config,"
+  }
   entry: farmDocsResolvedConfig.config?.entry || String(farmDocsResolvedConfig.entry || "/docs").replace(/^\\/+|\\/+$/g, "") || "docs",
   docsPath: farmDocsResolvedConfig.entry,
   contentDir: farmDocsResolvedConfig.contentDir || farmDocsResolvedConfig.config?.contentDir,

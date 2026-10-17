@@ -86,6 +86,34 @@ describe("Farm docs runtime adapters", () => {
     await expect(handler(new Request("https://farm.test/docs"))).resolves.toBe(response);
   });
 
+  it("loads the docs config module through the app's module loader for the runtime", async () => {
+    const icon = { $$typeof: Symbol.for("react.transitional.element"), type: "svg", props: {} };
+    const docs: FarmDocsResolvedConfig = {
+      ...createAdapterDocs(),
+      configPath: "/workspace/app/docs.config.tsx",
+      configOverrides: { metadata: { description: "From farm.config" } },
+    };
+    const createRuntimeHandler = vi.fn(() => async () => null);
+    const loadModule = vi.fn(async (specifier: string) => {
+      if (specifier === docs.adapter?.server) {
+        return { createFarmDocsRuntimeHandler: createRuntimeHandler };
+      }
+      if (specifier === docs.configPath)
+        return { default: { entry: "docs", icons: { book: icon } } };
+      return {};
+    });
+
+    await createFarmDocsAdapterHandler(docs, { root: "/workspace/app", loadModule });
+
+    expect(loadModule).toHaveBeenCalledWith("/workspace/app/docs.config.tsx");
+    const [runtimeConfig] = createRuntimeHandler.mock.calls[0]! as unknown as [any];
+    expect(runtimeConfig.icons.book).toBe(icon);
+    expect(runtimeConfig).toMatchObject({
+      docsPath: "/docs",
+      metadata: { description: "From farm.config" },
+    });
+  });
+
   it("reports an actionable error for adapters without a runtime handler", async () => {
     await expect(
       createFarmDocsAdapterHandler(createAdapterDocs(), {

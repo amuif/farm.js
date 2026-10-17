@@ -128,7 +128,10 @@ import {
   createFarmClientOptimizeDepsEntries,
   createFarmSourceAlias,
 } from "./server/vite-config";
-import { generateFarmDocsAdapterClientRuntime } from "./docs/adapter-client";
+import {
+  generateFarmDocsAdapterClientRuntime,
+  getFarmDocsAdapterConfigModule,
+} from "./docs/adapter-client";
 import { resolveFarmDocsFontAssets, toFarmDocsPublicFontAssets } from "./docs/fonts";
 import {
   createFarmNodeRequestAbortSignal,
@@ -3143,6 +3146,7 @@ window.__FARM_MANIFEST__ = ${inlineValue({
           generateClientCachePersistenceCode(
             resolveFarmClientCacheAdapterEntry(root, resolvedConfig?.cache),
           ),
+          isReactRenderer(renderer) ? getFarmDocsAdapterConfigModule(docs) : undefined,
         );
       }
 
@@ -4194,6 +4198,7 @@ function generateClientCode(
   trailingSlash = false,
   basePath = "/",
   clientCachePersistence: ClientCachePersistenceEntryCode = { imports: "", init: "" },
+  docsConfigModule?: string,
 ): string {
   const providerClientCode = generateFarmIntegrationProviderClientCode(
     integrationProviders,
@@ -4212,7 +4217,10 @@ function generateClientCode(
   const isolatedHydrationImport = isolatedHydrationEnabled
     ? `import { createFarmIsolatedHydrationRuntime, createFarmServerPageBoundary, wrapFarmIsolatedClientGraph } from '@farm.js/core/internal/isolated-boundary'`
     : "";
-  const docsAdapterImportBlock = generateFarmDocsAdapterClientRuntime(docsAdapterReact);
+  const docsAdapterImportBlock = generateFarmDocsAdapterClientRuntime(
+    docsAdapterReact,
+    docsConfigModule,
+  );
   const isolatedHydrationRuntime = isolatedHydrationEnabled
     ? `const farmIsolatedHydrationRuntime = createFarmIsolatedHydrationRuntime({
   ReactRuntime: React,

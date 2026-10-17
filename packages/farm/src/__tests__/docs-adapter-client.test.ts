@@ -1,7 +1,10 @@
 // @vitest-environment node
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { generateFarmDocsAdapterClientRuntime } from "../docs/adapter-client";
+import {
+  generateFarmDocsAdapterClientRuntime,
+  getFarmDocsAdapterConfigModule,
+} from "../docs/adapter-client";
 
 const ADAPTER = "@farming-labs/farmjs/react";
 
@@ -52,6 +55,46 @@ describe("Farm docs adapter client runtime", () => {
     );
     expect(load).toHaveBeenCalledWith(ADAPTER);
     expect(hydrateFarmDocs).toHaveBeenCalledWith({ config: { entry: "docs" }, data });
+  });
+
+  it("passes the docs config module only when the server flagged the page", async () => {
+    const CONFIG = "/app/docs.config.tsx";
+    const configModule = { default: { icons: { book: "<svg/>" } } };
+    const hydrateFarmDocs = vi.fn();
+    const load = vi.fn(async (specifier: string) =>
+      specifier === CONFIG ? configModule : { hydrateFarmDocs },
+    );
+
+    (globalThis as { window?: unknown }).window = {
+      __FARM_DOCS_ADAPTER__: { config: { entry: "docs" }, data: {} },
+    };
+    await evaluate(generateFarmDocsAdapterClientRuntime(ADAPTER, CONFIG), load)();
+    expect(load).not.toHaveBeenCalledWith(CONFIG);
+    expect(hydrateFarmDocs).toHaveBeenLastCalledWith({ config: { entry: "docs" }, data: {} });
+
+    (globalThis as { window?: unknown }).window = {
+      __FARM_DOCS_ADAPTER__: { config: { entry: "docs" }, data: {}, configModule: true },
+    };
+    await evaluate(generateFarmDocsAdapterClientRuntime(ADAPTER, CONFIG), load)();
+    expect(load).toHaveBeenCalledWith(CONFIG);
+    expect(hydrateFarmDocs).toHaveBeenLastCalledWith({
+      config: { entry: "docs" },
+      data: {},
+      configModule: configModule.default,
+    });
+  });
+
+  it("names a config module only for a code config with an adapter", () => {
+    const adapter = { react: ADAPTER };
+    expect(
+      getFarmDocsAdapterConfigModule({ enabled: true, adapter, configPath: "/app/docs.config.ts" }),
+    ).toBe("/app/docs.config.ts");
+    expect(
+      getFarmDocsAdapterConfigModule({ enabled: true, adapter, configPath: "/app/docs.json" }),
+    ).toBeUndefined();
+    expect(
+      getFarmDocsAdapterConfigModule({ enabled: true, configPath: "/app/docs.config.ts" }),
+    ).toBeUndefined();
   });
 
   it("reports an adapter without hydrateFarmDocs()", async () => {

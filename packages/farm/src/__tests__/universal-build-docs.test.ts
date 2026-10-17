@@ -54,6 +54,16 @@ describe("universal docs build", () => {
     expect(resolveRuntimeConfig(null)).toEqual(docsConfig);
   });
 
+  it("leaves the unserializable runtime config out of the bundled JSON", () => {
+    const expression = generateFarmDocsRuntimeConfigExpression({
+      ...docsConfig,
+      runtimeConfig: { ...docsConfig.config, icons: { book: { type: "svg" } as any } },
+      configOverrides: { metadata: { description: "Docs" } },
+    });
+    expect(expression).not.toContain("runtimeConfig");
+    expect(expression).toContain('"configOverrides":{"metadata":{"description":"Docs"}}');
+  });
+
   it("disables the docs runtime without emitting a conditional object", () => {
     expect(
       generateFarmDocsRuntimeConfigExpression({

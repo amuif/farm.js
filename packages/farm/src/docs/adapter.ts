@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { DocsConfig } from "@farming-labs/docs";
 import type { FarmLayoutFonts } from "../font";
+import { getFarmDocsAdapterConfigModule } from "./adapter-client";
 import { resolveFarmDocsContentDir } from "./handler";
 import type { FarmDocsCompiledManifest } from "./precompiled-runtime";
 import type { FarmDocsResolvedConfig } from "./types";
@@ -58,12 +60,31 @@ export function hasFarmDocsRuntimeAdapter(
   return Boolean(docs?.enabled && docs.adapter?.server && docs.adapter.react);
 }
 
+/**
+ * The docs config module, loaded through the app's module pipeline as the browser loads it,
+ * so client components it imports render the same on both sides. Production imports it
+ * into the server bundle the same way.
+ */
+async function loadFarmDocsConfigModule(
+  docs: FarmDocsResolvedConfig,
+  loadModule: FarmDocsAdapterHandlerOptions["loadModule"],
+): Promise<Partial<DocsConfig> | undefined> {
+  const configModule = getFarmDocsAdapterConfigModule(docs);
+  if (!configModule) return undefined;
+  const loaded = (await loadModule(configModule)) as { default?: unknown } | undefined;
+  const config = loaded?.default ?? loaded;
+  return config && typeof config === "object" ? (config as Partial<DocsConfig>) : undefined;
+}
+
 function createFarmDocsAdapterRuntimeConfig(
   docs: FarmDocsResolvedConfig,
   options: { root: string; srcDir?: string },
+  moduleConfig?: Partial<DocsConfig>,
 ): Record<string, unknown> {
   return {
-    ...docs.config,
+    ...(moduleConfig
+      ? { ...moduleConfig, ...docs.configOverrides }
+      : (docs.runtimeConfig ?? docs.config)),
     entry: docs.config.entry || docs.entry.replace(/^\/+|\/+$/g, "") || "docs",
     docsPath: docs.entry,
     contentDir: resolveFarmDocsContentDir(docs, options),
@@ -163,7 +184,11 @@ export async function createFarmDocsAdapterHandler(
     );
   }
 
-  const runtimeConfig = createFarmDocsAdapterRuntimeConfig(docs, options);
+  const runtimeConfig = createFarmDocsAdapterRuntimeConfig(
+    docs,
+    options,
+    await loadFarmDocsConfigModule(docs, options.loadModule),
+  );
 
   return serverModule.createFarmDocsRuntimeHandler(runtimeConfig as Record<string, unknown>, {
     rootDir: options.root,
