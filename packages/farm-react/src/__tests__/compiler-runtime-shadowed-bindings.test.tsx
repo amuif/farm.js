@@ -24,9 +24,10 @@ afterAll(removeCompiledModules);
 
 describe.each(["static", "hybrid"] as const)("%s lexical compiler bindings", (reactivity) => {
   async function pair(source: string, hydrate = false, props = {}) {
-    const { compiled, original, names, reasons } = await loadCompiledAndOriginal(source, {
+    const { compiled, original, names, reasons } = await loadCompiledAndOriginal(
+      source,
       reactivity,
-    });
+    );
     expect(names).toEqual(["Counter"]);
     expect(reasons).toEqual([]);
     const elements = [original.Counter, compiled.Counter].map((Component) => (

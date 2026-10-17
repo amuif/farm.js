@@ -36,6 +36,21 @@ export function hints(options: HintsOptions = {}) {
     enforce: "post",
     configure(config, context) {
       if (context.isProd) return withoutPlugin(config, plugin);
+      // The runtime is imported lazily by the client plugin, so Vite's dependency scan
+      // never sees it or its web-vitals and axe-core imports. Discovered on first load,
+      // they re-optimize Vite's dependencies while the page runs and load a second copy
+      // of React. Pre-bundling the runtime up front avoids that.
+      const vite = (config.vite ?? {}) as { optimizeDeps?: { include?: string[] } };
+      return {
+        ...config,
+        vite: {
+          ...vite,
+          optimizeDeps: {
+            ...vite.optimizeDeps,
+            include: [...new Set([...(vite.optimizeDeps?.include ?? []), "@farm.js/hints/client"])],
+          },
+        },
+      };
     },
     client: {
       public: resolved,

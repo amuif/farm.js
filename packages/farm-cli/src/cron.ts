@@ -1,10 +1,5 @@
-import {
-  loadConfig,
-  logger,
-  resolveConfig,
-  type FarmCronJob,
-  type FarmCronResolvedConfig,
-} from "@farm.js/core";
+import { loadConfig, logger, resolveConfig } from "@farm.js/core/internal/cli-runtime";
+import type { FarmCronJob, FarmCronResolvedConfig } from "@farm.js/core";
 import { Cron } from "croner";
 import path from "node:path";
 import { createHttpLocalUrl } from "./local-url";
@@ -53,7 +48,7 @@ export async function loadFarmCronConfig(
     throw new Error("No Farm config found. Create farm.config.ts before configuring cron routes.");
   }
 
-  const resolvedConfig = await resolveConfig({ root, ...userConfig }, "development");
+  const resolvedConfig = await resolveConfig({ ...userConfig, root }, "development");
   return resolvedConfig.cron;
 }
 

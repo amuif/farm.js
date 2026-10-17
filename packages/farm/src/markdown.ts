@@ -196,8 +196,21 @@ export async function createMarkdownMirrorResponse(
   if (!hasMarkdownExtension) {
     headersOut.set("Vary", "Accept");
   }
+  // The mirror is rendered from the same request, cookies included, so it varies on
+  // whatever the page varies on. Accept is excluded: the page render always asked for HTML.
+  for (const token of pageResponse.headers.get("vary")?.split(",") ?? []) {
+    const name = token.trim();
+    if (name && name.toLowerCase() !== "accept") appendHeaderToken(headersOut, "Vary", name);
+  }
+  // A page that must not be shared keeps that policy for its Markdown mirror.
+  const pageCacheControl = pageResponse.headers.get("cache-control");
   const cache = target.route?.cache ?? options.config?.cache ?? false;
-  headersOut.set("Cache-Control", createMarkdownCacheHeader(cache));
+  headersOut.set(
+    "Cache-Control",
+    pageCacheControl && isPrivateCacheControl(pageCacheControl)
+      ? pageCacheControl
+      : createMarkdownCacheHeader(cache),
+  );
 
   return new Response(options.request.method === "HEAD" ? null : markdown, {
     status: pageResponse.status,
@@ -256,14 +269,19 @@ export function htmlToMarkdown(
   const title = options.title ?? extractHtmlTitle(html);
   // Hidden elements go before the body is extracted, since extraction drops the
   // <main> or <body> tag whose own attributes may hide it, and after scripts go,
-  // so markup quoted in a script string is never read as an element.
+  // so markup quoted in a script string is never read as an element. Streamed
+  // Suspense content is moved into place first, while its hidden segments and
+  // boundary comments are still there.
+  const streamed = readStreamedBoundaryInstructions(html);
   let source = extractHtmlBody(
     removeHiddenElements(
-      html
-        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-        .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "")
-        .replace(/<!--[\s\S]*?-->/g, ""),
+      resolveStreamedBoundaries(
+        html
+          .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ""),
+        streamed,
+      ).replace(/<!--[\s\S]*?-->/g, ""),
     ),
   );
 
@@ -532,6 +550,13 @@ function isHtmlResponse(response: Response): boolean {
   return contentType.includes("text/html");
 }
 
+function isPrivateCacheControl(value: string): boolean {
+  return value.split(",").some((directive) => {
+    const name = directive.split("=", 1)[0]!.trim().toLowerCase();
+    return name === "private" || name === "no-store";
+  });
+}
+
 function createMarkdownCacheHeader(cache: number | false): string {
   if (cache === false || cache <= 0) {
     return "no-store";
@@ -629,6 +654,7 @@ const VOID_TAGS = new Set([
  */
 function removeHiddenElements(html: string): string {
   const openingTag = /<([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  let closingTags: Map<number, number> | undefined;
   let result = "";
   let cursor = 0;
   let match: RegExpExecArray | null;
@@ -638,8 +664,10 @@ function removeHiddenElements(html: string): string {
     const start = match.index;
     let end = start + tag.length;
     if (!VOID_TAGS.has(name.toLowerCase()) && !isSelfClosingTag(tag)) {
+      // One pass pairs every tag, so many hidden elements never rescan the page.
+      closingTags ??= matchClosingTags(html);
       // Unclosed, it is left in place rather than taking the rest of the page with it.
-      const close = findClosingTagEnd(html, name, end);
+      const close = closingTags.get(start);
       if (close === undefined) continue;
       end = close;
     }
@@ -672,26 +700,119 @@ function isSelfClosingTag(tag: string): boolean {
 }
 
 /**
- * The end of the tag that closes the element opened before `from`, counting
- * nesting. Every tag is matched whole, quoted attribute values included, so a
- * tag written inside an attribute value is never taken for a real one.
+ * Maps the start of every opening tag that has a matching close to the end of
+ * that close, counting nesting per tag name: what scanning forward from each
+ * opening tag would find, in a single pass. Every tag is matched whole, quoted
+ * attribute values included, so a tag written inside an attribute value is
+ * never taken for a real one.
  */
-function findClosingTagEnd(html: string, name: string, from: number): number | undefined {
+function matchClosingTags(html: string): Map<number, number> {
   const tags = /<(\/?)([a-zA-Z][\w:-]*)(?:[^>"']|"[^"]*"|'[^']*')*>/g;
-  tags.lastIndex = from;
-  const target = name.toLowerCase();
-  let depth = 1;
+  const open = new Map<string, number[]>();
+  const closes = new Map<number, number>();
   let match: RegExpExecArray | null;
   while ((match = tags.exec(html))) {
-    if (match[2]!.toLowerCase() !== target) continue;
+    const name = match[2]!.toLowerCase();
     if (match[1]) {
-      depth -= 1;
-      if (depth === 0) return match.index + match[0].length;
-    } else if (!isSelfClosingTag(match[0])) {
-      depth += 1;
+      const start = open.get(name)?.pop();
+      if (start !== undefined) closes.set(start, match.index + match[0].length);
+    } else if (!VOID_TAGS.has(name) && !isSelfClosingTag(match[0])) {
+      let starts = open.get(name);
+      if (!starts) open.set(name, (starts = []));
+      starts.push(match.index);
     }
   }
-  return undefined;
+  return closes;
+}
+
+/** React's streamed Suspense instructions, read from its inline scripts. */
+type StreamedBoundaryInstructions = {
+  /** Boundary template id to the segment that completes it. */
+  boundaries: Map<string, string>;
+  /** Segment placeholder template id to the segment that fills it. */
+  placeholders: Map<string, string>;
+};
+
+function readStreamedBoundaryInstructions(html: string): StreamedBoundaryInstructions {
+  const boundaries = new Map<string, string>();
+  const placeholders = new Map<string, string>();
+  for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    for (const [, kind, first, second] of script!.matchAll(
+      /\$R([CRS])\("([^"\\]+)","([^"\\]+)"/g,
+    )) {
+      if (kind === "S") placeholders.set(second!, first!);
+      else boundaries.set(first!, second!);
+    }
+  }
+  return { boundaries, placeholders };
+}
+
+/**
+ * React streams a Suspense boundary's content after its fallback, as a hidden
+ * segment that an inline `$RC("B:x","S:y")` (or `$RS("S:y","P:x")` for a
+ * segment placeholder) script moves into place in the browser. The mirror never
+ * runs those scripts, so this does the same move on the script-free HTML: each
+ * completed boundary's template and fallback are replaced by its segment's
+ * content, nested boundaries included. Every fragment is scanned once.
+ */
+function resolveStreamedBoundaries(
+  html: string,
+  { boundaries, placeholders }: StreamedBoundaryInstructions,
+): string {
+  if (boundaries.size === 0 && placeholders.size === 0) return html;
+
+  const wanted = new Set([...boundaries.values(), ...placeholders.values()]);
+  const segments = new Map<string, string>();
+  const closingTags = matchClosingTags(html);
+  const openingTag = /<([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  let page = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = openingTag.exec(html))) {
+    const id = /\sid="([^"]*)"/.exec(match[2]!)?.[1];
+    if (!id || !wanted.has(id) || segments.has(id)) continue;
+    const close = closingTags.get(match.index);
+    if (close === undefined) continue;
+    const contentStart = match.index + match[0].length;
+    segments.set(id, html.slice(contentStart, html.lastIndexOf("<", close - 1)));
+    page += html.slice(cursor, match.index);
+    cursor = close;
+    openingTag.lastIndex = close;
+  }
+  page += html.slice(cursor);
+
+  const used = new Set<string>();
+  const expand = (fragment: string): string => {
+    const template = /<template\b[^>]*\sid="([^"]+)"[^>]*>\s*<\/template>/gi;
+    let output = "";
+    let position = 0;
+    let found: RegExpExecArray | null;
+    while ((found = template.exec(fragment))) {
+      const id = found[1]!;
+      const segmentId = boundaries.get(id) ?? placeholders.get(id);
+      const segment = segmentId === undefined ? undefined : segments.get(segmentId);
+      if (segment === undefined || used.has(segmentId!)) continue;
+      used.add(segmentId!);
+      output += fragment.slice(position, found.index) + expand(segment);
+      position = found.index + found[0].length;
+      if (boundaries.has(id)) {
+        // Skip the fallback, up to the comment that closes this boundary.
+        const marker = /<!--(\/?)(?:\$[?!~]?|&)-->/g;
+        marker.lastIndex = position;
+        let depth = 0;
+        let end: RegExpExecArray | null;
+        while ((end = marker.exec(fragment))) {
+          if (!end[1]) depth += 1;
+          else if (depth === 0) break;
+          else depth -= 1;
+        }
+        if (end) position = end.index;
+      }
+      template.lastIndex = position;
+    }
+    return output + fragment.slice(position);
+  };
+  return expand(page);
 }
 
 function stripTags(input: string): string {

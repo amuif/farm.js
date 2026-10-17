@@ -98,7 +98,12 @@ interface IntegrationProviderDefinition {
   }[];
   notes?: readonly string[];
   ui?: UIFeatureDefinition;
-  template(): string;
+  template(context: IntegrationTemplateContext): string;
+}
+
+interface IntegrationTemplateContext {
+  /** Import specifier for an app-root-relative file, from the generated integration file. */
+  importFrom(rootRelativePath: string): string;
 }
 
 const PROVIDERS: readonly IntegrationProviderDefinition[] = [
@@ -476,8 +481,8 @@ better-auth.sqlite-wal
       },
     ],
     ui: betterAuthUIFeature(),
-    template: () => `import { betterAuth } from "@farm.js/better-auth";
-import { auth } from "../auth.ts";
+    template: ({ importFrom }) => `import { betterAuth } from "@farm.js/better-auth";
+import { auth } from "${importFrom("src/lib/auth.ts")}";
 
 export const betterAuthIntegration = betterAuth({
   instance: auth,
@@ -531,8 +536,8 @@ export const auth = {
       "The generated Auth.js instance uses GitHub OAuth through @auth/core; add or replace providers in src/lib/auth.ts.",
     ],
     ui: authjsUIFeature(),
-    template: () => `import { authjs } from "@farm.js/authjs";
-import { auth } from "../auth.ts";
+    template: ({ importFrom }) => `import { authjs } from "@farm.js/authjs";
+import { auth } from "${importFrom("src/lib/auth.ts")}";
 
 export const authjsIntegration = authjs({
   instance: auth,
@@ -652,6 +657,7 @@ export async function addFarmIntegration(
 ): Promise<AddFarmIntegrationResult> {
   const root = path.resolve(options.root || process.cwd());
   const definition = resolveProvider(options.provider);
+  if (!options.skipPackageJson) await assertReadablePackageJson(root);
 
   if (definition.provider === "ai") {
     return addAIRouteIntegration({
@@ -691,6 +697,7 @@ export async function addFarmIntegration(
   };
 
   await writeIntegrationComponent({
+    root,
     path: integrationFile,
     definition,
     force: options.force,
@@ -775,6 +782,7 @@ async function addAIRouteIntegration(input: {
   };
 
   await writeIntegrationComponent({
+    root: input.root,
     path: routeFile,
     definition: input.definition,
     force: input.force,
@@ -827,6 +835,7 @@ function assertValidIntegrationKey(key: string) {
 }
 
 async function writeIntegrationComponent(input: {
+  root: string;
   path: string;
   definition: IntegrationProviderDefinition;
   force?: boolean;
@@ -841,7 +850,11 @@ async function writeIntegrationComponent(input: {
 
   if (!input.dryRun) {
     await mkdir(path.dirname(input.path), { recursive: true });
-    await writeFile(input.path, input.definition.template(), "utf8");
+    const importFrom = (rootRelativePath: string) =>
+      toImportPath(
+        path.relative(path.dirname(input.path), path.join(input.root, rootRelativePath)),
+      );
+    await writeFile(input.path, input.definition.template({ importFrom }), "utf8");
   }
 
   if (exists) {
@@ -983,6 +996,23 @@ async function writeIntegrationSetupFiles(input: {
   }
 }
 
+async function readPackageManifest(packageJsonPath: string) {
+  const source = await readFile(packageJsonPath, "utf8");
+  try {
+    return { source, manifest: JSON.parse(source) as PackageManifest };
+  } catch (error) {
+    throw new Error(
+      `Could not parse ${packageJsonPath}: ${error instanceof Error ? error.message : error}. Fix it, or pass --skip-package-json.`,
+    );
+  }
+}
+
+/** Fails before any file is written, so a broken package.json leaves the app untouched. */
+async function assertReadablePackageJson(root: string) {
+  const packageJsonPath = path.join(root, "package.json");
+  if (existsSync(packageJsonPath)) await readPackageManifest(packageJsonPath);
+}
+
 async function updatePackageJson(input: {
   root: string;
   definition: IntegrationProviderDefinition;
@@ -995,8 +1025,7 @@ async function updatePackageJson(input: {
     return;
   }
 
-  const source = await readFile(packageJsonPath, "utf8");
-  const manifest = JSON.parse(source) as PackageManifest;
+  const { source, manifest } = await readPackageManifest(packageJsonPath);
 
   const dependencies = missingDependencies(manifest, input.definition.dependencies);
   const devDependencies = missingDependencies(manifest, input.definition.devDependencies);

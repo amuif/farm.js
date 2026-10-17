@@ -146,6 +146,7 @@ async function request(body: unknown): Promise<any> {
 export async function loadModel(model: string): Promise<void> {
   const store = getSyncStore(model);
   const generation = store.generation;
+  const revision = store.revision;
   if (store.status === "idle") store.setStatus("loading");
 
   try {
@@ -154,6 +155,9 @@ export async function loadModel(model: string): Promise<void> {
     store.applyServerRows(result.rows ?? [], {
       full: result.full !== false,
       cursor: result.cursor ?? null,
+      // Servers before `keys` existed send none, and deltas then only add.
+      keys: Array.isArray(result.keys) ? result.keys : undefined,
+      revision,
     });
     // Keep the warm-start copy current even when the session performs no writes.
     persistModel(model);
@@ -244,7 +248,17 @@ function runMutation(
   let handleState: SyncMutationState = "pending";
   const isPersisted = (async () => {
     try {
-      const result = await dispatchWrite(store, { model, operation, input }, state.options);
+      const result = await dispatchWrite(store, { model, operation, input }, state.options).catch(
+        (error) => {
+          // The row is already gone: another client deleted it, or this is a
+          // retry whose first attempt landed but never answered. Either way
+          // the delete's end state holds, so it is not a failure to roll back.
+          if (operation === "delete" && (error as { code?: string }).code === "not_found") {
+            return { deleted: 0 };
+          }
+          throw error;
+        },
+      );
       handleState = "completed";
       // The store was cleared for a new session while this was in flight.
       if (store.generation !== generation) return result as SyncRow;

@@ -315,6 +315,16 @@ Use `farm deploy --plan` before a release when you want to verify the selected t
 
 Keep environment variables in the platform's environment manager or local `.env` files. Farm config can reference `process.env`, and integrations should validate required provider keys during setup.
 
+Server values declared under `env.server` are validated when the app builds, but they are not
+stored in the build output. The production server reads them from its own environment when code
+calls `getEnv` or `serverEnv`, so set them wherever the server runs, and a restart picks up a
+rotated secret. On Cloudflare Workers, Farm also reads the worker's bindings and secrets. A value
+read at runtime keeps the type its parser produced at build time, such as a number or boolean. When a
+parser does more than convert the raw string to a string, number, boolean, or JSON value, such as
+splitting a list or scaling a number, Farm cannot repeat it at runtime, so that parsed value stays in
+the build output. Values declared under `env.public` are part of the client bundle, so never put a
+secret there.
+
 ```ts
 export default defineConfig({
   integrations: {

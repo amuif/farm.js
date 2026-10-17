@@ -1,3 +1,4 @@
+import { createBundledEnv } from "../env";
 import type { NitroConfig } from "nitro/types";
 import type { ResolvedFarmConfig } from "../config";
 import type { RouteManager } from "../routing/route-manager";
@@ -92,7 +93,7 @@ export const farmRegistry: {
   clientManifest?: any;
   routePaths?: Record<string, string>;
 } = {
-  env: ${JSON.stringify(config.env || { server: {}, public: {} }, null, 2)},
+  env: ${JSON.stringify(createBundledEnv(config.env), null, 2)},
   deploymentId: ${JSON.stringify(config.deploymentId)},
   basePath: ${JSON.stringify(config.basePath)},
   apiBasePath: ${JSON.stringify(apiBasePath)},
@@ -619,7 +620,7 @@ export default defineEventHandler(async (event: H3Event) => {
           farmRegistry.apiRouteManager = apiRouteManager;
           farmRegistry.routeManager = routeManager;
           farmRegistry.serverRenderer = serverRenderer;
-          farmRegistry.env = config.env || { server: {}, public: {} };
+          farmRegistry.env = createBundledEnv(config.env);
           farmRegistry.deploymentId = config.deploymentId;
           farmRegistry.basePath = config.basePath;
         };

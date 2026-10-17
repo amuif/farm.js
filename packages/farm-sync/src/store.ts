@@ -61,6 +61,9 @@ export class SyncModelStore {
    */
   generation = 0;
   private nextFailureId = 1;
+  /** Bumped on every local commit, so a list can tell which commits it raced. */
+  revision = 0;
+  private committedAt = new Map<string, number>();
 
   constructor(
     readonly name: string,
@@ -100,11 +103,31 @@ export class SyncModelStore {
     this.emit();
   }
 
-  /** Apply a server snapshot or delta. A full result replaces confirmed rows. */
-  applyServerRows(rows: SyncRow[], options: { full: boolean; cursor: string | null }): void {
+  /**
+   * Apply a server snapshot or delta. A full result replaces confirmed rows. A
+   * delta carrying `keys` also drops confirmed rows the server no longer lists:
+   * deleted ones, and ones that left this caller's scope.
+   *
+   * `revision` is the store's revision when the list was sent. A row this
+   * client committed after that was written after the server read its keys,
+   * so its absence from `keys` means nothing and it is kept.
+   */
+  applyServerRows(
+    rows: SyncRow[],
+    options: { full: boolean; cursor: string | null; keys?: unknown[]; revision?: number },
+  ): void {
     if (options.full) this.confirmed.clear();
     for (const row of rows) {
       this.confirmed.set(String(row[this.descriptor.key]), row);
+    }
+    if (!options.full && options.keys) {
+      const listed = new Set(options.keys.map(String));
+      const sentAt = options.revision ?? this.revision;
+      for (const id of this.confirmed.keys()) {
+        if (listed.has(id) || (this.committedAt.get(id) ?? 0) > sentAt) continue;
+        this.confirmed.delete(id);
+        this.committedAt.delete(id);
+      }
     }
     this.cursor = options.cursor ?? this.cursor;
     this.status = "ready";
@@ -130,12 +153,14 @@ export class SyncModelStore {
     const index = this.layers.indexOf(layer);
     if (index !== -1) this.layers.splice(index, 1);
 
+    this.revision += 1;
     if (layer.type === "delete") {
       this.confirmed.delete(String(layer.key));
-    } else if (confirmed) {
-      this.confirmed.set(String(confirmed[this.descriptor.key] ?? layer.key), confirmed);
+      this.committedAt.delete(String(layer.key));
     } else {
-      this.confirmed.set(String(layer.key), layer.row);
+      const id = String((confirmed && confirmed[this.descriptor.key]) ?? layer.key);
+      this.confirmed.set(id, confirmed ?? layer.row);
+      this.committedAt.set(id, this.revision);
     }
     this.invalidate();
   }
@@ -153,6 +178,7 @@ export class SyncModelStore {
   reset(): void {
     this.generation += 1;
     this.confirmed.clear();
+    this.committedAt.clear();
     this.layers = [];
     this.failures = [];
     this.cursor = null;

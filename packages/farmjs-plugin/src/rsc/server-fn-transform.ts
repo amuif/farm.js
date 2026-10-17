@@ -281,7 +281,7 @@ function findServerFnExportReplacements(code: string, factoryNames: Map<string, 
       start: match.index ?? 0,
       end: declarationEnd,
       exportName,
-      code: `const ${privateName} = ${callExpression};\nexport async function ${exportName}(input) {\n  return ${privateName}(input);\n}`,
+      code: `const ${privateName} = ${callExpression};\nexport async function ${exportName}(input) {\n  return ${privateName}(input);\n}\n${copyServerFunctionDescriptor(exportName, privateName)}`,
     });
   }
 
@@ -308,11 +308,21 @@ function findServerFnExportReplacements(code: string, factoryNames: Map<string, 
       start: match.index ?? 0,
       end: declarationEnd,
       exportName: "default",
-      code: `const ${privateName} = ${callExpression};\nexport default async function (input) {\n  return ${privateName}(input);\n}`,
+      code: `const ${privateName} = ${callExpression};\nexport default async function ${privateName}_export(input) {\n  return ${privateName}(input);\n}\n${copyServerFunctionDescriptor(`${privateName}_export`, privateName)}`,
     });
   }
 
   return replacements;
+}
+
+/**
+ * The exported wrapper replaces the factory's function, so it would lose the internal descriptor
+ * that MCP and other non-browser callers read. Copy only that descriptor: the other server
+ * function markers stay on the private binding, as before.
+ */
+function copyServerFunctionDescriptor(target: string, source: string) {
+  const key = 'Symbol.for("farm.server-function.descriptor")';
+  return `Object.defineProperty(${target}, ${key}, { value: ${source}[${key}] });`;
 }
 
 function hasModuleDirective(code: string, directive: "use client" | "use server") {

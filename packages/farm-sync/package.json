@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/sync",
-  "version": "0.1.0-beta.14",
+  "version": "0.1.0-beta.24",
   "description": "Local-first collections for Farm.js: schema-driven reads, optimistic writes, offline queueing",
   "keywords": [
     "farm.js",
@@ -49,8 +49,8 @@
     "@farm.js/core": "workspace:*"
   },
   "devDependencies": {
-    "@farming-labs/orm": "0.0.62",
-    "@farming-labs/orm-runtime": "0.0.62",
+    "@farming-labs/orm": "0.0.64",
+    "@farming-labs/orm-runtime": "0.0.64",
     "@types/node": "^20.10.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

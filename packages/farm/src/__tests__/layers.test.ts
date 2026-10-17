@@ -363,6 +363,8 @@ describe("Farm layers", () => {
 
     expect(viteConfig.resolve.alias).toEqual({
       "#layers/commerce": path.join(layerRoot, "src"),
+      // `@/` resolves to the app's source directory, as in production builds.
+      "@": path.resolve(root, "src"),
     });
     expect(viteConfig.server.fs.allow).toEqual([root, layerRoot]);
   });

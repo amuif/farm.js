@@ -111,7 +111,7 @@ const frameworks = [
     id: "farm",
     label: "Farm.js",
     version: farmCorePackage.version,
-    stack: "React 19.2.4 · Vite 5.4.20 dev · Vite 8.1.5 (Rolldown) build",
+    stack: "React 19.2.4 · Vite 8.1.5 (Rolldown)",
     directory: "farm",
     devHost: "localhost",
     installedPackages: [
@@ -120,8 +120,7 @@ const frameworks = [
       { name: "react", version: "19.2.4" },
       { name: "react-dom", version: "19.2.4" },
       { name: "sharp", version: "0.34.5" },
-      { name: "vite", version: "5.4.20", from: "@farm.js/core" },
-      { name: "vite-rolldown", version: "8.1.5", from: "@farm.js/core" },
+      { name: "vite", version: "8.1.5", from: "@farm.js/core" },
     ],
     cli: "node_modules/@farm.js/cli/bin/farm.js",
     devArgs: (port) => ["dev", "--port", String(port)],

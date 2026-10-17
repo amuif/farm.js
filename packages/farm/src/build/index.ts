@@ -1,3 +1,4 @@
+import { createBundledEnv } from "../env";
 import type { ResolvedFarmConfig } from "../config";
 import {
   getDefaultDeployOutputDir,
@@ -20,11 +21,7 @@ import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import { farmFontImportsPlugin } from "../font-vite";
 import { createFarmSourceAlias, mergeFarmViteConfig } from "../server/vite-config";
 import { getFarmRendererComponentExtensions, loadFarmRendererVitePlugins } from "../renderer";
-import {
-  canUseRolldownForRouteDiscovery,
-  loadFarmProductionVite,
-  type FarmProductionViteRuntime,
-} from "./production-vite";
+import { loadFarmProductionVite, type FarmProductionViteRuntime } from "./production-vite";
 import { withProductionNodeEnv } from "./production-node-env";
 
 interface BuildOptions {
@@ -109,6 +106,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
   });
   pluginManager.addPlugins(config.plugins || []);
   let projectModuleServer: ViteDevServer | undefined;
+  const rendererBuild = new AbortController();
 
   try {
     await pluginManager.runHookParallel("init");
@@ -154,15 +152,15 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
       : undefined;
     if (productionViteResult?.status === "rejected") throw productionViteResult.reason;
     const productionVite = productionViteResult?.value;
-    const useProductionViteForDiscovery =
-      productionVite && canUseRolldownForRouteDiscovery(config.vite);
-    if (productionVite?.builder === "rolldown" && !useProductionViteForDiscovery) {
-      logger.info("🔌 Using Vite Rollup for route discovery with custom Vite configuration");
-    }
-    const createViteServer = useProductionViteForDiscovery
+    const createViteServer = productionVite
       ? productionVite.createServer
       : (await import("vite")).createServer;
-    projectModuleServer = await createProjectModuleServer(createViteServer, config, root);
+    projectModuleServer = await createProjectModuleServer(
+      createViteServer,
+      config,
+      root,
+      rendererBuild.signal,
+    );
     const farmApp = createFarmApp(config, projectModuleServer);
     await farmApp.initialize();
 
@@ -216,6 +214,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
         root,
         pluginManager,
         productionVite,
+        rendererBuildLifetime: rendererBuild.signal,
       });
     } else {
       const { build: legacyViteBuild } = await import("vite");
@@ -279,7 +278,11 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
     logger.error(`❌ Build failed: ${error}`);
     throw error;
   } finally {
-    await projectModuleServer?.close();
+    try {
+      await projectModuleServer?.close();
+    } finally {
+      rendererBuild.abort();
+    }
   }
 }
 
@@ -287,9 +290,11 @@ async function createProjectModuleServer(
   createViteServer: FarmProductionViteRuntime["createServer"],
   config: ResolvedFarmConfig,
   root: string,
+  buildLifetime: AbortSignal,
 ): Promise<ViteDevServer> {
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: true,
+    buildLifetime,
   });
   const viteConfig = mergeFarmViteConfig(
     {
@@ -425,7 +430,7 @@ async function buildSSR(
     },
     define: {
       __FARM_API_BASE_URL__: JSON.stringify(config.api.baseURL),
-      __FARM_ENV__: JSON.stringify(config.env || { server: {}, public: {} }),
+      __FARM_ENV__: JSON.stringify(createBundledEnv(config.env)),
       __FARM_PUBLIC_ENV__: JSON.stringify(config.env?.public || {}),
     },
     plugins: [
@@ -571,7 +576,7 @@ async function buildNitro(
     farmRegistry.apiRouteManager = apiRouteManager;
     farmRegistry.routeManager = routeManager;
     farmRegistry.serverRenderer = serverRenderer;
-    farmRegistry.env = config.env || { server: {}, public: {} };
+    farmRegistry.env = createBundledEnv(config.env);
 
     // Store route paths for SSR module loading
     const routePaths: Record<string, string> = {};

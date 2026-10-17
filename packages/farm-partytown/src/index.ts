@@ -109,7 +109,13 @@ function createPartytownDevPlugin(
     }) {
       server.middlewares.use(async (request, response, next) => {
         if (request.method !== "GET" && request.method !== "HEAD") return next();
-        const pathname = new URL(request.url ?? "/", "http://farm.local").pathname;
+        let pathname: string;
+        try {
+          pathname = new URL(request.url ?? "/", "http://farm.local").pathname;
+        } catch {
+          // Not a Partytown asset; let Vite answer the malformed URL.
+          return next();
+        }
         try {
           const asset = await readPartytownDevAsset(pathname, basePath, options);
           if (!asset) return next();

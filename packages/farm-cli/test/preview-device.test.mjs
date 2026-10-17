@@ -19,6 +19,10 @@ function fixture(options = {}) {
     opened = [],
     saved = [];
   let polling = 0;
+  // Retry-After seconds for each rate-limited poll before the usual replies (0 = no header).
+  const rateLimited = [...(options.rateLimited ?? [])];
+  // Replies returned, in order, before the usual ones (outages, proxies, gateways).
+  const pollReplies = [...(options.pollReplies ?? [])];
   const config = {
     enabled: true,
     provider: "device",
@@ -71,6 +75,14 @@ function fixture(options = {}) {
           interval: 5,
         });
       if (url.endsWith("/device/token")) {
+        if (pollReplies.length) return pollReplies.shift()();
+        if (rateLimited.length) {
+          const seconds = rateLimited.shift();
+          return Response.json(
+            { message: "Too many requests" },
+            { status: 429, headers: seconds ? { "retry-after": String(seconds) } : {} },
+          );
+        }
         const error = options.failure || ["authorization_pending", "slow_down"][polling++];
         if (error) return Response.json({ error }, { status: 400 });
         return Response.json({ access_token: "device-session", expires_in: 86400 });
@@ -99,6 +111,38 @@ test("Farm.js Infrastructure device sign-in handles pending/slow-down and return
   assert.ok(!JSON.stringify(result).includes("device-session"));
   assert.ok(!JSON.stringify(result).includes("farmjs_cli_key_fixture"));
 });
+test("a rate-limited poll waits as Infrastructure asks and keeps waiting for approval", async () => {
+  // Infra counts every poll while someone takes their time approving. A 429 must not end
+  // a sign-in the person may be confirming right now.
+  const f = fixture({ rateLimited: [12, 0] });
+  await authorizePreviewGatewayPlan(plan, { runtime: f.runtime, forceLogin: true });
+  assert.deepEqual(f.waits, [5000, 12000, 5000, 5000, 5000, 5000, 10000]);
+  assert.deepEqual(f.saved, ["farmjs_cli_key_fixture"]);
+});
+
+test("a 5xx or unreadable poll keeps waiting for approval instead of failing sign-in", async () => {
+  const f = fixture({
+    pollReplies: [
+      () => new Response("upstream unavailable", { status: 503 }),
+      () => new Response("<html>Bad gateway</html>", { status: 502 }),
+      () => Response.json({ error: "internal" }, { status: 500 }),
+      () => new Response("<html>ok</html>", { status: 200 }),
+    ],
+  });
+  await authorizePreviewGatewayPlan(plan, { runtime: f.runtime, forceLogin: true });
+  assert.deepEqual(f.waits, [5000, 5000, 5000, 5000, 5000, 5000, 10000]);
+  assert.deepEqual(f.saved, ["farmjs_cli_key_fixture"]);
+
+  // A client error that isn't JSON is still an answer, not an outage.
+  const notFound = fixture({
+    pollReplies: [() => new Response("<html>Not found</html>", { status: 404 })],
+  });
+  await assert.rejects(
+    authorizePreviewGatewayPlan(plan, { runtime: notFound.runtime, forceLogin: true }),
+    /sign-in failed \(404\)/,
+  );
+});
+
 test("Farm.js Infrastructure API keys skip browser approval in CI and do not get persisted", async () => {
   const previous = process.env.FARM_PREVIEW_TOKEN;
   process.env.FARM_PREVIEW_TOKEN = "farmjs_fixture_key";

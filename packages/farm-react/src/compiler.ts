@@ -764,6 +764,19 @@ function collectStateDependencies(
   expression: t.Expression,
   statesByValue: ReadonlyMap<string, StateBinding>,
 ): number[] {
+  if (statesByValue.size === 0) return [];
+  // Most static expressions cannot reference a reactive local. Reject only
+  // proven misses before cloning and building scopes; possible matches still
+  // use Babel's full reference/shadowing analysis below. JSX names count too.
+  let possible = false;
+  t.traverseFast(expression, (node) => {
+    if ((t.isIdentifier(node) || t.isJSXIdentifier(node)) && statesByValue.has(node.name)) {
+      possible = true;
+      return t.traverseFast.stop;
+    }
+  });
+  if (!possible) return [];
+
   const dependencies = new Set<number>();
   const file = expressionFile(cloneExpression(expression));
   traverse(file, {
@@ -5485,7 +5498,8 @@ function analyzeKeyedRowTree(
       bindings.push({
         kind: "text",
         path: [...path],
-        value: t.arrayExpression(parts),
+        // Normalization accepts scalars and arrays; only joined text needs a wrapper.
+        value: parts.length === 1 ? parts[0] : t.arrayExpression(parts),
       });
     }
 

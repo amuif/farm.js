@@ -53,8 +53,19 @@ describe("client component path resolution", () => {
 
     expect(hasUseClientDirective(source)).toBe(true);
     expect(stripUseClientDirective(source)).toBe(
-      "export default function Page() { return null; }\n",
+      "             \n\nexport default function Page() { return null; }\n",
     );
+  });
+
+  it("keeps the lines and columns of code after a stripped directive", () => {
+    const source =
+      '"use client";\n\nimport { useState } from "react";\n  const value = useState(0);\n';
+    const stripped = stripUseClientDirective(source);
+
+    expect(hasUseClientDirective(stripped)).toBe(false);
+    expect(stripped.split("\n")).toHaveLength(source.split("\n").length);
+    expect(stripped.split("\n").slice(2)).toEqual(source.split("\n").slice(2));
+    expect(stripped.indexOf("useState(0)")).toBe(source.indexOf("useState(0)"));
   });
 
   it("detects directives preceded by comments or other directives", () => {
@@ -70,15 +81,15 @@ describe("client component path resolution", () => {
     expect(hasUseClientDirective(afterUseStrict)).toBe(true);
 
     expect(stripUseClientDirective(afterBlockComment)).toBe(
-      "/* Copyright 2026 Acme */\nexport default function Counter() { return null; }\n",
+      "/* Copyright 2026 Acme */\n             \nexport default function Counter() { return null; }\n",
     );
     expect(stripUseClientDirective(afterLineComment)).toBe(
-      "// @generated\nexport default function Counter() { return null; }\n",
+      "// @generated\n             \nexport default function Counter() { return null; }\n",
     );
     // Detection and stripping must agree: a preceding "use strict" directive is
     // kept, and the "use client" directive is removed.
     expect(stripUseClientDirective(afterUseStrict)).toBe(
-      '"use strict";\nexport default function Counter() { return null; }\n',
+      '"use strict";\n             \nexport default function Counter() { return null; }\n',
     );
   });
 
@@ -209,6 +220,136 @@ describe("client component path resolution", () => {
       isClientComponent: false,
       shouldHydrate: true,
       islandStrategy: "load",
+    });
+  });
+
+  describe("client components imported through app aliases", () => {
+    const writeAliasFixture = (files: Record<string, string>) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "farm-client-alias-"));
+      tempDirs.push(root);
+      for (const [relativePath, source] of Object.entries(files)) {
+        const filePath = path.join(root, relativePath);
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, source);
+      }
+      return root;
+    };
+    const clientNav = '"use client";\nexport function Nav() { return null; }\n';
+    const hydrated = { isClientComponent: false, shouldHydrate: true, islandStrategy: "load" };
+
+    it("follows Farm's default @/ alias to the source directory", () => {
+      const root = writeAliasFixture({
+        "src/components/nav.tsx": clientNav,
+        "src/app/layout.tsx":
+          'import { Nav } from "@/components/nav";\nexport default function Layout({ children }) { return <html><body><Nav />{children}</body></html>; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/layout.tsx"), root)).toEqual(
+        hydrated,
+      );
+    });
+
+    it("follows tsconfig paths, including comments and trailing commas", () => {
+      const root = writeAliasFixture({
+        "tsconfig.json": `{
+  // Next.js projects keep components at the root.
+  "compilerOptions": {
+    /* "@/*" points at the project root, not src */
+    "paths": { "@/*": ["./*"], "~ui/*": ["./packages/ui/*",], },
+  },
+}`,
+        "components/nav.tsx": clientNav,
+        "packages/ui/button.tsx": '"use client";\nexport function Button() { return null; }\n',
+        "src/app/page.tsx":
+          'import { Nav } from "@/components/nav";\nexport default function Page() { return <Nav />; }\n',
+        "src/app/about/page.tsx":
+          'import { Button } from "~ui/button";\nexport default function About() { return <Button />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+      expect(getClientModuleMetadata(path.join(root, "src/app/about/page.tsx"), root)).toEqual(
+        hydrated,
+      );
+    });
+
+    it("follows paths inherited through a relative tsconfig extends", () => {
+      const root = writeAliasFixture({
+        "tsconfig.base.json":
+          '{ "compilerOptions": { "baseUrl": "src", "paths": { "@app/*": ["*"] } } }',
+        "tsconfig.json": '{ "extends": "./tsconfig.base", "compilerOptions": { "strict": true } }',
+        "src/components/nav.tsx": clientNav,
+        "src/app/page.tsx":
+          'import { Nav } from "@app/components/nav";\nexport default function Page() { return <Nav />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+    });
+
+    it("follows package.json subpath imports", () => {
+      const root = writeAliasFixture({
+        "package.json": '{ "type": "module", "imports": { "#/*": "./src/*" } }',
+        "src/components/nav.tsx": clientNav,
+        "src/app/page.tsx":
+          'import { Nav } from "#/components/nav";\nexport default function Page() { return <Nav />; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual(hydrated);
+    });
+
+    it("isolates a client leaf imported through @/", () => {
+      const root = writeAliasFixture({
+        "src/components/counter.tsx":
+          "'use client';\nexport default function Counter() { return <button>1</button>; }\n",
+        "src/app/layout.tsx":
+          'import Counter from "@/components/counter";\nexport default function Layout({ children }) { return <main><Counter />{children}</main>; }\n',
+      });
+
+      expect(
+        getClientModuleHydrationPlan(path.join(root, "src/app/layout.tsx"), root, "analyze")
+          .isolatedBoundaries,
+      ).toEqual([
+        { modulePath: path.join(root, "src/components/counter.tsx"), islandStrategy: "load" },
+      ]);
+    });
+
+    it("keeps a server-only page server-only when its @/ imports have no client code", () => {
+      const root = writeAliasFixture({
+        "src/lib/greeting.ts": 'export const greeting = "hello";\n',
+        "src/app/page.tsx":
+          'import { greeting } from "@/lib/greeting";\nexport default function Page() { return <h1>{greeting}</h1>; }\n',
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root)).toEqual({
+        isClientComponent: false,
+        shouldHydrate: false,
+        islandStrategy: null,
+      });
+    });
+
+    it.each([
+      ["a catch-all pattern with no matching file", { "*": ["src/*"] }, {}],
+      [
+        "a pattern that only maps the package's types",
+        { "ui-kit": ["./src/types/ui-kit.d.ts"] },
+        { "src/types/ui-kit.d.ts": "export declare function Button(): null;\n" },
+      ],
+    ])("falls back to the package when tsconfig paths has %s", (_name, paths, files) => {
+      const root = writeAliasFixture({
+        "tsconfig.json": JSON.stringify({ compilerOptions: { paths } }),
+        "node_modules/ui-kit/package.json": JSON.stringify({
+          name: "ui-kit",
+          exports: "./dist/index.js",
+        }),
+        "node_modules/ui-kit/dist/index.js":
+          '"use client";\nexport function Button() { return null; }\n',
+        "src/app/page.tsx":
+          'import { Button } from "ui-kit";\nexport default function Page() { return <Button />; }\n',
+        ...files,
+      });
+
+      expect(getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root).shouldHydrate).toBe(
+        true,
+      );
     });
   });
 
@@ -1513,9 +1654,23 @@ export function Chart() {}
     const missingModuleGuard = developmentSource.indexOf("if (!modulePath)", isolatedBootstrap);
     expect(isolatedBootstrap).toBeGreaterThan(-1);
     expect(missingModuleGuard).toBeGreaterThan(isolatedBootstrap);
-    expect(developmentSource).not.toContain(
-      "await hydrateFarmIsolatedClientBoundaries(rootContainer, hydrationController.signal);\n      replayPreHydrationClicks();",
+    // An islands-only page releases the pre-hydration hold once its load islands are
+    // live, or clicks and submits outside every island stay held forever. It must not
+    // replay held targets into server HTML that no client code owns.
+    const isolatedBranch = developmentSource.slice(
+      isolatedBootstrap,
+      developmentSource.indexOf("if (!shouldHydrate)", isolatedBootstrap),
     );
+    const isolatedHydrate = isolatedBranch.indexOf(
+      "await hydrateFarmIsolatedClientBoundaries(rootContainer, hydrationController.signal);",
+    );
+    const abortGuard = isolatedBranch.indexOf("if (hydrationController.signal.aborted) return;");
+    const release = isolatedBranch.indexOf("markFarmHydrated();");
+    expect(isolatedHydrate).toBeGreaterThan(-1);
+    expect(abortGuard).toBeGreaterThan(isolatedHydrate);
+    expect(release).toBeGreaterThan(abortGuard);
+    expect(isolatedBranch.indexOf("return;", release)).toBeGreaterThan(release);
+    expect(isolatedBranch).not.toContain("replayPreHydrationClicks(");
   });
 
   it("uses a document swap when generated SPA navigation leaves the app root", () => {

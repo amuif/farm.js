@@ -10,6 +10,7 @@ import VueCompat, {
   ErrorBoundary,
   createElement,
   isValidElement,
+  markFunctionComponent,
   materializeVueElement,
 } from "./runtime";
 
@@ -17,7 +18,7 @@ export const name = "vue";
 export const capabilities = {
   streaming: { node: true, web: true },
 } as const;
-export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement };
+export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement, markFunctionComponent };
 
 /** Vue hydration does not require an inline bootstrap before the client entry. */
 export function generateHydrationScript(): string {

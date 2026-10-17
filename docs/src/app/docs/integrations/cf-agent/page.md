@@ -167,7 +167,7 @@ farm deploy --cloudflare
 After the Farm build, the integration:
 
 1. Preserves the original `wrangler.jsonc`.
-2. Generates a Worker entry that sends `/agents/**` to `routeAgentRequest()` and all other requests to Farm.
+2. Generates a Worker entry that sends `/agents/**` to `routeAgentRequest()` and all other requests to Farm. Other event handlers that both Workers export, such as `scheduled`, `queue` and `email`, run the Agent Worker's handler first and then Farm's; a failure in either is rethrown after both have run.
 3. Re-exports Agent classes so Durable Object bindings remain valid.
 4. Writes `.farm-cf-agent.wrangler.jsonc` and `.farm/cf-agent/deploy.json`.
 5. Lets `farm deploy --cloudflare` deploy the combined Worker with Wrangler.

@@ -48,13 +48,13 @@ export const schema = defineSchema({
 
 Field metadata does real work, so configuration does not repeat it:
 
-| Declaration                  | What it decides                                                    |
-| ---------------------------- | ------------------------------------------------------------------ |
-| `primaryKey: true`           | the row key                                                        |
-| `type: "enum"` + `values`    | the column's type, and validation before the optimistic write      |
-| `reference`                  | relationships between models                                       |
-| `datetime` named `updatedAt` | incremental sync — after the first load only changed rows are sent |
-| `name` on a model or field   | the real table or column name in an existing database              |
+| Declaration                  | What it decides                                                   |
+| ---------------------------- | ----------------------------------------------------------------- |
+| `primaryKey: true`           | the row key                                                       |
+| `type: "enum"` + `values`    | the column's type, and validation before the optimistic write     |
+| `reference`                  | relationships between models                                      |
+| `datetime` named `updatedAt` | incremental sync: after the first load only changed rows are sent |
+| `name` on a model or field   | the real table or column name in an existing database             |
 
 ## Configure the plugin
 
@@ -229,6 +229,22 @@ server's row filter.
 
 `useRow("tasks", id)` subscribes to a single row.
 
+### Deletions and scope changes
+
+With an `updatedAt` cursor, a load after the first asks only for rows changed
+since the last one. A delta cannot describe a row that no longer exists, so the
+server also sends the key of every row the caller can still see, read with the
+same row filter as the list. The browser drops any row it holds whose key is
+missing. That covers rows deleted by another client, rows deleted straight in
+the database, and rows that left the caller's scope, for example a task moved
+to another organization.
+
+Rows written in the browser are safe from this: an insert the server has not
+confirmed yet is never dropped, and neither is a row confirmed while the load
+was in flight. The key list costs one extra key-only query per incremental
+load. Without an `updatedAt` field every load is a full snapshot, which already
+replaces the rows on the device.
+
 ## Write
 
 Reading and writing are separate surfaces: `useLiveQuery` observes, and
@@ -275,6 +291,7 @@ surface as an unhandled rejection.
 | Network error or 5xx | retried with backoff; the row stays on screen throughout                |
 | Offline              | the write pauses, `paused` increments, and it sends itself on reconnect |
 | Reload while pending | the pending write is lost; optimistic state is in memory only           |
+| Deleting a gone row  | treated as done, so the row stays removed instead of reappearing        |
 
 A rejected write reverts on screen, but it does not vanish: it lands in the
 model's `failures` queue with the exact input that failed, the reason, and two

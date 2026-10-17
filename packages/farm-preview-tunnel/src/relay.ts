@@ -853,22 +853,24 @@ function remainingCoordinatorSessionTtl(session: AgentSession, sessionTtlMs: num
 
 function resolvePublicRoute(request: IncomingMessage, publicDomain: string | undefined) {
   const url = new URL(request.url || "/", "http://localhost");
-  const match = url.pathname.match(/^\/preview\/([^/]+)(\/.*)?$/);
-  if (match) {
-    const name = normalizePreviewName(match[1]);
-    const path = `${match[2] || "/"}${url.search}`;
-    return name ? { name, path } : undefined;
+  const host = normalizeHost(request.headers.host);
+  const suffix = publicDomain ? `.${publicDomain}` : undefined;
+
+  // Every preview subdomain is its own origin. Honoring the path form there
+  // would let `alice.<domain>/preview/bob` serve bob's app, cookies, and
+  // scripts on alice's origin, so tenant hosts route only by subdomain.
+  if (suffix && host?.endsWith(suffix)) {
+    const subdomain = host.slice(0, -suffix.length);
+    const name = normalizePreviewName(subdomain);
+    if (!name || name !== subdomain || subdomain.includes(".")) return undefined;
+    return { name, path: `${url.pathname || "/"}${url.search}` };
   }
 
-  if (!publicDomain) return undefined;
-  const host = normalizeHost(request.headers.host);
-  const suffix = `.${publicDomain}`;
-  if (!host?.endsWith(suffix)) return undefined;
-
-  const subdomain = host.slice(0, -suffix.length);
-  const name = normalizePreviewName(subdomain);
-  if (!name || name !== subdomain || subdomain.includes(".")) return undefined;
-  return { name, path: `${url.pathname || "/"}${url.search}` };
+  const match = url.pathname.match(/^\/preview\/([^/]+)(\/.*)?$/);
+  if (!match) return undefined;
+  const name = normalizePreviewName(match[1]);
+  const path = `${match[2] || "/"}${url.search}`;
+  return name ? { name, path } : undefined;
 }
 
 async function handleFallback(

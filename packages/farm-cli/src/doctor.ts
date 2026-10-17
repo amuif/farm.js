@@ -4,9 +4,8 @@ import {
   getFarmDocsRouteTypeEntries,
   loadConfig,
   resolveConfig,
-  type FarmCronJob,
-  type ResolvedFarmConfig,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
+import type { FarmCronJob, ResolvedFarmConfig } from "@farm.js/core";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -124,6 +123,7 @@ type WorkspaceContext = {
   packages: Map<string, string>;
 };
 
+const REGISTRY_TIMEOUT_MS = 10_000;
 const ROUTE_EXTENSIONS = ["ts", "tsx", "js", "jsx", "vue", "md", "mdx"];
 const CONFIG_FILES = [
   "farm.config.ts",
@@ -726,9 +726,10 @@ function collectLocalPackageChecks(
 
 function getWorkspaceTargetName(name: string, specifier: string): string {
   const target = specifier.slice("workspace:".length);
-  if (!target.startsWith("@")) return name;
-  const versionSeparator = target.indexOf("@", 1);
-  return versionSeparator === -1 ? target : target.slice(0, versionSeparator);
+  // pnpm aliases use `workspace:<name>@<range>`, where <name> may be scoped.
+  const versionSeparator = target.indexOf("@", target.startsWith("@") ? 1 : 0);
+  if (versionSeparator > 0) return target.slice(0, versionSeparator);
+  return target.startsWith("@") ? target : name;
 }
 
 function findWorkspaceContext(start: string): WorkspaceContext | undefined {
@@ -754,6 +755,17 @@ function readWorkspacePatterns(root: string): string[] {
     const patterns: string[] = [];
     let packagesIndent: number | undefined;
     for (const line of readFileSync(workspaceFile, "utf8").split(/\r?\n/)) {
+      const flow = /^\s*packages\s*:\s*\[([^\]]*)\]\s*(?:#.*)?$/.exec(line);
+      if (flow) {
+        for (const entry of flow[1].split(",")) {
+          const pattern = entry
+            .trim()
+            .replace(/^(["'])(.*)\1$/, "$2")
+            .trim();
+          if (pattern) patterns.push(pattern);
+        }
+        break;
+      }
       const key = /^(\s*)packages\s*:\s*(?:#.*)?$/.exec(line);
       if (key) {
         packagesIndent = key[1].length;
@@ -987,13 +999,16 @@ async function collectRegistryChecks(
 ): Promise<void> {
   const packageNames = ["@farm.js/core", "@farm.js/create-app"];
   const fetchRegistry = options.fetch || globalThis.fetch;
-  const resolved: Array<{ name: string; beta: string }> = [];
+  const resolved: Array<{ name: string; beta: string; newest: string }> = [];
 
   try {
     for (const name of packageNames) {
       const response = await fetchRegistry(
         `https://registry.npmjs.org/${encodeURIComponent(name)}`,
-        { headers: { accept: "application/json" } },
+        {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+        },
       );
       if (!response.ok) {
         throw new Error(`${name} returned ${response.status}.`);
@@ -1020,7 +1035,12 @@ async function collectRegistryChecks(
         });
         continue;
       }
-      resolved.push({ name, beta });
+      const latest = metadata["dist-tags"]?.latest;
+      const newest =
+        typeof latest === "string" && isExactVersion(latest) && compareVersions(latest, beta) > 0
+          ? latest
+          : beta;
+      resolved.push({ name, beta, newest });
     }
   } catch (error) {
     checks.push({
@@ -1043,9 +1063,13 @@ async function collectRegistryChecks(
   }
 
   const dependencies = manifest ? getProjectDependencies(manifest) : {};
-  const stale = resolved.filter(({ name, beta }) => {
+  const stale = resolved.filter(({ name, newest }) => {
     const declared = dependencies[name];
-    return typeof declared === "string" && isExactVersion(declared) && declared !== beta;
+    return (
+      typeof declared === "string" &&
+      isExactVersion(declared) &&
+      compareVersions(declared, newest) < 0
+    );
   });
   if (stale.length > 0) {
     checks.push({
@@ -1054,18 +1078,52 @@ async function collectRegistryChecks(
       title: "Installed Farm beta declarations are stale",
       message: stale
         .map(
-          ({ name, beta }) =>
-            `${name} declares ${String(dependencies[name])}; registry beta is ${beta}`,
+          ({ name, beta, newest }) =>
+            `${name} declares ${String(dependencies[name])}; registry ${newest === beta ? "beta" : "latest"} is ${newest}`,
         )
         .join(", "),
-      action:
-        "Run farm upgrade --beta, or refresh the scaffold command with PNPM_CONFIG_DLX_CACHE_MAX_AGE=0.",
+      action: `Run ${stale.some(({ beta, newest }) => newest !== beta) ? "farm upgrade" : "farm upgrade --beta"}, or refresh the scaffold command with PNPM_CONFIG_DLX_CACHE_MAX_AGE=0.`,
     });
   }
 }
 
 function isExactVersion(value: string): boolean {
   return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value);
+}
+
+/** Semver precedence for versions accepted by isExactVersion. */
+function compareVersions(left: string, right: string): number {
+  const parse = (value: string) => {
+    const separator = value.indexOf("-");
+    const core = separator === -1 ? value : value.slice(0, separator);
+    return {
+      core: core.split(".").map(Number),
+      prerelease: separator === -1 ? undefined : value.slice(separator + 1).split("."),
+    };
+  };
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = a.core[index] - b.core[index];
+    if (difference !== 0) return Math.sign(difference);
+  }
+  if (!a.prerelease || !b.prerelease) {
+    return a.prerelease ? -1 : b.prerelease ? 1 : 0;
+  }
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const x = a.prerelease[index];
+    const y = b.prerelease[index];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) return Math.sign(Number(x) - Number(y));
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 function collectRouterChecks(config: ResolvedFarmConfig, checks: FarmDoctorCheck[]): void {

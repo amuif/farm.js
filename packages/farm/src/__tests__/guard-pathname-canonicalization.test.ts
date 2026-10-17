@@ -2,6 +2,7 @@
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
+import { matchAPIRoute } from "../api/route-pattern";
 import { defineIntegration, dispatchIntegrationRequest } from "../integrations";
 import { MiddlewareManager } from "../middleware/manager";
 import { createProductionMiddlewareRunner } from "../middleware/production-runtime";
@@ -314,22 +315,48 @@ describe("route guards match the canonical request pathname", () => {
     });
   });
 
-  it("leaves trailing slashes alone", async () => {
-    // Pinned, not endorsed: the guard matchers compile `/dashboard` to an
-    // exact regex, so a trailing slash misses them while the page matchers
-    // normalize it away. That divergence predates this change and is a
-    // separate concern; canonicalizing the pathname must not quietly alter it
-    // in either direction.
-    const trailing = await collectGuards("/dashboard", "/dashboard/");
-    expect(trailing).toEqual({
-      devMiddleware: false,
-      productionMiddleware: false,
-      integration: true,
+  it("guards a trailing slash wherever the router drops it", async () => {
+    // Every page and API matcher drops a trailing slash, so `/dashboard/` and
+    // `/api/admin/users/` reach the same page or handler as the exact path. An
+    // exact config matcher has to run for both, or the slash is a bypass.
+    for (const [matcher, pathname] of [
+      ["/dashboard", "/dashboard/"],
+      ["/dashboard(.*)", "/dashboard/"],
+      ["/api/admin/users", "/api/admin/users/"],
+      ["/users/[id]", "/users/42/"],
+    ] as const) {
+      expect({ matcher, pathname, guards: await collectGuards(matcher, pathname) }).toEqual({
+        matcher,
+        pathname,
+        guards: { devMiddleware: true, productionMiddleware: true, integration: true },
+      });
+    }
+
+    const apiRoutes = new Map([["/api/admin/users", { path: "/api/admin/users" }]]);
+    expect(matchAPIRoute(apiRoutes, "/api/admin/users/")?.route.path).toBe("/api/admin/users");
+    expect(prodPageMatches("/dashboard", "/dashboard/")).toBe(true);
+
+    // Params captured before the trailing slash keep their value.
+    // `:id` is config-matcher syntax only, so check it against both runners.
+    expect((await runProductionGuard("/users/:id", "/users/42/")).params).toEqual({ id: "42" });
+    expect((await runDevGuard("/users/:id", "/users/42/")).params).toEqual({ id: "42" });
+    expect((await runDevGuard("/users/[id]", "/users/42/")).params).toEqual({ id: "42" });
+  });
+
+  it("keeps exclude exact so a trailing slash never removes a guard", async () => {
+    const result: GuardRun = { ran: false, params: {} };
+    const runner = createProductionMiddlewareRunner({
+      config: [
+        {
+          matcher: ["/api/(.*)"],
+          exclude: ["/api/health"],
+          handler() {
+            result.ran = true;
+          },
+        },
+      ],
     });
-    expect(await collectGuards("/dashboard(.*)", "/dashboard/")).toEqual({
-      devMiddleware: true,
-      productionMiddleware: true,
-      integration: true,
-    });
+    await runner(new Request("https://farm.test/api/health/"));
+    expect(result.ran).toBe(true);
   });
 });

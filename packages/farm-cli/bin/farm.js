@@ -361,7 +361,8 @@ program
   .option("-r, --root <root>", "Root directory", process.cwd())
   .option("-c, --config <config>", "Path to farm config file")
   .option("-p, --port <port>", "Port of the running local app")
-  .option("--host <host>", "Host of the running local app", "localhost")
+  // No default: an omitted --host falls back to FARM_PREVIEW_HOST, then localhost.
+  .option("--host <host>", "Host of the running local app (default: localhost)")
   .option("--url <url>", "Full local URL to expose")
   .option(
     "--gateway <url>",
@@ -394,7 +395,8 @@ program
         expires: options.expires,
         login: options.login,
         dryRun: options.dryRun,
-        noProbe: options.noProbe,
+        // Commander stores --no-probe as `probe: false`.
+        noProbe: options.probe === false,
         provider: options.provider,
       });
     } catch (error) {

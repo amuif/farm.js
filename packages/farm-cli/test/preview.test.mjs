@@ -1360,6 +1360,56 @@ test("runs farm preview dry-run through the CLI", async () => {
   }
 });
 
+test("farm preview --no-probe skips the reachability check for an explicit port", async () => {
+  // Nothing listens here, so a probe would fail with "No running Farm app was found".
+  const { port, close } = await createTestServer();
+  await close();
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [cliBin, "preview", "--port", String(port), "--no-probe", "--dry-run"],
+    {
+      env: {
+        ...process.env,
+        FARM_PREVIEW_HOST: "",
+        FARM_PREVIEW_TUNNEL_COMMAND: "farm-preview-agent tunnel --url {url}",
+      },
+    },
+  );
+
+  assert.match(stdout, new RegExp(`Local:\\s+http://localhost:${port}`));
+  assert.match(stdout, /dry run completed/i);
+});
+
+test("farm preview uses FARM_PREVIEW_HOST unless --host is passed", async () => {
+  const server = await createTestServer();
+  const run = (...args) =>
+    execFileAsync(
+      process.execPath,
+      [cliBin, "preview", "--port", String(server.port), ...args, "--dry-run"],
+      {
+        env: {
+          ...process.env,
+          FARM_PREVIEW_HOST: "127.0.0.1",
+          FARM_PREVIEW_TUNNEL_COMMAND: "farm-preview-agent tunnel --url {url}",
+        },
+      },
+    );
+
+  try {
+    assert.match(
+      (await run()).stdout,
+      new RegExp(`Local:\\s+http://127\\.0\\.0\\.1:${server.port}`),
+    );
+    assert.match(
+      (await run("--host", "localhost")).stdout,
+      new RegExp(`Local:\\s+http://localhost:${server.port}`),
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 async function createTestServer(handler) {
   const server = createServer(
     handler ||
@@ -1681,6 +1731,34 @@ test("ignores vendor documentation URLs before a built-in tunnel is ready", asyn
   const publicUrl = await runPreviewTunnel(plan, 2_000);
   assert.equal(publicUrl, "https://actual-preview.trycloudflare.com");
 });
+
+test(
+  "reads tunnel output that arrives after the tunnel process exits",
+  // The grandchild reproduction relies on POSIX pipe inheritance; on Windows
+  // the noisy-prologue test below covers the same "exit"-before-drain race.
+  { skip: process.platform === "win32" },
+  async () => {
+    // A launcher can exit while the process it started still holds stdout, so
+    // the URL lands in output that arrives after the "exit" event.
+    const announce =
+      "setTimeout(() => process.stdout.write('tunnel ready at https://late-preview.trycloudflare.com\\n'), 100);";
+    const script =
+      "const { spawn } = require('node:child_process');" +
+      `spawn(process.execPath, ['-e', ${JSON.stringify(announce)}], { stdio: ['ignore', 'inherit', 'inherit'] });` +
+      "process.exit(0);";
+
+    const plan = {
+      command: process.execPath,
+      args: ["-e", script],
+      target: { localUrl: "http://127.0.0.1:3000", host: "127.0.0.1", port: 3000, source: "port" },
+      requestedName: "late-preview",
+      requestedHostname: "late-preview.preview.farmjs.dev",
+    };
+
+    const publicUrl = await runPreviewTunnel(plan, 10_000);
+    assert.equal(publicUrl, "https://late-preview.trycloudflare.com");
+  },
+);
 
 test("finds the preview URL after a noisy tunnel prologue", async () => {
   // The scan buffer is bounded, so a tunnel that prints a lot before announcing

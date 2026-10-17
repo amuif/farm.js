@@ -216,3 +216,69 @@ describe("autumn usage-report idempotency", () => {
     expect(sdk.balances.update).toHaveBeenCalled();
   });
 });
+
+describe("autumn usage-report idempotency under concurrent retries", () => {
+  function deferred() {
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("applies a report once when a retry arrives while the first is in flight", async () => {
+    const sdk = createFakeSdk({
+      id: "cus_5",
+      balances: { credits: { usage: 0, granted: 100 } },
+      subscriptions: [],
+    });
+    const write = deferred();
+    sdk.balances.update.mockImplementation(async () => {
+      await write.promise;
+      return {};
+    });
+    const integration = createIntegration(sdk, "concurrent-user");
+    const body = { key: "credits", quantity: 10, idempotencyKey: "evt-concurrent" };
+
+    const first = report(integration, body);
+    const retry = report(integration, body);
+    await vi.waitFor(() => expect(sdk.balances.update).toHaveBeenCalledTimes(1));
+    write.resolve();
+
+    const [firstResponse, retryResponse] = await Promise.all([first, retry]);
+    expect(firstResponse.status).toBe(200);
+    expect(retryResponse.status).toBe(200);
+    const firstBody = await firstResponse.json();
+    expect(await retryResponse.json()).toEqual(firstBody);
+    expect(firstBody).toMatchObject({ projectedCurrentPeriodUsed: 10 });
+    expect(sdk.balances.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a later retry apply a report whose in-flight attempt failed", async () => {
+    const sdk = createFakeSdk({
+      id: "cus_6",
+      balances: { credits: { usage: 0, granted: 100 } },
+      subscriptions: [],
+    });
+    const write = deferred();
+    sdk.balances.update.mockImplementationOnce(async () => {
+      await write.promise;
+      return {};
+    });
+    const integration = createIntegration(sdk, "failed-user");
+    const body = { key: "credits", quantity: 10, idempotencyKey: "evt-failed" };
+
+    const first = report(integration, body);
+    const concurrent = report(integration, body);
+    await vi.waitFor(() => expect(sdk.balances.update).toHaveBeenCalledTimes(1));
+    write.reject(new Error("provider unavailable"));
+    await expect(first).rejects.toThrow("provider unavailable");
+    await expect(concurrent).rejects.toThrow("provider unavailable");
+
+    const later = await report(integration, body);
+    expect(later.status).toBe(200);
+    expect(sdk.balances.update).toHaveBeenCalledTimes(2);
+  });
+});

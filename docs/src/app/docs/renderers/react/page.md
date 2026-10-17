@@ -280,6 +280,20 @@ comparison and diagnostic mode. `"hybrid"` is the default because it can avoid i
 preserving the compiler's safe fallback and React ownership boundaries. Both modes cache the last
 committed direct-binding value and skip an identical DOM write.
 
+When Suspense (or React 19's Activity) temporarily hides a compiled component, Farm retains
+its pending local state and React-owned text-node snapshots. On reappearance, it synchronizes
+the current committed props before rebuilding binding dependencies and drains queued updates
+in order. Hiding is not treated as permanent disposal: host refs and refresh subscriptions
+are detached, while component-owned state remains available for React to resume.
+
+During a production build, identical compiler inputs can reuse results across route discovery,
+SSR, and client compilation. This build-local cache retains at most 128 entries and 16 MiB of
+source-key/result payloads (excluding JavaScript object overhead and active compilation work).
+Results are isolated from each consumer, and the cache is discarded after the build, including
+failures. Diagnostics and compiler reports still run for every transform. Ordinary development
+keeps Vite's existing caching behavior; there is no persistent source cache, configuration flag,
+or added browser runtime payload.
+
 ### Component selection
 
 #### Automatic inference

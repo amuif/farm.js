@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, logger } from "@farm.js/core";
+import { loadConfig, logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewAgentSession } from "@farm.js/tunnel";
 import {
   createPreviewGatewayPlan,
@@ -408,7 +408,9 @@ export async function runPreviewTunnel(
           reject(error);
         }
       });
-      child.on("exit", (code, signal) => {
+      // "close" fires after stdout and stderr are drained. "exit" can arrive
+      // first (notably on Windows pipes), before the chunk that holds the URL.
+      child.on("close", (code, signal) => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);

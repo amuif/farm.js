@@ -1,4 +1,4 @@
-import { logger } from "@farm.js/core";
+import { logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewAgentExit, PreviewAgentSession } from "@farm.js/tunnel";
 import type { PreviewGatewayPlan } from "./preview-gateway";
 

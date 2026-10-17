@@ -5,6 +5,8 @@ import type { FarmPlugin } from "./plugin";
 import type { EndpointMCPMetadata, TypedEndpoint } from "./api/endpoint";
 import type { RouteMethod } from "./api/route";
 import type { RouteSchema, RouteSchemaInput, RouteSchemaOutput } from "./api/route-schema";
+import type { ServerFn } from "./server-fn";
+import type { ServerQuery } from "./server-query";
 
 /** A server-only endpoint reference. Config references must declare an explicit /api path. */
 export type FarmMCPEndpoint = TypedEndpoint<any, any, any, any, any, any, any, any>;
@@ -38,9 +40,16 @@ export interface FarmMCPStandaloneTool<
   endpoint?: never;
 }
 
-/** Compose endpoint references and standalone tools. */
+/**
+ * A createServerFn or createServerQuery function with `mcp` metadata. It runs through its own
+ * input schema, middleware and output schema, with the MCP request as its request.
+ */
+export type FarmMCPServerFunction = ServerFn<any, any, any> | ServerQuery<any, any>;
+
+/** Compose endpoint references, server functions and standalone tools. */
 export type FarmMCPToolDefinition =
   | FarmMCPEndpoint
+  | FarmMCPServerFunction
   | (EndpointMCPMetadata & { endpoint: FarmMCPEndpoint; execute?: never })
   | FarmMCPStandaloneTool<any, unknown, any>;
 
@@ -50,6 +59,7 @@ export type FarmMCPTool = Readonly<EndpointMCPMetadata> & {
 } & (
     | { readonly kind: "endpoint"; readonly method: RouteMethod; readonly path: string }
     | { readonly kind: "standalone"; readonly method?: never; readonly path?: never }
+    | { readonly kind: "serverFunction"; readonly method?: never; readonly path?: never }
   );
 
 export interface FarmMCPServer {

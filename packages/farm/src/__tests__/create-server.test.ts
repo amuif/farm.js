@@ -5,6 +5,7 @@ import {
   createFarmClientOptimizeDepsEntries,
   createFarmSourceAlias,
   FARM_CLIENT_OPTIMIZE_DEPS_INCLUDE,
+  mergeFarmProductionViteConfig,
   mergeFarmViteConfig,
 } from "../server/vite-config";
 
@@ -120,6 +121,106 @@ describe("mergeFarmViteConfig", () => {
       noDiscovery: true,
       holdUntilCrawlEnd: false,
       include: expect.arrayContaining(["react", "@farm.js/core/client", "legacy-commonjs-package"]),
+    });
+  });
+});
+
+describe("mergeFarmProductionViteConfig", () => {
+  const farmPlugin = { name: "farm" };
+  const userPlugin = { name: "user" };
+  const farmConfig = {
+    root: "/app",
+    mode: "production",
+    publicDir: "/app/public",
+    plugins: [farmPlugin],
+    build: {
+      outDir: "/app/.farm/client",
+      target: "es2020",
+      rollupOptions: {
+        input: { "farm-client": "/app/.farm/entry.js" },
+        external: ["fsevents"],
+      },
+    },
+    define: { __FARM_API_BASE_URL__: '"/api"' },
+    esbuild: { jsxDev: false },
+    css: { postcss: "/app/.farm/postcss" },
+    resolve: { alias: { "@": "/app/src" } },
+    ssr: { external: ["sharp"], noExternal: true as const },
+  };
+
+  it("applies app options the way development does", () => {
+    const merged = mergeFarmProductionViteConfig(farmConfig, {
+      plugins: [userPlugin],
+      define: { __APP_FLAG__: '"on"' },
+      css: { modules: { generateScopedName: "app-[local]" } },
+      resolve: { alias: { "app-alias": "/app/vendor/alias.ts" } },
+      esbuild: { legalComments: "none" },
+      ssr: { external: ["app-native"] },
+      json: { stringify: true },
+      build: { sourcemap: true, rollupOptions: { treeshake: false } },
+    });
+
+    // App plugins are placed by the build itself, next to Farm's transforms.
+    expect(merged.plugins).toEqual([farmPlugin]);
+    expect(merged.define).toEqual({ __APP_FLAG__: '"on"', __FARM_API_BASE_URL__: '"/api"' });
+    expect(merged.css).toEqual({
+      postcss: "/app/.farm/postcss",
+      modules: { generateScopedName: "app-[local]" },
+    });
+    expect(merged.resolve?.alias).toEqual({
+      "@": "/app/src",
+      "app-alias": "/app/vendor/alias.ts",
+    });
+    expect(merged.esbuild).toEqual({ legalComments: "none", jsxDev: false });
+    expect(merged.ssr).toMatchObject({ external: ["sharp", "app-native"], noExternal: true });
+    expect(merged.json).toEqual({ stringify: true });
+    expect(merged.build).toMatchObject({
+      sourcemap: true,
+      rollupOptions: { treeshake: false, external: ["fsevents"] },
+    });
+  });
+
+  it("keeps the options Farm owns for its production output", () => {
+    const merged = mergeFarmProductionViteConfig(farmConfig, {
+      root: "/elsewhere",
+      base: "/elsewhere/",
+      mode: "development",
+      appType: "spa",
+      publicDir: "/elsewhere/public",
+      define: { __FARM_API_BASE_URL__: '"https://bogus.invalid"' },
+      esbuild: { jsxDev: true },
+      build: {
+        outDir: "/elsewhere/out",
+        emptyOutDir: false,
+        ssr: true,
+        ssrEmitAssets: true,
+        write: false,
+        lib: { entry: "/elsewhere/lib.ts" },
+        watch: {},
+        target: "es5",
+        rollupOptions: {
+          input: "/elsewhere/entry.js",
+          output: { format: "cjs" },
+          external: ["react"],
+        },
+        rolldownOptions: { input: "/elsewhere/rolldown.js" },
+      },
+    });
+
+    expect(merged.root).toBe("/app");
+    expect(merged.base).toBeUndefined();
+    expect(merged.mode).toBe("production");
+    expect(merged.appType).toBeUndefined();
+    expect(merged.publicDir).toBe("/app/public");
+    expect(merged.define).toEqual({ __FARM_API_BASE_URL__: '"/api"' });
+    expect(merged.esbuild).toEqual({ jsxDev: false });
+    expect(merged.build).toEqual({
+      outDir: "/app/.farm/client",
+      target: "es2020",
+      rollupOptions: {
+        input: { "farm-client": "/app/.farm/entry.js" },
+        external: ["fsevents"],
+      },
     });
   });
 });

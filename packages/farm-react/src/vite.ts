@@ -1,11 +1,14 @@
 import { normalizePath, type Plugin } from "vite";
 import { compileReactModule } from "./compiler";
+import { getReactCompilerBuildCache } from "./compiler-build-cache";
 import { resolveCompilerOption } from "./compiler-options";
 import { writeReactCompilerReport, type ReactCompilerModuleObservation } from "./compiler-report";
 import { normalizeReactCompilerOptions, type NormalizedReactCompilerOptions } from "./index";
 
 interface RendererPluginOptions {
   ssr?: boolean;
+  /** Build-owned disposal signal shared by discovery, client and SSR graphs. */
+  buildLifetime?: AbortSignal;
   rendererOptions?: Readonly<Record<string, unknown>>;
 }
 
@@ -58,7 +61,23 @@ export function createFarmRendererPlugin(options: RendererPluginOptions = {}): P
         )
           return null;
 
-        const result = await compileReactModule(code, cleanId, compilerOptions);
+        const cache = options.buildLifetime && getReactCompilerBuildCache(options.buildLifetime);
+        // The compiler does not consume Vite's SSR flag or graph transforms.
+        // Only exact compiler inputs can cross graph boundaries. No key work
+        // or retained cache is introduced on the ordinary development path.
+        const result = cache
+          ? await cache.compile(
+              JSON.stringify([
+                projectRoot,
+                cleanId,
+                compilerOptions,
+                process.env.NODE_ENV,
+                process.env.BABEL_ENV,
+                code,
+              ]),
+              () => compileReactModule(code, cleanId, compilerOptions),
+            )
+          : await compileReactModule(code, cleanId, compilerOptions);
         if (reportEnabled) {
           if (result.compiled.length > 0 || result.diagnostics.length > 0) {
             reportObservations.set(cleanId, { id: cleanId, result });

@@ -1,14 +1,15 @@
 ---
 title: "API MCP"
-description: "Compose typed API routes and standalone tools in one authenticated MCP server."
+description: "Compose typed API routes, server functions, and standalone tools in one authenticated MCP server."
 section: "Plugin Ecosystem"
 ---
 
 # API MCP
 
-`@farm.js/mcp` composes selected Farm API routes and standalone tools in one MCP server. Reuse
-an endpoint's validation and middleware, or use `defineTool()` for an operation that doesn't need
-its own HTTP route. Both share the same transport, tool catalog, and authorization policy.
+`@farm.js/mcp` composes selected Farm API routes, server functions, and standalone tools in one MCP
+server. Reuse an endpoint's or a server function's validation and middleware, or use `defineTool()`
+for an operation that doesn't need either. All of them share the same transport, tool catalog, and
+authorization policy.
 
 The endpoint defaults to `/api/mcp` and implements MCP Streamable HTTP. It is a server capability,
 unlike [WebMCP](/docs/plugins/webmcp), which registers tools in a supporting browser while a page is
@@ -152,10 +153,72 @@ including async refinements, defaults, and transforms. The first argument is typ
 
 Return JSON-serializable application data, not a `Response`, stream, or MCP protocol envelope.
 Farm returns its JSON as text content and as `structuredContent: { result: data }`, matching
-endpoint-backed tools. Validation and execution failures become tool errors. Only authorized
+endpoint-backed tools. Validation and execution failures become tool errors. Input that fails the
+schema returns the validator's message. A thrown `EndpointFailure` or a server function's declared
+failure returns `{ "error": { "code", "status", "message", "data" } }`. Any other error, including
+one thrown inside a refinement or transform, returns `Farm MCP tool execution failed.` and is logged
+on the server, so an exception message never reaches the agent. Only authorized
 tools can reach validation or execution. Keep definitions and their provider SDKs server-only.
 Use a shared database or storage backend for data read by both routes and standalone tools;
 config and route modules can be loaded independently, and module-local state is not a shared store.
+
+## Server functions and queries
+
+A `createServerFn` or `createServerQuery` function can be a tool too, so the operation your forms
+and components call is the same one an agent calls. Give it `mcp` metadata with a `name`, then list
+it in `mcp.tools`:
+
+```ts
+// src/features/contact/server.ts
+import { createServerFn } from "@farm.js/core/server-fn";
+import { createServerQuery } from "@farm.js/core/server-query";
+import { z } from "zod";
+
+export const submitContact = createServerFn({
+  input: z.object({ email: z.string().email(), message: z.string().min(1) }),
+  middleware: [requireAccount],
+  mcp: { name: "contact_submit", description: "Send a message to the sales team" },
+  handler: ({ input, context }) => createTicket(context.account, input),
+});
+
+export const listPlans = createServerQuery({
+  key: () => ["plans"],
+  mcp: { name: "list_plans", description: "List the available plans" },
+  handler: () => db.plans.findMany(),
+});
+```
+
+```ts
+// farm.config.ts
+import { submitContact, listPlans } from "./src/features/contact/server";
+
+export default defineConfig({
+  mcp: {
+    authorize: authorizeAgent,
+    tools: [submitContact, listPlans],
+  },
+});
+```
+
+A tool call runs the function's own pipeline once: input schema, middleware, handler, output schema,
+and cache invalidations. The MCP request is the function's `request`, so middleware reads the agent's
+credentials from it the way it reads a browser's cookies. Arguments are the input schema's object
+directly; a function without an input schema takes `{}`.
+
+- Queries are advertised with `readOnlyHint: true` and return their data, not the client cache
+  envelope.
+- Other server functions get the conservative defaults of a standalone tool (`destructiveHint:
+true`). Set the hints in `mcp` when the function is safe to repeat or only reads.
+- Input that fails the schema returns the validator's message, which describes the agent's own
+  arguments.
+- A failure declared in `errors` returns `{ "error": { "code", "status", "message", "data" } }`, and
+  `redirect()` returns `{ "redirect": { "url", "status" } }`, both as tool errors.
+- Any other error returns `Server function failed.`, the same sanitized message the browser gets.
+  That includes an exception thrown inside an input refinement or transform. The error itself is
+  logged on the server.
+
+Only functions listed in `mcp.tools` are exposed, and only through `authorize`. Adding `mcp` metadata
+alone publishes nothing, and functions keep working for your UI either way.
 
 ## Validate tool results
 
@@ -310,7 +373,9 @@ export const projectsRoute = route.post("/api/projects", {
 Both route APIs keep the HTTP method and path next to the handler, so there is no separate
 `"METHOD /api/path"` MCP map to synchronize.
 
-An MCP call runs the endpoint validator, middleware, handler, and error mapping exactly once. It also
+An MCP call runs the endpoint validator, middleware, handler, and error mapping exactly once. A
+non-2xx response becomes a tool error with its status and body. An error the handler throws instead
+returns `Farm API tool invocation failed.` and is logged on the server. It also
 forwards the original request's cookies and authorization header, so the route sees the same
 credentials as the MCP boundary. Tool arguments cannot replace security-sensitive credentials or
 request-provenance headers such as `Host`, `Origin`, `Referer`, `Forwarded`, or `X-Forwarded-*`.
@@ -404,7 +469,7 @@ bounded post-response work where the host requires it.
 | Option                 | Default       | Purpose                                                                                         |
 | ---------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
 | `authorize`            | required      | Receive the tool catalog and server identity; return a subject and optional allowed tool names. |
-| `tools`                | route opt-ins | Compose endpoint references and standalone `defineTool()` definitions.                          |
+| `tools`                | route opt-ins | Compose endpoint references, server functions, and standalone `defineTool()` definitions.       |
 | `allowUnauthenticated` | `false`       | Deliberately permit a public MCP endpoint instead of `authorize`.                               |
 | `path`                 | `/api/mcp`    | Canonical Farm API path for the Streamable HTTP endpoint.                                       |
 | `name`                 | `farm-api`    | MCP server name returned during initialization.                                                 |

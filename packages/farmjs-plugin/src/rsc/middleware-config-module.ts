@@ -244,6 +244,37 @@ function resolveConfigObject(
   return null;
 }
 
+/**
+ * The extracted module keeps declarations and drops everything else, so a
+ * top-level statement that runs code (`matcher.push("/admin")`,
+ * `config.middleware = ...`, a side-effect import) would silently vanish and
+ * leave the guard with a different matcher than the config it came from. Fail
+ * on those instead of producing a module that disagrees with the config.
+ */
+function unsupportedStatementReason(statement: AstNode, source: string): string | null {
+  switch (statement.type) {
+    case "ImportDeclaration":
+      if (((statement.specifiers as AstNode[]) ?? []).length > 0) return null;
+      break;
+    case "ExportAllDeclaration":
+    case "ExportDefaultDeclaration":
+    case "ExportNamedDeclaration":
+    case "VariableDeclaration":
+    case "FunctionDeclaration":
+    case "ClassDeclaration":
+    case "EmptyStatement":
+      return null;
+    case "ExpressionStatement":
+      if (typeof statement.directive === "string") return null;
+      break;
+  }
+  const text = source.slice(statement.start, statement.end).replace(/\s+/g, " ").trim();
+  const snippet = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  return statement.type === "ImportDeclaration"
+    ? `the side-effect import \`${snippet}\` would not run with the extracted middleware`
+    : `the top-level statement \`${snippet}\` would not run with the extracted middleware`;
+}
+
 export function extractRscMiddlewareConfigModule(
   source: string,
   program: AstNode,
@@ -256,6 +287,9 @@ export function extractRscMiddlewareConfigModule(
   let order = 0;
 
   for (const statement of body) {
+    const unsupported = unsupportedStatementReason(statement, source);
+    if (unsupported) return { kind: "unsupported", reason: unsupported };
+
     if (statement.type === "ImportDeclaration") {
       const moduleName = (statement.source as AstNode).value;
       for (const specifier of (statement.specifiers as AstNode[]) ?? []) {

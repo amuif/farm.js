@@ -38,6 +38,11 @@ import {
   resolveAPIRouteEndpoint,
 } from "@farm.js/core/api/runtime";
 import { sendWebResponse } from "@farm.js/core/server";
+import {
+  createDevRequestHeaders,
+  resolveDevRequestURL,
+  resolveViteHtmlFallbackUrl,
+} from "../dev-request.js";
 
 export interface FarmApiOptions {
   /** Source directory containing the api folder (default: 'src') */
@@ -354,13 +359,21 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
       // Add middleware to handle API requests
       return () => {
         const apiMiddleware = _withAfterNodeMiddleware(async (req, res, next) => {
-          const url = req.url || "/";
-          const pathname = url.split("?")[0];
+          // Route on the URL the client sent, not Vite's SPA fallback rewrite,
+          // and put the rewrite back for Vite when this is not an API request.
+          const fallbackUrl = req.url;
+          const requestedUrl = resolveViteHtmlFallbackUrl(req, server.config.base);
+          if (requestedUrl) req.url = requestedUrl;
+          const passThrough = () => {
+            if (requestedUrl && req.url === requestedUrl) req.url = fallbackUrl;
+            return next();
+          };
+          const pathname = resolveDevRequestURL(req).pathname;
           const method = req.method || "GET";
 
           // Only handle /api/ routes
           if (!pathname.startsWith("/api/")) {
-            return next();
+            return passThrough();
           }
 
           // Wait for discovery
@@ -369,7 +382,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
           }
 
           if (!apiRouterHandler) {
-            return next();
+            return passThrough();
           }
 
           const startTime = Date.now();
@@ -391,14 +404,8 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
             // Convert Node request to Web Request. ctx.rewrite() updates
             // req.url, so dispatch from the current value, not the one
             // captured before middleware ran.
-            const currentUrl = req.url || url;
-            const fullUrl = `http://${req.headers.host || "localhost:3000"}${currentUrl}`;
-            const headers = new Headers();
-            for (const [key, value] of Object.entries(req.headers)) {
-              if (value) {
-                headers.set(key, Array.isArray(value) ? value.join(", ") : value);
-              }
-            }
+            const fullUrl = resolveDevRequestURL(req);
+            const headers = createDevRequestHeaders(req.headers);
 
             // Get body for non-GET requests
             let body: Buffer | undefined;

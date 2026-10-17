@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type React from "react";
 import { compileReactModule } from "../compiler";
-import { normalizeReactCompilerOptions, type ReactCompilerOptions } from "../index";
+import { normalizeReactCompilerOptions, type ReactCompilerReactivity } from "../index";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // One directory per worker, so cleanup never races another test file.
@@ -17,17 +17,18 @@ let sequence = 0;
  */
 export async function loadCompiledAndOriginal(
   source: string,
-  options: ReactCompilerOptions = {},
+  reactivity: ReactCompilerReactivity = "hybrid",
 ): Promise<{
   compiled: Record<string, React.ComponentType<Record<string, unknown>>>;
   original: Record<string, React.ComponentType<Record<string, unknown>>>;
   names: readonly string[];
   reasons: string[];
+  code: string;
 }> {
   const result = await compileReactModule(
     source,
     "/app/Harness.tsx",
-    normalizeReactCompilerOptions(options),
+    normalizeReactCompilerOptions({ reactivity }),
   );
   // Vitest transforms the written TSX like any other test module.
   const load = async (code: string) => {
@@ -44,6 +45,7 @@ export async function loadCompiledAndOriginal(
     original: await load(source),
     names: result.compiled,
     reasons: result.diagnostics.map((diagnostic) => diagnostic.reason),
+    code: result.code,
   };
 }
 

@@ -1,4 +1,10 @@
+import fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { _describeServerFunction } from "@farm.js/core/server-fn";
 import { transformFarmServerFns } from "./server-fn-transform";
 
 describe("Farm server function transform", () => {
@@ -77,7 +83,9 @@ export default createServerFn({ handler: async () => true });`,
     expect(result?.exports).toEqual(["default"]);
     expect(result?.code).toContain('"use server"');
     expect(result?.code).toContain("const $$farm_server_fn_default = createServerFn(");
-    expect(result?.code).toContain("export default async function (input)");
+    expect(result?.code).toContain(
+      "export default async function $$farm_server_fn_default_export(input)",
+    );
     // The raw factory call must no longer be the default export.
     expect(result?.code).not.toContain("export default createServerFn(");
   });
@@ -187,5 +195,33 @@ export const save = createServerFn({ handler: async () => note });`,
 
     expect(result?.exports).toEqual(["save"]);
     expect(result?.code).toContain('"use server"');
+  });
+
+  it("keeps the descriptor MCP reads on the exported wrappers", async () => {
+    const result = transformFarmServerFns(
+      `import { createServerFn } from "@farm.js/core/server-fn";
+export const save = createServerFn({ mcp: { name: "save" }, handler: async () => "saved" });
+export default createServerFn({ mcp: { name: "fallback" }, handler: async () => "default" });`,
+      "/app/src/actions.ts",
+    );
+    const coreEntry = createRequire(import.meta.url).resolve("@farm.js/core/server-fn");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "farm-server-fn-transform-"));
+    try {
+      const file = path.join(dir, "actions.mjs");
+      await fs.writeFile(
+        file,
+        result!.code.replace(
+          '"@farm.js/core/server-fn"',
+          JSON.stringify(pathToFileURL(coreEntry).href),
+        ),
+      );
+      const module = await import(/* @vite-ignore */ pathToFileURL(file).href);
+
+      expect(_describeServerFunction(module.save)?.mcp).toEqual({ name: "save" });
+      expect(_describeServerFunction(module.default)?.mcp).toEqual({ name: "fallback" });
+      await expect(module.save()).resolves.toBe("saved");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

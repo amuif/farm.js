@@ -45,6 +45,37 @@ async function buildFixture(root: string): Promise<Rollup.RollupOutput> {
 }
 
 describe("Farm font compiler", () => {
+  it("keeps an empty preload header out of a guarded Link after Rolldown bundles it", async () => {
+    // The header is only known after bundling. A placeholder Rolldown can
+    // evaluate as truthy lets it drop the guard, so an app without fonts sent
+    // an empty Link header.
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "farm-font-empty-")));
+    try {
+      const input = path.join(root, "entry.js");
+      await fs.writeFile(
+        input,
+        `import { farmFontPreloadHeader } from "virtual:farm-font-runtime";
+export const headers = {
+  "Content-Type": "text/html",
+  ...(farmFontPreloadHeader ? { Link: farmFontPreloadHeader } : {}),
+};`,
+      );
+      const { rolldown } = await import("rolldown");
+      const bundle = await rolldown({
+        input,
+        logLevel: "silent",
+        plugins: [farmFontImportsPlugin({ root }) as never],
+      });
+      const { output } = await bundle.generate({ format: "esm" });
+      await bundle.close();
+      const module = await import("data:text/javascript," + encodeURIComponent(output[0].code));
+
+      expect(module.headers).toEqual({ "Content-Type": "text/html" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("serves generated CSS and font bytes during development", async () => {
     const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "farm-font-dev-"));
     const root = await fs.realpath(temporaryRoot);
@@ -187,9 +218,9 @@ console.log(demo, farmFontPreloadHeader);`,
           output.type === "asset" && output.fileName.startsWith("assets/fonts/"),
       );
 
-      expect(entry?.code).toMatch(/className:\s*["']farm-font-/);
-      expect(entry?.code).toMatch(/variable:\s*["']farm-font-variable-/);
-      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["']\/assets\/fonts\/demo-/);
+      expect(entry?.code).toMatch(/className:\s*["'`]farm-font-/);
+      expect(entry?.code).toMatch(/variable:\s*["'`]farm-font-variable-/);
+      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["'`]\/assets\/fonts\/demo-/);
       expect(entry?.code).not.toContain("localFont({");
       expect(entry?.code).not.toContain("__FARM_FONT_PRELOAD_HEADER__");
       expect(entry?.code).toContain("%3C%2Fassets%2Ffonts%2Fdemo-");
@@ -314,7 +345,7 @@ console.log(demo, farmFontPreloadHeader);`,
       // metadata, and encoded Link header must not carry basePath.
       expect(css).toMatch(/url\("\/assets\/fonts\/demo-h[a-f0-9]{12}\.woff2"\)/);
       expect(css).not.toContain("/docs/assets/fonts/");
-      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["']\/assets\/fonts\/demo-/);
+      expect(entry?.code).toMatch(/preloads:\s*\[\{\s*href:\s*["'`]\/assets\/fonts\/demo-/);
       expect(entry?.code).toContain("%3C%2Fassets%2Ffonts%2Fdemo-");
       expect(entry?.code).not.toContain("%2Fdocs%2Fassets");
     } finally {

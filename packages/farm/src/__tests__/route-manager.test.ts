@@ -118,6 +118,29 @@ describe("RouteManager", () => {
       expect(result.route).toBeNull();
     });
 
+    it("matches requests under the configured basePath like production routing", async () => {
+      const { globFiles } = await import("../utils");
+      vi.mocked(globFiles).mockImplementation(async (pattern: string) => {
+        if (pattern.includes("page")) return ["page.tsx", "about/page.tsx"];
+        if (pattern.includes("layout")) return ["layout.tsx"];
+        if (pattern.includes("loading")) return ["about/loading.tsx"];
+        if (pattern.includes("error")) return ["about/error.tsx"];
+        if (pattern.includes("sitemap")) return ["sitemap.ts"];
+        return [];
+      });
+      const basePathManager = new RouteManager({ ...mockConfig, basePath: "/app" });
+      await basePathManager.discoverRoutes();
+
+      expect(basePathManager.matchRoute("/app").route?.pattern).toBe("/");
+      expect(basePathManager.matchRoute("/app/").route?.pattern).toBe("/");
+      expect(basePathManager.matchRoute("/app/about").route?.pattern).toBe("/about");
+      expect(basePathManager.matchRoute("/app/about").layouts.map((l) => l.pattern)).toEqual(["/"]);
+      expect(basePathManager.matchRoute("/application").route).toBeNull();
+      expect(basePathManager.getMatchingLoading("/app/about")?.pattern).toBe("/about");
+      expect(basePathManager.getMatchingError("/app/about")?.pattern).toBe("/about");
+      expect(basePathManager.matchMetadataRoute("/app/sitemap.xml")?.metadata.kind).toBe("sitemap");
+    });
+
     it("should find matching layouts", () => {
       const result = routeManager.matchRoute("/users/123");
       expect(result.layouts.length).toBeGreaterThan(0);

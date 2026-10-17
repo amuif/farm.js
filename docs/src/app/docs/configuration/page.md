@@ -276,6 +276,28 @@ mount, and shortcut together.
 | performance   | Budgeting image and font preload hints without changing the rendered resources.        |
 | experimental  | Auditing or enabling opt-in rendering experiments such as isolated hydration and PPR.  |
 | openapi       | Publishing API reference docs.                                                         |
+| vite          | Passing extra Vite options such as plugins, `define`, `resolve.alias`, and `css`.      |
+
+## Vite config
+
+The `vite` field applies to `farm dev` and to both production builds in `farm build` (client and
+server). Plugins, `define`, `resolve`, `css`, `ssr`, and other Vite options merge with Farm's own
+config the same way in each.
+
+```ts
+export default defineConfig({
+  vite: {
+    define: { __APP_VERSION__: JSON.stringify(process.env.APP_VERSION) },
+    css: { modules: { localsConvention: "camelCase" } },
+  },
+});
+```
+
+Farm keeps the options it needs to produce its production output: `root`, `base`, `mode`,
+`appType`, `publicDir`, the build's entries and output (`build.outDir`, `build.emptyOutDir`,
+`build.ssr`, `build.ssrEmitAssets`, `build.write`, `build.lib`, `build.watch`,
+`build.rollupOptions.input`, and `build.rollupOptions.output`), and any `build`, `define`, or
+`esbuild` value Farm sets for that build. Use `basePath` and `publicDir` in Farm's config instead.
 
 ## Application base path
 
@@ -646,7 +668,8 @@ Remote sources are denied by default. See [Images](/docs/images) for static impo
 Farm keeps one image preload—the explicitly high-priority hint first—and two font preloads by
 default. Lower-priority hints above those budgets are removed from buffered HTML and `Link` response
 headers, while the actual image and font elements remain unchanged and load normally. Route scripts,
-stylesheets, and module preloads are not removed.
+stylesheets, and module preloads are not removed. Budgets count resources, not hints: a URL preloaded
+in both the HTML and the `Link` header counts once, and its hints are kept or removed together.
 Preload-looking text inside comments, scripts, and other inert content is left unchanged, including
 when surrounding Unicode text changes length during case conversion.
 

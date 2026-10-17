@@ -57,6 +57,7 @@ import { loadRscMiddlewareConfigModule } from "./middleware-config-module.js";
 import fs from "fs/promises";
 import path from "path";
 import { devServableFileExists } from "../dev-static.js";
+import { createDevRequestHeaders, resolveDevRequestURL } from "../dev-request.js";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 // Use API and middleware plugins from @farm.js/core (require so CJS build resolves when ESM .mjs is missing)
@@ -1445,8 +1446,7 @@ if (document.readyState === 'loading') {
                 bootstrapPrefix +
                 `import("/@react-refresh").then(m=>{m.default.injectIntoGlobalHook(window);window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>type=>type;window.__vite_plugin_react_preamble_installed__=true;return import("/@vite/client");}).then(()=>import(${JSON.stringify(clientEntryUrl)}));`;
 
-              const base = `http://${req.headers.host || "localhost:3000"}`;
-              const requestUrl = new URL(url, base);
+              const requestUrl = resolveDevRequestURL(req);
               const isAction =
                 actionsEnabled &&
                 method === "POST" &&
@@ -1456,7 +1456,7 @@ if (document.readyState === 'loading') {
                 validateServerActionRequest(
                   new Request(requestUrl, {
                     method,
-                    headers: req.headers as HeadersInit,
+                    headers: createDevRequestHeaders(req.headers),
                   }),
                   entryContext.serverActions,
                 );
@@ -1470,7 +1470,7 @@ if (document.readyState === 'loading') {
               }
               const request = new Request(requestUrl, {
                 method,
-                headers: req.headers as HeadersInit,
+                headers: createDevRequestHeaders(req.headers),
                 body:
                   body && body.length > 0
                     ? (body.buffer.slice(
@@ -1516,7 +1516,11 @@ if (document.readyState === 'loading') {
               }
               if (!rscEntry?.default?.fetch)
                 throw new Error("[Farm.js] Could not load RSC entry in rsc environment");
-              const response = await rscEntry.default.fetch(request);
+              const response = await rscEntry.default.fetch(request, {
+                // The rebuilt Request has no socket; the default rate-limit key
+                // needs the peer address, as the Nitro handler passes it.
+                clientAddress: req.socket?.remoteAddress,
+              });
 
               await sendRscDevelopmentResponse(res, response);
               const duration = Date.now() - startTime;
@@ -1635,9 +1639,7 @@ if (document.readyState === 'loading') {
 
               // Parse URL params (basic dynamic route support)
               const params: Record<string, string> = {};
-              const searchParams = searchParamsToObject(
-                new URL(url, `http://${req.headers.host || "localhost:3000"}`).searchParams,
-              );
+              const searchParams = searchParamsToObject(resolveDevRequestURL(req).searchParams);
 
               // Render the page with middleware data
               const pageProps = {

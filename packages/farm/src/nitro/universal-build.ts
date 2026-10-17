@@ -1,3 +1,4 @@
+import { createBundledEnv } from "../env";
 import type { RedirectConfig, ResolvedFarmConfig, RewriteConfig } from "../config";
 import { hasCustomFarmRouteContext, resolveDeployOutputPath } from "../config";
 import {
@@ -22,11 +23,12 @@ import {
   resolveFarmClientCacheAdapterEntry,
   type ClientCachePersistenceEntryCode,
 } from "../client-cache-persistence-build";
-import type { Rollup } from "vite";
+import type { Rollup, UserConfig as ViteUserConfig } from "vite";
 import os from "os";
 import path from "path";
-import { constants as fsConstants, existsSync, readFileSync } from "fs";
+import { constants as fsConstants, existsSync, readFileSync, realpathSync } from "fs";
 import { findRequestBoundSourceBlockers, parseRouteRenderingDirective } from "../ssg";
+import { FARM_LAYOUT_ELEMENT_CLIENT_SOURCE } from "../document-layout-client";
 import { fileURLToPath } from "url";
 import { builtinModules, createRequire } from "module";
 import { isDeepStrictEqual } from "node:util";
@@ -99,7 +101,7 @@ import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build
 import { adaptTailwindVitePlugin } from "../build/vite-plugin-compat";
 import { mergeFarmFontCss } from "../font-vite";
 import type { FarmIslandStrategy } from "../island";
-import { createFarmSourceAlias } from "../server/vite-config";
+import { createFarmSourceAlias, mergeFarmProductionViteConfig } from "../server/vite-config";
 import { DEFAULT_NOT_FOUND_STYLES } from "../components/not-found-styles";
 import { createFarmThemeCssPlugin } from "../theme/vite";
 import { resolveFarmInstrumentationFile } from "../instrumentation";
@@ -190,6 +192,114 @@ function preloadFarmNitroBuilder(): Promise<PromiseSettledResult<FarmNitroBuilde
 // Get __dirname equivalent for ESM
 const _filename = typeof import.meta.url !== "undefined" ? fileURLToPath(import.meta.url) : "";
 const _dirname = path.dirname(_filename);
+
+/** The installed @farm.js/core package directory, found from this module's own file. */
+function findFarmCoreRoot(from: string): string | null {
+  let dir = path.dirname(from);
+  while (dir !== path.dirname(dir)) {
+    const manifest = path.join(dir, "package.json");
+    if (existsSync(manifest)) {
+      try {
+        if (JSON.parse(readFileSync(manifest, "utf8")).name === "@farm.js/core") return dir;
+      } catch {}
+    }
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+const farmCoreRoot = _filename ? findFarmCoreRoot(_filename) : null;
+
+function toModulePath(file: string): string {
+  const normalized = file.split("\\").join("/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Node's package lookup: the nearest node_modules/<name> at or above `from`. */
+function findInstalledPackageDir(name: string, from: string): string | null {
+  for (let dir = from; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (existsSync(path.join(candidate, "package.json"))) {
+      try {
+        return realpathSync(candidate);
+      } catch {
+        return null;
+      }
+    }
+    if (dir === path.dirname(dir)) return null;
+  }
+}
+
+/** Directories of Farm's packages and every package they depend on, as installed for the app. */
+function collectFarmDependencyDirs(root: string): string[] {
+  const queue: Array<{ name: string; from: string }> = [];
+  const seen = new Set<string>();
+  const visit = (dir: string) => {
+    if (seen.has(dir)) return;
+    seen.add(dir);
+    let manifest: Record<string, Record<string, string> | undefined>;
+    try {
+      manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
+    } catch {
+      return;
+    }
+    for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      for (const name of Object.keys(manifest[field] ?? {})) queue.push({ name, from: dir });
+    }
+  };
+
+  if (farmCoreRoot) visit(realpathSync(farmCoreRoot));
+  queue.push({ name: "@farm.js/core", from: root });
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+    for (const field of ["dependencies", "devDependencies"]) {
+      for (const name of Object.keys(manifest[field] ?? {})) {
+        if (name.startsWith("@farm.js/")) queue.push({ name, from: root });
+      }
+    }
+  } catch {}
+
+  for (let next = queue.pop(); next; next = queue.pop()) {
+    const dir = findInstalledPackageDir(next.name, next.from);
+    if (dir) visit(dir);
+  }
+  return [...seen];
+}
+
+/**
+ * Tree-shaking for the server bundle. Farm's packages and their dependencies are treated
+ * as free of import side effects, so unused parts of Farm's graph (the docs Markdown
+ * pipeline, build-time helpers) stay out of the bundle. The app's own code and
+ * dependencies get the bundler default instead: SDKs register state on import (the OpenAI
+ * Agents default model provider, LangGraph's AsyncLocalStorage), and dropping that code
+ * broke them and crashed Rolldown on LangGraph.
+ *
+ * `undefined` defers to the package: Rolldown reads its `sideEffects` field, and Rollup
+ * keeps the module unless the resolved package marked it side-effect free.
+ */
+function createFarmServerModuleSideEffects(root: string) {
+  const installed = new Set<string>();
+  const linked: string[] = [];
+  for (const dir of collectFarmDependencyDirs(root)) {
+    const modulePath = toModulePath(dir);
+    if (modulePath.includes("/node_modules/")) installed.add(modulePath);
+    else linked.push(`${modulePath}/`);
+  }
+
+  return (id: string): false | undefined => {
+    const file = toModulePath(id.split("?")[0]);
+    const index = file.lastIndexOf("/node_modules/");
+    if (index !== -1) {
+      const start = index + "/node_modules/".length;
+      const segments = file.slice(start).split("/");
+      const packageDir =
+        file.slice(0, start) + segments.slice(0, segments[0].startsWith("@") ? 2 : 1).join("/");
+      return installed.has(packageDir) ? false : undefined;
+    }
+    return linked.some((prefix) => file.startsWith(prefix)) ? false : undefined;
+  };
+}
+
 const NODE_BUILTIN_MODULES = new Set([
   ...builtinModules,
   ...builtinModules.map((moduleName) => `node:${moduleName}`),
@@ -209,7 +319,6 @@ const NITRO_EXTERNAL_MODULES = new Set([
   "lightningcss",
   "rollup",
   "vite",
-  "vite-rolldown",
   "nitro",
   "nitropack",
   "sharp",
@@ -858,6 +967,8 @@ export async function buildUniversal(
     pluginManager?: PluginManager;
     routeRuntimeManifest?: FarmRouteRuntimeManifest;
     productionVite?: FarmProductionViteRuntime | Promise<FarmProductionViteRuntime>;
+    /** @internal Lifetime owned by the outer build, including discovery. */
+    rendererBuildLifetime?: AbortSignal;
   } = {},
 ): Promise<void> {
   const root = options.root || config.root || process.cwd();
@@ -878,6 +989,11 @@ export async function buildUniversal(
   const nitroBuilderResultPromise = preloadFarmNitroBuilder();
 
   logger.info(`🚜 Building Farm.js application (universal) with preset: ${preset}...`);
+
+  // Direct callers own a scope too; the outer build normally supplies one
+  // so discovery can share exact compiler results with both bundle graphs.
+  const rendererBuild = options.rendererBuildLifetime ? undefined : new AbortController();
+  const rendererBuildLifetime = options.rendererBuildLifetime ?? rendererBuild!.signal;
 
   try {
     const routeRuntimeManifestPromise = options.routeRuntimeManifest
@@ -970,9 +1086,7 @@ export async function buildUniversal(
       throw productionViteResult.reason;
     }
     const productionVite = productionViteResult.value;
-    if (productionVite.builder === "rolldown") {
-      logger.info("⚡ Building application bundles with Vite Rolldown");
-    }
+    logger.info("⚡ Building application bundles with Vite Rolldown");
 
     const buildClientBundle = () =>
       buildClient(
@@ -986,6 +1100,7 @@ export async function buildUniversal(
         routeSlots,
         isolatedClientBoundaryModules,
         hydrationPlanCache,
+        rendererBuildLifetime,
       );
     const buildSSRBundle = () =>
       buildSSRInMemory(
@@ -1001,6 +1116,7 @@ export async function buildUniversal(
         routeSlots,
         isolatedClientBoundaryModules,
         hydrationPlanCache,
+        rendererBuildLifetime,
       );
 
     // Route metadata and the client/SSR graphs read independent inputs. Drain
@@ -1049,28 +1165,17 @@ export async function buildUniversal(
           routeSlots,
           isolatedClientBoundaryModules,
           hydrationPlanCache,
+          rendererBuildLifetime,
         );
       } catch (retryError) {
         if (!(retryError instanceof IncompleteClientBuildOutputError)) throw retryError;
 
-        // A second Rolldown pass can observe the same incomplete graph when a
-        // renderer or build plugin leaves process-global state behind. Keep
-        // the server/SSR bundle on the selected builder, but use Vite's
-        // compatibility Rollup path for the client rather than shipping a
-        // missing browser entry.
-        logger.warn("Client bundle remained incomplete; falling back to Rollup...");
-        const rollupVite = await loadFarmProductionVite("rollup");
-        await buildClient(
-          rollupVite,
-          config,
-          root,
-          srcDir,
-          clientOutputDir,
-          pageRoutes,
-          layoutRoutes,
-          routeSlots,
-          isolatedClientBoundaryModules,
-          hydrationPlanCache,
+        // A second incomplete pass means a renderer or build plugin left state
+        // behind that a rebuild in this process cannot clear. Stop rather than
+        // ship a missing browser entry.
+        throw new IncompleteClientBuildOutputError(
+          `${retryError.message.replace(/^Farm client build produced incomplete output: /, "")}. ` +
+            "The client bundle was still incomplete after a sequential rebuild; run the build again in a fresh process.",
         );
       }
     }
@@ -1127,6 +1232,8 @@ export async function buildUniversal(
     }
     logger.error(`❌ Build failed: ${error}`);
     throw error;
+  } finally {
+    rendererBuild?.abort();
   }
 }
 
@@ -1268,6 +1375,7 @@ async function buildClient(
   routeSlots: UniversalRouteSlot[] = [],
   isolatedClientBoundaryModules: ReadonlySet<string> = new Set(),
   hydrationPlanCache: Map<string, ClientModuleHydrationPlan> = new Map(),
+  rendererBuildLifetime?: AbortSignal,
 ) {
   const viteBuild = productionVite.build;
   const { farmPlugin, farmServerOnlyEntriesPlugin } = await import("../vite");
@@ -1609,6 +1717,7 @@ async function buildClient(
   let tailwindVitePlugin: any = undefined;
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: false,
+    buildLifetime: rendererBuildLifetime,
   });
   if (hasScopedPostcssConfig) {
     logger.info("📦 Using project PostCSS/Tailwind configuration");
@@ -1628,7 +1737,7 @@ async function buildClient(
   }
 
   try {
-    await viteBuild({
+    const clientViteConfig: ViteUserConfig = {
       root,
       // Vite otherwise falls back to <root>/public, silently dropping every
       // asset in a custom config.publicDir from the production client output.
@@ -1736,7 +1845,6 @@ async function buildClient(
               id.endsWith(".node") ||
               id === "nitro" ||
               id === "vite" ||
-              id === "vite-rolldown" ||
               id === "esbuild" ||
               id === "rollup" ||
               id.startsWith("nitro/") ||
@@ -1797,7 +1905,9 @@ async function buildClient(
           "@farm.js/core/headers",
         ],
       },
-    });
+    };
+    // The app's `vite` block applies to production as it does in development.
+    await viteBuild(mergeFarmProductionViteConfig(clientViteConfig, config.vite));
     await mergeBuiltFontCss(outputDir);
     await validateClientBuildOutput(root, srcDir, outputDir);
   } finally {
@@ -3140,6 +3250,7 @@ function hasHydratableLayout(pathname) {
   });
 }
 
+${FARM_LAYOUT_ELEMENT_CLIENT_SOURCE}
 // Wrap a page element with applicable layouts
 function wrapWithLayouts(pageElement, pathname, params) {
   const layouts = getApplicableLayouts(pathname);
@@ -3148,18 +3259,8 @@ function wrapWithLayouts(pageElement, pathname, params) {
   // Wrap from innermost to outermost (reverse order since layouts are root-first)
   for (let i = layouts.length - 1; i >= 0; i--) {
     const layout = layouts[i];
-    const LayoutComponent = layout.Component;
-    if (LayoutComponent) {
-      wrapped = React.createElement(LayoutComponent, { children: wrapped, params: params });
-      wrapped = React.createElement(
-        "div",
-        {
-          "data-farm-layout-boundary": "true",
-          "data-farm-layout-pattern": layout.pattern,
-          style: { display: "contents" },
-        },
-        wrapped,
-      );
+    if (layout.Component) {
+      wrapped = createFarmLayoutElement(layout.Component, layout.pattern, wrapped, params);
     }
   }
   
@@ -4074,6 +4175,7 @@ async function buildSSRInMemory(
   collectedRouteSlots: readonly UniversalRouteSlot[],
   isolatedClientBoundaryModules: ReadonlySet<string>,
   hydrationPlanCache: Map<string, ClientModuleHydrationPlan>,
+  rendererBuildLifetime: AbortSignal,
 ): Promise<{
   bundle: OutputBundle;
   entryFile: string;
@@ -4095,6 +4197,7 @@ async function buildSSRInMemory(
   let tailwindVitePlugin: any = undefined;
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, root, {
     ssr: true,
+    buildLifetime: rendererBuildLifetime,
   });
   if (!hasScopedPostcssConfig) {
     postcssConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "farm-postcss-"));
@@ -4347,7 +4450,7 @@ async function buildSSRInMemory(
       ];
 
   try {
-    await viteBuild({
+    const serverViteConfig: ViteUserConfig = {
       root,
       build: {
         target: "esnext",
@@ -4363,6 +4466,10 @@ async function buildSSRInMemory(
           external: [
             "fsevents",
             "sharp",
+            // Loads its .node addon through `bindings`, which finds the binary from its own
+            // file path (`__filename`). Inlined into the ESM server bundle, it crashed at
+            // startup; kept external, Nitro copies the package into the output.
+            "better-sqlite3",
             ...rendererOptionalExternals,
             ...(useExternalMetadataImageRuntime ? ["@vercel/og"] : []),
             "@prisma/client",
@@ -4374,9 +4481,8 @@ async function buildSSRInMemory(
             /\.node$/,
             /^node:/,
           ],
-          // Optimize tree-shaking
           treeshake: {
-            moduleSideEffects: false,
+            moduleSideEffects: createFarmServerModuleSideEffects(root),
           },
         },
       },
@@ -4411,7 +4517,6 @@ async function buildSSRInMemory(
           "@rollup/rollup-win32-arm64-msvc",
           "@rollup/rollup-win32-ia32-msvc",
           "vite",
-          "vite-rolldown",
           "nitro",
           "nitropack",
           "@prisma/client",
@@ -4438,7 +4543,7 @@ async function buildSSRInMemory(
       },
       define: {
         __FARM_API_BASE_URL__: JSON.stringify(config.api.baseURL),
-        __FARM_ENV__: JSON.stringify(config.env || { server: {}, public: {} }),
+        __FARM_ENV__: JSON.stringify(createBundledEnv(config.env)),
         __FARM_PUBLIC_ENV__: JSON.stringify(config.env?.public || {}),
       },
       plugins: [
@@ -4522,7 +4627,8 @@ async function buildSSRInMemory(
         // Route modules and the renderer adapter must share one runtime instance.
         dedupe: [...(config.renderer.dedupe || [])],
       },
-    });
+    };
+    await viteBuild(mergeFarmProductionViteConfig(serverViteConfig, config.vite));
   } finally {
     if (postcssConfigDir) {
       try {
@@ -5954,7 +6060,9 @@ const farmDocsHandler = ${
 }, {
   rootDir: farmDocsRuntimeRoot,
   clientEntry: "/__farm_client_js_src__",
-  stylesheets: ["/farm-fonts.css", "/__farm_client_css_href__"],
+  // Font CSS is merged into the client stylesheet; farm-fonts.css only exists when the
+  // app has fonts, so linking it separately 404'd for apps without them.
+  stylesheets: ["/__farm_client_css_href__"],
   resolveLayoutFonts: (pathname) =>
     resolveFarmLayoutFonts(
       getApplicableLayouts(getFarmRoutePathname(pathname)).map((layout) => layout.module),
@@ -6435,6 +6543,24 @@ function ensureFarmDocumentHead(markup) {
   });
 }
 
+function ensureFarmDocumentRoot(markup) {
+  if (/\\sid=["']root["']/i.test(markup)) return markup;
+  return markup
+    .replace(/<body\\b([^>]*)>/i, function(_match, attributes) {
+      return "<body" + attributes + '><div id="root">';
+    })
+    .replace(/<\\/body>/i, function() { return "</div></body>"; });
+}
+
+function hasFarmDocumentIcon(markup) {
+  return /<link\\b[^>]*\\brel=["']?(?:shortcut )?icon\\b/i.test(markup);
+}
+
+function addFarmFallbackIcon(markup, hasFavicon) {
+  if (hasFavicon || hasFarmDocumentIcon(markup)) return markup;
+  return markup.replace(/<\\/head>/i, function() { return '  <link rel="icon" href="data:,">\\n</head>'; });
+}
+
 function createFarmErrorDocument(html, title) {
   const escapedTitle = escapeFarmHtmlAttribute(title || "Application Error");
   const fullDocument = extractFarmFullDocument(html);
@@ -6455,12 +6581,7 @@ function createFarmErrorDocument(html, title) {
       '</body>\\n</html>';
   }
 
-  let fullHtml = ensureFarmDocumentHead(fullDocument);
-  if (!/\\sid=["']root["']/.test(fullHtml)) {
-    fullHtml = fullHtml
-      .replace(/<body([^>]*)>/i, '<body$1><div id="root">')
-      .replace(/<\\/body>/i, '</div></body>');
-  }
+  let fullHtml = ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument));
   fullHtml = fullHtml
     .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
     // Function replacements: dynamic markup may contain $-sequences ($&, $', $$)
@@ -7070,7 +7191,7 @@ function hasLocalRequestRoute(request, routePathname) {
   const pathname = new URL(request.url).pathname;
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     return true;
   }
@@ -7110,7 +7231,7 @@ function getFarmPluginRequestOptions(request) {
   const route = { pathname };
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     return {
       kind: "docs",
@@ -7453,9 +7574,10 @@ async function handleFarmRequest(request, adapterContext) {
     config.md?.enabled
       ? `const pathname = getFarmRoutePathname(requestUrl.pathname);
   if (matchPageRoute(pathname)) {
+    // The Link header advertises the public .md URL, like the head alternate.
     return applyMarkdownNegotiationHeaders(response, {
       config: farmMarkdownConfig,
-      pathname,
+      pathname: requestUrl.pathname,
     });
   }`
       : ""
@@ -7679,7 +7801,7 @@ async function handleFarmRequestInContext(
   if (
     farmOpenAPIReference &&
     farmOpenAPIReference.specRoute &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.specRoute)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.specRoute)
   ) {
     const method = request.method.toUpperCase();
     const specResponse = method === "GET" || method === "HEAD"
@@ -7703,7 +7825,7 @@ async function handleFarmRequestInContext(
 
   if (
     farmOpenAPIReference &&
-    normalizeRuntimePath(pathname) === normalizeRuntimePath(farmOpenAPIReference.route)
+    normalizeRuntimePath(stripFarmBasePath(pathname)) === normalizeRuntimePath(farmOpenAPIReference.route)
   ) {
     const method = request.method.toUpperCase();
     const response = method === "GET" || method === "HEAD"
@@ -8269,12 +8391,15 @@ async function handleFarmRequestInContext(
         const sharedCacheControl = getRouteSharedCacheControl(route, pprCanCache);
         const responseHeaders = {
           "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": renderedPage.stream || hasRequestScopedRender || !sharedCacheControl
-            ? "private, no-store"
-            : sharedCacheControl,
+          "Cache-Control": sharedCacheControl,
           ...(farmFontPreloadHeader ? { "Link": farmFontPreloadHeader } : {}),
           ...(pprConfig.enabled ? getPPRHeaders(pprCanCache ? "miss" : "bypass", pprConfig) : {}),
         };
+        // An error status or a request-scoped render is never shareable, even when
+        // the PPR shell headers would otherwise grant a shared max-age.
+        if (renderedPage.stream || hasRequestScopedRender || !sharedCacheControl) {
+          responseHeaders["Cache-Control"] = "private, no-store";
+        }
         const farmI18nSnapshot = getFarmI18nSnapshot();
         let html = renderedPage.html;
         
@@ -8388,7 +8513,10 @@ async function handleFarmRequestInContext(
         let fullHtml;
         if (hasFullDocument) {
           // Layout provides full HTML structure - inject CSS and client script
-          html = ensureFarmDocumentHead(extractFarmFullDocument(html) || html);
+          html = addFarmFallbackIcon(
+            ensureFarmDocumentRoot(ensureFarmDocumentHead(extractFarmFullDocument(html) || html)),
+            hasFavicon,
+          );
           fullHtml = html
             // Inject CSS link after opening head tag or first meta tag
             .replace(/<head([^>]*)>/i, '<head$1>\\n  <link rel="stylesheet" href="/__farm_client_css_href__">')
@@ -8720,7 +8848,10 @@ async function handleFarmRequestInContext(
     
     let fullHtml;
     if (hasFullDocument) {
-      fullHtml = ensureFarmDocumentHead(fullDocument)
+      fullHtml = addFarmFallbackIcon(
+        ensureFarmDocumentRoot(ensureFarmDocumentHead(fullDocument)),
+        notFoundMetadata.hasFavicon,
+      )
         // The not-found title replaces any title the layout rendered, as metadata does on pages.
         .replace(/<head([^>]*)>([\\s\\S]*?)<\\/head>/i, (match, attrs, headContent) =>
           "<head" + attrs + ">" +

@@ -563,6 +563,11 @@ function readJsonBody(value: unknown) {
   throw new JobsRuntimeError("Jobs request body must be a JSON object.", 400);
 }
 
+function readTriggerJsonBody(value: unknown) {
+  // A bare array is the task payload itself: it cannot carry reserved keys.
+  return Array.isArray(value) ? (value as unknown[]) : readJsonBody(value);
+}
+
 function hasOwn(value: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -601,19 +606,19 @@ function readInlinePayload(value: Record<string, unknown>, reservedKeys: readonl
   // scalar itself. The marker is reserved and $-prefixed like $options and
   // $schedule, which keeps it distinguishable from payload data: an object
   // input that happens to carry a "value" key used to be indistinguishable
-  // from the wrapper and was silently unwrapped into its own property.
-  if (hasOwn(value, "$value")) {
-    return value.$value;
-  }
-
+  // from the wrapper and was silently unwrapped into its own property. It is
+  // only the wrapper when it is the sole payload key; an object input that
+  // also carries "$value" is delivered whole.
   const payload = stripReservedKeys(value, reservedKeys);
-  if (Object.keys(payload).length === 0) {
-    return undefined;
+  const keys = Object.keys(payload);
+  if (keys.length === 1 && keys[0] === "$value") {
+    return payload.$value;
   }
+  // An object body is an object payload, including an empty one.
   return payload;
 }
 
-async function parseRequestBody(request: Request) {
+async function parseRequestBody(request: Request): Promise<unknown> {
   let source: string;
   try {
     source = await request.text();
@@ -628,7 +633,7 @@ async function parseRequestBody(request: Request) {
   } catch {
     throw new JobsRuntimeError("Jobs request body must contain valid JSON.", 400);
   }
-  return readJsonBody(body);
+  return body;
 }
 
 function normalizeQueue(queue: JobsTaskDefaults<any>["queue"]) {
@@ -1648,8 +1653,10 @@ function warnDeprecatedLegacyEnvelope(operation: "trigger" | "schedule"): void {
   );
 }
 
-function normalizeTriggerInput(body: Record<string, unknown> | undefined) {
-  const value = body || {};
+function normalizeTriggerInput(body: Record<string, unknown> | unknown[] | undefined) {
+  if (body === undefined) return { input: undefined, options: undefined };
+  if (Array.isArray(body)) return { input: body, options: undefined };
+  const value = body;
   if (hasOwn(value, "$input")) {
     return {
       input: value.$input,
@@ -1671,8 +1678,28 @@ function normalizeTriggerInput(body: Record<string, unknown> | undefined) {
   };
 }
 
+function mergeScheduleOptions(
+  options: unknown,
+  schedule: JobsScheduleConfig | undefined,
+): JobsScheduleOptions | undefined {
+  if (!options || typeof options !== "object") return schedule;
+  // $options carries the same launch options as on trigger; its timing is
+  // superseded by $schedule, and values set on $schedule win.
+  const launch = options as JobsTriggerOptions;
+  const tags = [
+    ...(Array.isArray(launch.tags) ? launch.tags : []),
+    ...(Array.isArray(schedule?.tags) ? schedule.tags : []),
+  ];
+  return {
+    debounce: schedule?.debounce ?? launch.debounce,
+    idempotencyKey: schedule?.idempotencyKey ?? launch.idempotencyKey,
+    ...(tags.length > 0 ? { tags } : {}),
+  };
+}
+
 function normalizeScheduleInput(body: Record<string, unknown> | undefined) {
-  const value = body || {};
+  if (body === undefined) return { input: undefined, at: undefined, after: undefined };
+  const value = body;
   if (hasOwn(value, "$input")) {
     const schedule =
       value.$schedule && typeof value.$schedule === "object"
@@ -1683,7 +1710,7 @@ function normalizeScheduleInput(body: Record<string, unknown> | undefined) {
       input: value.$input,
       at: schedule?.at,
       after: schedule?.after,
-      options: schedule,
+      options: mergeScheduleOptions(value.$options, schedule),
     };
   }
 
@@ -1703,27 +1730,27 @@ function normalizeScheduleInput(body: Record<string, unknown> | undefined) {
       : undefined;
 
   return {
-    input: readInlinePayload(value, ["$schedule"]),
+    input: readInlinePayload(value, ["$schedule", "$options"]),
     at: schedule?.at,
     after: schedule?.after,
-    options: schedule,
+    options: mergeScheduleOptions(value.$options, schedule),
   };
 }
 
-function normalizeBatchTriggerInput<TTask extends JobsTaskDefinition<any, any>>(
-  body: Record<string, unknown> | undefined,
-) {
-  return (body || {}) as unknown as JobsBatchTriggerBody<InferJobsTaskInput<TTask>>;
+function normalizeBatchTriggerInput<TTask extends JobsTaskDefinition<any, any>>(body: unknown) {
+  return (body === undefined ? {} : readJsonBody(body)) as unknown as JobsBatchTriggerBody<
+    InferJobsTaskInput<TTask>
+  >;
 }
 
 function normalizeBatchTriggerItem(item: unknown) {
   return normalizeTriggerInput(
-    item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
+    item && typeof item === "object" ? (item as Record<string, unknown> | unknown[]) : undefined,
   );
 }
 
-function normalizeCancelInput(body: Record<string, unknown> | undefined) {
-  return (body || {}) as unknown as JobsCancelBody;
+function normalizeCancelInput(body: unknown) {
+  return (body === undefined ? {} : readJsonBody(body)) as unknown as JobsCancelBody;
 }
 
 export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInput<TTasks>) {
@@ -1760,7 +1787,10 @@ export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInp
           responseFormat: "json",
           async handler(request) {
             try {
-              const body = normalizeTriggerInput(await parseRequestBody(request));
+              const parsed = await parseRequestBody(request);
+              const body = normalizeTriggerInput(
+                parsed === undefined ? undefined : readTriggerJsonBody(parsed),
+              );
               const launch = resolveLaunchOptions(task, body.input, body.options);
               const triggered = await runtime.trigger(task, body.input, launch);
               return Response.json({
@@ -1830,7 +1860,10 @@ export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInp
           responseFormat: "json",
           async handler(request) {
             try {
-              const body = normalizeScheduleInput(await parseRequestBody(request));
+              const parsed = await parseRequestBody(request);
+              const body = normalizeScheduleInput(
+                parsed === undefined ? undefined : readJsonBody(parsed),
+              );
               const { scheduledFor, launch } = resolveScheduleLaunchOptions(task, body.input, body);
               const triggered = await runtime.trigger(task, body.input, launch);
               return Response.json({

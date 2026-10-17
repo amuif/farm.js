@@ -306,3 +306,74 @@ test("farm whoami and farm logout run end to end against a gateway", async () =>
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+async function startConfigGateway(config) {
+  const server = createServer((request, response) => {
+    if (request.url !== "/api/auth/config") return response.writeHead(404).end();
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(config));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, gateway: `http://127.0.0.1:${server.address().port}` };
+}
+
+function farmWithCredentials(gateway, root, credentials) {
+  return (...args) =>
+    promisify(execFile)(process.execPath, [bin, ...args, "--gateway", gateway, "--root", root], {
+      env: {
+        ...process.env,
+        FARM_TELEMETRY_DISABLED: "1",
+        FARM_PREVIEW_CREDENTIALS_PATH: credentials,
+        FARMJS_API_KEY: "",
+        FARM_PREVIEW_TOKEN: "",
+      },
+    });
+}
+
+test("a damaged credentials file is reported by path and does not block whoami or logout", async () => {
+  const { server, gateway } = await startConfigGateway(infra);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-preview-damaged-"));
+  const credentials = path.join(root, "preview-auth.json");
+  await fs.writeFile(credentials, "{ not json");
+  const farm = farmWithCredentials(gateway, root, credentials);
+  try {
+    await assert.rejects(farm("whoami"), (error) => {
+      const output = `${error.stdout}${error.stderr}`;
+      assert.doesNotMatch(output, /SyntaxError|Failed to check sign-in/);
+      assert.ok(output.includes(credentials), output);
+      assert.match(output, /Run farm login to replace them/);
+      assert.match(error.stdout, /Not signed in\./);
+      return true;
+    });
+    const { stdout, stderr } = await farm("logout");
+    assert.match(stdout, /No saved sign-in/);
+    assert.ok(`${stdout}${stderr}`.includes(credentials));
+  } finally {
+    server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "saving credentials leaves an existing directory's permissions alone",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { server, gateway } = await startConfigGateway(infra);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-preview-shared-"));
+    const shared = path.join(root, "shared");
+    await fs.mkdir(shared);
+    await fs.chmod(shared, 0o755);
+    const credentials = path.join(shared, "preview-auth.json");
+    await fs.writeFile(credentials, JSON.stringify({ [gateway]: savedKey }));
+    try {
+      // Logging out rewrites the file in place.
+      const { stdout } = await farmWithCredentials(gateway, root, credentials)("logout");
+      assert.match(stdout, /Signed out of/);
+      assert.deepEqual(JSON.parse(await fs.readFile(credentials, "utf8")), {});
+      assert.equal((await fs.stat(shared)).mode & 0o777, 0o755);
+      assert.equal((await fs.stat(credentials)).mode & 0o777, 0o600);
+    } finally {
+      server.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  },
+);

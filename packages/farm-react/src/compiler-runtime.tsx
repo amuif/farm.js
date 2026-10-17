@@ -379,7 +379,9 @@ function compilerKeyedArrayFilterSurvivorsFromUpdate(
     updates.push(current);
   }
 
-  let survivors = Array.from({ length: expectedLength }, (_, index) => index);
+  // oxlint-disable-next-line unicorn/no-new-array -- Known row count; avoid Array.from mapping callbacks.
+  let survivors = new Array<number>(expectedLength);
+  for (let index = 0; index < expectedLength; index += 1) survivors[index] = index;
   let keysStable = true;
   for (let updateIndex = updates.length - 1; updateIndex >= 0; updateIndex -= 1) {
     const current = updates[updateIndex];
@@ -4625,17 +4627,21 @@ function commitKeyedRowBinding(
   instance.values[bindingIndex] = value;
   if (!target) return;
   if (binding.kind === "text") {
-    // Like React's setTextContent: update a lone text node in place.
-    const text = target.firstChild;
-    if (value && text && text === target.lastChild && text.nodeType === 3) {
-      (text as Text).data = value as string;
-    } else {
-      target.textContent = value as string;
-    }
+    updateTextContent(target, value as string);
   } else if (binding.kind === "style" && binding.name) {
     updateStyle(target, binding.name, value);
   } else if (binding.kind === "attribute" && binding.name) {
     updateAttribute(target, binding.name, value);
+  }
+}
+
+function updateTextContent(target: Element, value: string): void {
+  // Like React's setTextContent: update a lone text node in place.
+  const text = target.firstChild;
+  if (value && text && text === target.lastChild && text.nodeType === 3) {
+    (text as Text).data = value;
+  } else {
+    target.textContent = value;
   }
 }
 
@@ -4666,35 +4672,57 @@ type CompilerPreparedKeyedRowBindingCommit = readonly [
   update: CompilerPreparedKeyedRowBindingUpdate,
 ];
 
+// Keep a single update as its tuple; allocate a list only for multiple changes.
+type CompilerPreparedKeyedRowBindingUpdates =
+  | CompilerPreparedKeyedRowBindingUpdate
+  | CompilerPreparedKeyedRowBindingUpdate[];
+
 function prepareKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
   item: unknown,
   index: number,
-): CompilerPreparedKeyedRowBindingUpdate[] | undefined {
+): CompilerPreparedKeyedRowBindingUpdates | undefined {
+  let first: CompilerPreparedKeyedRowBindingUpdate | undefined;
   let updates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
     const update = prepareKeyedRowBindingUpdate(props, instance, item, index, bindingIndex);
     if (update === undefined) return undefined;
-    if (update) (updates ||= []).push(update);
+    if (update) {
+      if (updates) updates.push(update);
+      else if (first) {
+        updates = [];
+        updates.push(first);
+        updates.push(update);
+      } else first = update;
+    }
   }
-  return updates || NO_KEYED_ROW_BINDING_UPDATES;
+  return updates || first || NO_KEYED_ROW_BINDING_UPDATES;
 }
 
 // Shared by every row with nothing to patch; callers only iterate it.
-const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdate[] = [];
+const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdates = [];
 
 function applyPreparedKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
-  updates: readonly CompilerPreparedKeyedRowBindingUpdate[],
+  updates: Readonly<CompilerPreparedKeyedRowBindingUpdates>,
 ): void {
-  for (const [bindingIndex, target, value] of updates) {
+  if (typeof updates[0] === "number") {
+    const [bindingIndex, target, value] = updates as CompilerPreparedKeyedRowBindingUpdate;
+    commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
+    return;
+  }
+  for (const [
+    bindingIndex,
+    target,
+    value,
+  ] of updates as readonly CompilerPreparedKeyedRowBindingUpdate[]) {
     commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
   }
 }
 
-type CompilerPreparedKeyedRowBindingSet = CompilerPreparedKeyedRowBindingUpdate[][];
+type CompilerPreparedKeyedRowBindingSet = CompilerPreparedKeyedRowBindingUpdates[];
 
 function prepareKeyedRowBindingSetUpdates(
   props: CompilerKeyedRowBindingSource,
@@ -4703,7 +4731,7 @@ function prepareKeyedRowBindingSetUpdates(
   /** Instances already in row order, which skips the keyed lookups. */
   ordered?: readonly CompilerKeyedRowInstance[],
 ): CompilerPreparedKeyedRowBindingSet | undefined {
-  const preparedUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+  const preparedUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
   for (let index = 0; index < rows.items.length; index += 1) {
     const instance = ordered ? ordered[index] : instances.get(rows.keys[index]);
     if (!instance) return undefined;
@@ -5338,7 +5366,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
     const elements = [...this.root.children];
     const descriptors = flattenCompilerHostElements(materializeCompilerHostChildren(this.host));
     if (elements.length !== descriptors.length) return false;
-    const preparedBindings: CompilerPreparedKeyedRowBindingUpdate[][][] = [];
+    const preparedBindings: CompilerPreparedKeyedRowBindingUpdates[][] = [];
     let cursor = 0;
 
     for (let rangeIndex = 0; rangeIndex < this.block.ranges.length; rangeIndex += 1) {
@@ -5361,7 +5389,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
 
       const instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
       this.instances.push(instances);
-      const rangeBindingUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+      const rangeBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -5383,7 +5411,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
           index,
           conditionalValues: new Map(),
         };
-        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
         try {
           bindingUpdates = prepareKeyedRowBindingUpdates(range, instance, rows.items[index], index);
         } catch (error) {
@@ -5671,7 +5699,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const descriptors = flattenCompilerHostElements(this.host.children);
     if (elements.length !== descriptors.length) return false;
     const preparedKeyedBindings: Array<
-      readonly (readonly CompilerPreparedKeyedRowBindingUpdate[])[] | undefined
+      readonly Readonly<CompilerPreparedKeyedRowBindingUpdates>[] | undefined
     > = [];
     let cursor = 0;
 
@@ -5734,7 +5762,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
       }
       const keyedInstances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
       this.instances.push({ kind: "keyed", value: keyedInstances });
-      const keyedBindingUpdates: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+      const keyedBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < snapshot.rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -5756,7 +5784,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
           index,
           conditionalValues: new Map(),
         };
-        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
         try {
           bindingUpdates = prepareKeyedRowBindingUpdates(
             range,
@@ -7230,7 +7258,7 @@ function reconcileCompilerKeyedArrayMapReorder(
   const reverse = update.kind === CompilerKeyedArrayReorderKind.Reverse;
   const prepared = (() => {
     const changed: Array<{
-      bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+      bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
       instance: CompilerKeyedRowInstance;
       item: unknown;
     }> = [];
@@ -7513,7 +7541,7 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -7778,7 +7806,7 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
   const retainedLength = previousInstances.length - retainedStart;
   const survivors: CompilerKeyedRowInstance[] = [];
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -8078,7 +8106,7 @@ type CompilerPreparedKeyedArrayWindow = [
   incomingKeySet: ReadonlySet<KeyedRowKey>,
   nextWindow: CompilerKeyedRowInstance[],
   sequence: number[],
-  preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined>,
+  preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined>,
 ];
 
 function prepareCompilerKeyedArrayWindow(
@@ -8117,7 +8145,7 @@ function prepareCompilerKeyedArrayWindow(
     : undefined;
   const nextWindow: CompilerKeyedRowInstance[] = [];
   const sequence: number[] = [];
-  const preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined> = [];
+  const preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined> = [];
   try {
     for (let offset = 0; offset < window[3]; offset += 1) {
       const index = window[1] + offset;
@@ -8297,7 +8325,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
         index: number,
         instance: CompilerKeyedRowInstance,
         item: unknown,
-        updates: readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined,
+        updates: Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined,
         replacement: CompilerKeyedRowInstance | undefined,
       ]
     > = [];
@@ -8381,7 +8409,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
     update.insertedCount === update.removedCount &&
     incomingKeys.every((key, offset) => key === removed[offset].key)
   ) {
-    const prepared: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+    const prepared: CompilerPreparedKeyedRowBindingUpdates[] = [];
     try {
       for (let offset = 0; offset < update.insertedCount; offset += 1) {
         const updates = prepareKeyedRowBindingUpdates(
@@ -8508,7 +8536,7 @@ function reconcileCompilerKeyedArrayStructuralReorder(
       };
       let preservesSurvivorOrder = true;
       const directChanges: Array<{
-        bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+        bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
         instance: CompilerKeyedRowInstance;
         item: unknown;
       }> = [];
@@ -8966,7 +8994,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -11986,6 +12014,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private trackedBindingsByDependency: Set<CompilerBinding<Props>>[] = [];
     private readonly trackedDependenciesByBinding = new Map<CompilerBinding<Props>, Set<number>>();
     private readonly bindingValues = new Map<CompilerBinding<Props>, unknown>();
+    private readonly textNodes = new Map<Element, readonly Node[]>();
     private activeBinding: CompilerBinding<Props> | null = null;
     private activeDependencies: Set<number> | null = null;
     private readonly cells: RuntimeCell[];
@@ -12049,20 +12078,16 @@ export function createCompiledComponentWithFeatures<Props>(
       this.blockRuntime = blockRuntime as CompilerBlockRuntime;
     }
 
-    private usesHybridReactivity(): boolean {
-      return definitionReference.current.reactivity === "hybrid";
-    }
-
     private canReuseRenderedElement(
       currentDefinition: CompiledComponentDefinition<Props>,
       propValues: readonly unknown[] | null,
     ): boolean {
-      return Boolean(
+      // The committed root ref publishes the definition and element together.
+      return (
         this.mounted &&
-        propValues &&
+        propValues !== null &&
         propValues.every(isCompilerPrimitive) &&
-        this.renderedDefinition === currentDefinition &&
-        this.renderedElement,
+        this.renderedDefinition === currentDefinition
       );
     }
 
@@ -12096,7 +12121,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private tracksBinding(
       binding: Exclude<CompilerBinding<Props>, CompilerConditionalBlockBinding>,
     ): boolean {
-      return this.usesHybridReactivity() && binding.tracking === "dynamic";
+      return definitionReference.current.reactivity === "hybrid" && binding.tracking === "dynamic";
     }
 
     private ensureBindingIndex(): void {
@@ -12172,7 +12197,7 @@ export function createCompiledComponentWithFeatures<Props>(
     }
 
     private primeHybridBindings(): void {
-      if (!this.usesHybridReactivity()) return;
+      if (definitionReference.current.reactivity !== "hybrid") return;
       for (const binding of definitionReference.current.bindings) {
         if (binding.kind === "block") continue;
         if (!this.tracksBinding(binding)) continue;
@@ -12286,34 +12311,28 @@ export function createCompiledComponentWithFeatures<Props>(
           for (const binding of this.staticBindingsByDependency[dependency] || []) {
             affectedBindings.add(binding);
           }
-          if (this.usesHybridReactivity()) {
+          if (definitionReference.current.reactivity === "hybrid") {
             for (const binding of this.trackedBindingsByDependency[dependency] || []) {
               affectedBindings.add(binding);
             }
           }
         }
 
-        const hasAffectedMountedAncestor = (binding: CompilerConditionalBlockBinding): boolean => {
+        const blockRefreshes: CompilerBlockRefresh[] = [];
+        for (const id of affectedBlockIds) {
+          const binding = this.blockBindings.get(id);
+          const refresh = this.blockRefreshListeners.get(id);
+          if (!binding || !refresh) continue;
           let parent = binding.parent;
           while (parent !== undefined) {
-            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) {
-              return true;
-            }
+            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) break;
             parent = this.blockBindings.get(parent)?.parent;
           }
-          return false;
-        };
-
-        const blockRefreshes = [...affectedBlockIds]
-          .map((id) => {
-            const binding = this.blockBindings.get(id);
-            const refresh = this.blockRefreshListeners.get(id);
-            return binding && refresh && !hasAffectedMountedAncestor(binding) ? refresh : undefined;
-          })
-          .filter((refresh): refresh is CompilerBlockRefresh => refresh !== undefined);
+          if (parent === undefined) blockRefreshes.push(refresh);
+        }
 
         for (const binding of affectedBindings) {
-          if (binding.kind !== "block") this.applyBinding(binding);
+          this.applyBinding(binding);
         }
 
         let pendingBlockCommits = blockRefreshes.length;
@@ -12346,7 +12365,15 @@ export function createCompiledComponentWithFeatures<Props>(
         if (Object.is(this.bindingValues.get(binding), comparableValue)) return;
       }
       if (binding.kind === "text") {
-        target.textContent = comparableValue as string;
+        // Keep React's committed children for the next full reconciliation.
+        // Direct writes may replace HostText nodes still owned by its fibers.
+        if (!this.textNodes.has(target)) {
+          this.textNodes.set(target, [...target.childNodes]);
+          // The direct text node is compiler-owned; never edit a saved React node.
+          target.textContent = comparableValue as string;
+        } else {
+          updateTextContent(target, comparableValue as string);
+        }
       } else if (binding.kind === "style") {
         updateStyle(target, binding.name, value);
       } else {
@@ -12358,20 +12385,31 @@ export function createCompiledComponentWithFeatures<Props>(
     componentDidMount(): void {
       this.mounted = true;
       refreshListeners.add(this.refreshDefinition);
-      this.ensureBindingIndex();
-      this.primeHybridBindings();
+      // React replays this lifecycle when Activity/Suspense reappears. Publish
+      // the current committed props before rebuilding dependency tracking, and
+      // drain state queued while hidden through the ordinary update path.
+      this.componentDidUpdate();
     }
 
     getSnapshotBeforeUpdate(): boolean {
       const currentDefinition = definitionReference.current;
       const propValues = currentDefinition.readProps?.(this.props) || null;
-      return this.canReuseRenderedElement(currentDefinition, propValues);
+      if (this.canReuseRenderedElement(currentDefinition, propValues)) return true;
+      // Restore only at commit: a suspended or abandoned render must not
+      // roll back the visible DOM. React can now reconcile its own nodes.
+      this.textNodes.forEach((children, target) => {
+        target.textContent = "";
+        for (const child of children) target.appendChild(child);
+      });
+      this.textNodes.clear();
+      this.bindingValues.clear();
+      return false;
     }
 
     componentDidUpdate(
-      _previousProps: Readonly<Props>,
-      _previousState: Readonly<Record<string, never>>,
-      reusedRenderedElement = false,
+      previousProps?: Readonly<Props>,
+      _previousState?: Readonly<Record<string, never>>,
+      reusedRenderedElement?: boolean,
     ): void {
       const propValues = definitionReference.current.readProps?.(this.props) || null;
       if (propValues) {
@@ -12389,21 +12427,24 @@ export function createCompiledComponentWithFeatures<Props>(
             cell.flush();
           }
         }
-        this.flushBindingUpdates();
-        return;
       }
 
-      // Hand-authored definitions without prop cells retain the original
-      // React-owned prop reconciliation behavior.
-      this.ensureBindingIndex();
-      for (const binding of definitionReference.current.bindings) {
-        if (binding.kind !== "block") this.applyBinding(binding, true);
+      if (!reusedRenderedElement) {
+        this.ensureBindingIndex();
+        this.primeHybridBindings();
       }
+      // Hand-authored definitions without prop cells retain their prop update
+      // behavior. Initial/replayed mounts do not force redundant DOM writes.
+      if (!propValues && previousProps) {
+        for (const binding of definitionReference.current.bindings) {
+          this.applyBinding(binding, true);
+        }
+      }
+      if (this.dirtyState.size) this.flushBindingUpdates();
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.dirtyState.clear();
       this.inputSelection = null;
       this.blockRefreshListeners.clear();
       // React 18 StrictMode replays lifecycles without detaching host refs.
@@ -12416,6 +12457,10 @@ export function createCompiledComponentWithFeatures<Props>(
       this.trackedBindingsByDependency = [];
       this.trackedDependenciesByBinding.clear();
       this.bindingValues.clear();
+      // Hiding also calls this lifecycle: pending state and React-owned text
+      // snapshots belong to the retained component, not its active effects.
+      // Reconciliation clears snapshots; real unmount releases host refs and
+      // the global refresh listener, allowing this instance to be collected.
       this.activeBinding = null;
       this.activeDependencies = null;
       refreshListeners.delete(this.refreshDefinition);

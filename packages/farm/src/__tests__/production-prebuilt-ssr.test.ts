@@ -13,11 +13,7 @@ import { chromium } from "@playwright/test";
 import { imageSize } from "image-size";
 import { describe, expect, it, vi } from "vitest";
 import { build } from "../build";
-import {
-  loadFarmProductionVite,
-  supportsRolldownVite,
-  type FarmProductionViteRuntime,
-} from "../build/production-vite";
+import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
 import { resolveConfig } from "../config";
 import { defineIntegration } from "../integrations";
 import { definePlugin } from "../plugin";
@@ -952,6 +948,210 @@ export default function Page() {
         "/workspace",
       );
     } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("applies the app's vite config to the client and server builds", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "vendor"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "vendor", "user-alias-target.ts"),
+        `export const aliasedLabel = "user alias resolved";`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "marker.module.css"),
+        `.title { color: rgb(1, 2, 3); }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "user-vite-marker.tsx"),
+        `
+"use client";
+
+import { aliasedLabel } from "user-vite-alias";
+import styles from "./marker.module.css";
+
+declare const __USER_VITE_FLAG__: string;
+
+export default function UserViteMarker() {
+  return <p className={styles.title} data-user-vite={__USER_VITE_FLAG__}>{aliasedLabel}</p>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import UserViteMarker from "./user-vite-marker";
+
+export default function Page() {
+  return <main>prebuilt SSR output <UserViteMarker /></main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-user-vite-config-test",
+          vite: {
+            define: { __USER_VITE_FLAG__: JSON.stringify("user-define-applied") },
+            resolve: {
+              alias: { "user-vite-alias": path.join(root, "vendor", "user-alias-target.ts") },
+            },
+            css: { modules: { generateScopedName: "user-vite-[local]" } },
+            // Options Farm owns for the production output stay under Farm's control.
+            root: path.join(root, "elsewhere"),
+            base: "/elsewhere/",
+            mode: "development",
+            build: {
+              outDir: "elsewhere",
+              emptyOutDir: false,
+              ssr: true,
+              write: false,
+              rollupOptions: {
+                input: "missing-entry.js",
+                output: { format: "cjs", entryFileNames: "elsewhere.js" },
+              },
+            },
+          },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      const clientJavaScript = await readAllClientJavaScript(root);
+      expect(clientJavaScript).toContain("user-define-applied");
+      expect(clientJavaScript).toContain("user alias resolved");
+      expect(clientJavaScript).not.toContain("__USER_VITE_FLAG__");
+      expect(
+        await fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
+      ).toContain(".user-vite-title");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toContain('data-user-vite="user-define-applied"');
+          expect(html).toContain("user alias resolved");
+          expect(html).toContain('class="user-vite-title"');
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("serves OpenAPI routes and Markdown alternates beneath the configured basePath", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "api", "health"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "health", "route.ts"),
+        `export function GET() { return Response.json({ ok: true }); }`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "admin"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "admin", "page.tsx"),
+        `export default function Admin() { return <main>admin page</main>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          basePath: "/workspace",
+          images: { provider: "none" },
+          telemetry: false,
+          openapi: { enabled: true, title: "Base Path API" },
+          generateBuildId: () => "production-base-path-openapi-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("<title>Base Path API</title>");
+
+          const spec = await fetch(new URL("/workspace/openapi.json", response.url));
+          expect(spec.status).toBe(200);
+          expect((await spec.json()).paths["/health"].get.operationId).toBe("get_health");
+
+          const page = await fetch(new URL("/workspace/admin", response.url), {
+            headers: { accept: "text/html" },
+          });
+          expect(page.status).toBe(200);
+          expect(page.headers.get("link")).toContain("</workspace/admin.md>");
+          expect(await page.text()).toContain('href="/workspace/admin.md"');
+
+          const markdown = await fetch(new URL("/workspace/admin.md", response.url));
+          expect(markdown.status).toBe(200);
+          expect(await markdown.text()).toContain("admin page");
+        },
+        "/workspace/docs/reference",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("reads server env where the server runs instead of storing it in the build output", async () => {
+    const root = await createProductionFixture();
+    const previous = process.env.FARM_TEST_DATABASE_URL;
+    process.env.FARM_TEST_DATABASE_URL = "postgres://build-time-secret";
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import { getEnv } from "@farm.js/core/env";
+
+export default function Page() {
+  return <main data-env={String(getEnv("FARM_TEST_DATABASE_URL"))}>env</main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          env: { server: { FARM_TEST_DATABASE_URL: (value: string | undefined) => value } },
+          generateBuildId: () => "production-runtime-env-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      delete process.env.FARM_TEST_DATABASE_URL;
+
+      expect(
+        await readJavaScriptOutput(path.join(root, ".farm"), [".mjs", ".js", ".cjs", ".json"]),
+      ).not.toContain("build-time-secret");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain('data-env="postgres://rotated-secret"');
+        },
+        "/",
+        undefined,
+        { FARM_TEST_DATABASE_URL: "postgres://rotated-secret" },
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FARM_TEST_DATABASE_URL;
+      else process.env.FARM_TEST_DATABASE_URL = previous;
       await fs.rm(root, { recursive: true, force: true });
     }
   }, 120_000);
@@ -2932,70 +3132,83 @@ export default function PageOwner() { return <section data-page-owner><LiveCount
     }
   }, 180_000);
 
-  it("recovers an incomplete Rolldown client bundle after the parallel SSR build", async () => {
-    const root = await createProductionFixture();
-
-    try {
-      await fs.writeFile(
-        path.join(root, "src", "app", "globals.css"),
-        ".client-output-marker { color: red; }",
-      );
-      await fs.writeFile(
-        path.join(root, "src", "app", "page.tsx"),
-        `
+  async function buildWithIncompleteClientAttempts(root: string, incompleteAttempts: number) {
+    await fs.writeFile(
+      path.join(root, "src", "app", "globals.css"),
+      ".client-output-marker { color: red; }",
+    );
+    await fs.writeFile(
+      path.join(root, "src", "app", "page.tsx"),
+      `
 "use client";
 
 export default function Page() {
   return <main className="client-output-marker">client output retry</main>;
 }
 `.trim(),
-      );
+    );
 
-      const config = await resolveConfig(
-        {
-          root,
-          srcDir: "src",
-          images: { provider: "none" },
-          generateBuildId: () => "client-output-retry-test",
-        },
-        "production",
-      );
-      const productionVite = await loadFarmProductionVite();
-      let clientBuildAttempts = 0;
-      const buildWithIncompleteFirstClient = (async (inlineConfig: any) => {
-        if (!inlineConfig.build?.ssr) {
-          clientBuildAttempts++;
-          if (clientBuildAttempts <= 2) {
-            const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
-            await fs.mkdir(outputDir, { recursive: true });
-            await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
-            return { output: [] };
-          }
-        }
-
-        return productionVite.build(inlineConfig);
-      }) as FarmProductionViteRuntime["build"];
-      const retryingProductionVite: FarmProductionViteRuntime = {
-        ...productionVite,
-        build: buildWithIncompleteFirstClient,
-        builder: "rolldown",
-      };
-
-      await build(config, {
+    const config = await resolveConfig(
+      {
         root,
-        preset: "node-server",
-        productionVite: retryingProductionVite,
-      });
+        srcDir: "src",
+        images: { provider: "none" },
+        generateBuildId: () => "client-output-retry-test",
+      },
+      "production",
+    );
+    const productionVite = await loadFarmProductionVite();
+    let clientBuildAttempts = 0;
+    const buildWithIncompleteClient = (async (inlineConfig: any) => {
+      if (!inlineConfig.build?.ssr) {
+        clientBuildAttempts++;
+        if (clientBuildAttempts <= incompleteAttempts) {
+          const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
+          await fs.mkdir(outputDir, { recursive: true });
+          await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
+          return { output: [] };
+        }
+      }
 
-      // The second Rolldown attempt is deliberately incomplete too. The
-      // production build must recover through the compatibility Rollup path.
-      expect(clientBuildAttempts).toBe(2);
+      return productionVite.build(inlineConfig);
+    }) as FarmProductionViteRuntime["build"];
+
+    const result = build(config, {
+      root,
+      preset: "node-server",
+      productionVite: { ...productionVite, build: buildWithIncompleteClient },
+    });
+    return { result, attempts: () => clientBuildAttempts };
+  }
+
+  it("recovers an incomplete Rolldown client bundle after the parallel SSR build", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 1);
+      await result;
+
+      expect(attempts()).toBe(2);
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.js"), "utf8"),
       ).resolves.not.toBe("");
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
       ).resolves.toContain(".client-output-marker");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("fails instead of shipping a client bundle that stays incomplete after the retry", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 2);
+      await expect(result).rejects.toThrow(
+        "The client bundle was still incomplete after a sequential rebuild",
+      );
+      expect(attempts()).toBe(2);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -5173,10 +5386,9 @@ export function GET() {
   // Programmatic routes load through a virtual id that ends in the route path
   // (`routes.tsx?farm-route=api:%2Ffeed.xml`). A path ending in a file extension
   // used to make the production transform read the id as an .xml or .json file.
-  it.each(["rolldown", "rollup"] as const)(
+  it.each(["rolldown"] as const)(
     "builds programmatic routes whose path ends in a file extension with %s",
     async (builder) => {
-      if (builder === "rolldown" && !supportsRolldownVite()) return;
       const root = await createProductionFixture();
 
       try {
@@ -5214,7 +5426,7 @@ export default defineRoutes(({ api, page }) => [
         await build(config, {
           root,
           preset: "node-server",
-          productionVite: await loadFarmProductionVite(builder),
+          productionVite: await loadFarmProductionVite(),
         });
 
         const serverDir = path.join(root, ".farm", ".output", "server");

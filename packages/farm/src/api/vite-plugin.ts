@@ -25,6 +25,8 @@ import {
 } from "./route-manager";
 import { matchAPIRouteAtBasePath } from "./runtime";
 import { sendWebResponse } from "../server/response";
+import { resolveFarmRequestURL } from "../server/request";
+import type { FarmRequest } from "../types";
 import { isFarmAPIRouteFileName } from "./route-files";
 import { _withAfterNodeMiddleware } from "../after";
 import { _runWithAPIRequestRuntime } from "./server-context";
@@ -488,8 +490,10 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
               return next();
             }
 
-            // Convert Node request to Web Request
-            const fullUrl = `http://${req.headers.host || "localhost:3000"}${currentUrl}`;
+            // Convert Node request to Web Request. The path comes from req.url
+            // alone, as it does for middleware: a Host header carrying a path
+            // must not move the dispatch to a route middleware never matched.
+            const fullUrl = resolveFarmRequestURL(req as FarmRequest);
             const headers = new Headers();
             for (const [key, value] of Object.entries(req.headers)) {
               if (value) {

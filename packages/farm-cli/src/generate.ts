@@ -14,18 +14,20 @@ import {
   renderSqlSchemaFile,
   resolveConfig,
   toCamelCase,
-  type CollectedSchemaModel,
-  type FarmSchema,
-  type FarmSchemaExtension,
-  type FarmSchemaReference,
-  type ResolvedSchemaField,
+} from "@farm.js/core/internal/cli-runtime";
+import type {
+  CollectedSchemaModel,
+  FarmSchema,
+  FarmSchemaExtension,
+  FarmSchemaReference,
+  ResolvedSchemaField,
 } from "@farm.js/core";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // Kept exported here: this is where it has always been part of the cli surface.
-export { escapeSqlString } from "@farm.js/core";
+export { escapeSqlString } from "@farm.js/core/internal/cli-runtime";
 
 export type GenerateFarmSchemaTarget =
   | "prisma"
@@ -167,7 +169,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
     throw new Error("No Farm config found. Please create farm.config.ts or config.ts.");
   }
 
-  const resolvedConfig = await resolveConfig({ root, ...userConfig }, "development");
+  const resolvedConfig = await resolveConfig({ ...userConfig, root }, "development");
   const extraRoutes = [
     ...(resolvedConfig.openapi?.enabled && resolvedConfig.openapi.route
       ? [resolvedConfig.openapi.route]

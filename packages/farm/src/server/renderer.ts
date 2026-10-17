@@ -14,7 +14,7 @@ import type {
 } from "../types";
 import type { MatchedRouteSlot, RouteManager } from "../routing/route-manager";
 import { logger, toViteModuleId } from "../utils";
-import { collectDevStylesheetUrls } from "./dev-styles";
+import { collectDevStylesheetUrls, resolveDevGlobalStylesheetHref } from "./dev-styles";
 import {
   composeFarmFullDocument,
   extractFarmFullDocument,
@@ -282,20 +282,6 @@ function warnSuppressedAsyncHydrationOnce(modulePath: string, reason?: string): 
 // (which composes the document correctly) on every subsequent request.
 const fullDocumentRoutes = new Set<string>();
 
-let warnedFullDocumentLayout = false;
-
-function warnFarmFullDocumentLayout(): void {
-  if (warnedFullDocumentLayout) return;
-  warnedFullDocumentLayout = true;
-  logger.warn(
-    `A root layout returned a full <html> document. Farm.js owns the document ` +
-      `shell, so a layout should return a fragment (its children) — like the docs ` +
-      `example — and let the framework provide <html>/<head>/<body>. The document ` +
-      `has been composed into the response, but returning a fragment avoids the ` +
-      `ambiguity and keeps dev and production identical.`,
-  );
-}
-
 function hasRequestHeader(req: FarmRequest, name: string): boolean {
   const value = req.headers[name.toLowerCase()];
   return Array.isArray(value) ? value.length > 0 : Boolean(value);
@@ -390,9 +376,11 @@ export function createPreHydrationClickQueueScript(): string {
   // be reproduced against the same target. A pointerdown or a focusin is only
   // OBSERVED: it starts hydration early and native behavior proceeds, so
   // typing into a field or toggling a checkbox is never swallowed. The event
-  // set here must match FARM_ISLAND_ACTIVATION_EVENTS.
+  // set here must match FARM_ISLAND_ACTIVATION_EVENTS. A repeat of an already
+  // held target is still prevented but queued once, so a second submit never
+  // goes native ahead of the replay.
   const selector = JSON.stringify(FARM_ISLAND_REPLAYABLE_SELECTOR);
-  return `<script>(function(){if(window.__FARM_PREHYDRATION_CLICK_QUEUE__)return;var queue=[];window.__FARM_PREHYDRATION_CLICK_QUEUE__=queue;window.__FARM_HYDRATED__=false;document.documentElement.dataset.farmHydrated="false";function isModified(event){return !!(event.metaKey||event.altKey||event.ctrlKey||event.shiftKey)}function inHydrated(node){return !!(node&&node.closest&&node.closest('[data-farm-island-hydrated="true"]'))}function closestQueuedTarget(target){while(target&&target!==document.documentElement){if(target.matches&&target.matches(${selector}))return target;target=target.parentElement}return null}function announce(target,kind){document.dispatchEvent(new CustomEvent("farm:island-interaction",{detail:{target:target,kind:kind||null}}))}function hold(event,target,kind){if(queue.some(function(item){return item.target===target}))return;queue.push({target:target,kind:kind,createdAt:Date.now()});announce(target,kind);event.preventDefault();event.stopImmediatePropagation()}document.addEventListener("click",function(event){if(window.__FARM_HYDRATED__)return;if(event.defaultPrevented||event.button!==0||isModified(event))return;var target=closestQueuedTarget(event.target);if(!target||target.closest&&target.closest("a[href]")||inHydrated(target))return;hold(event,target,"click")},true);document.addEventListener("submit",function(event){if(window.__FARM_HYDRATED__)return;if(event.defaultPrevented)return;var form=event.target;if(!form||form.nodeName!=="FORM"||inHydrated(form))return;hold(event,form,"submit")},true);function observe(event){if(window.__FARM_HYDRATED__)return;var target=event.target;if(!(target&&target.closest)||inHydrated(target))return;announce(target,null)}document.addEventListener("pointerdown",observe,true);document.addEventListener("focusin",observe,true);})();</script>`;
+  return `<script>(function(){if(window.__FARM_PREHYDRATION_CLICK_QUEUE__)return;var queue=[];window.__FARM_PREHYDRATION_CLICK_QUEUE__=queue;window.__FARM_HYDRATED__=false;document.documentElement.dataset.farmHydrated="false";function isModified(event){return !!(event.metaKey||event.altKey||event.ctrlKey||event.shiftKey)}function inHydrated(node){return !!(node&&node.closest&&node.closest('[data-farm-island-hydrated="true"]'))}function closestQueuedTarget(target){while(target&&target!==document.documentElement){if(target.matches&&target.matches(${selector}))return target;target=target.parentElement}return null}function announce(target,kind){document.dispatchEvent(new CustomEvent("farm:island-interaction",{detail:{target:target,kind:kind||null}}))}function hold(event,target,kind){if(!queue.some(function(item){return item.target===target})){queue.push({target:target,kind:kind,createdAt:Date.now()});announce(target,kind)}event.preventDefault();event.stopImmediatePropagation()}document.addEventListener("click",function(event){if(window.__FARM_HYDRATED__)return;if(event.defaultPrevented||event.button!==0||isModified(event))return;var target=closestQueuedTarget(event.target);if(!target||target.closest&&target.closest("a[href]")||inHydrated(target))return;hold(event,target,"click")},true);document.addEventListener("submit",function(event){if(window.__FARM_HYDRATED__)return;if(event.defaultPrevented)return;var form=event.target;if(!form||form.nodeName!=="FORM"||inHydrated(form))return;hold(event,form,"submit")},true);function observe(event){if(window.__FARM_HYDRATED__)return;var target=event.target;if(!(target&&target.closest)||inHydrated(target))return;announce(target,null)}document.addEventListener("pointerdown",observe,true);document.addEventListener("focusin",observe,true);})();</script>`;
 }
 
 function createDocumentFooter(options: {
@@ -648,12 +636,35 @@ export class ServerRenderer {
     );
   }
 
+  /// The app's `<srcDir>/app/globals.css`, linked only when it exists, as the
+  /// production build imports it only when it exists. An app without one gets
+  /// no stylesheet link rather than a failing request.
+  private devGlobalStylesheetHref(): string | null {
+    return (
+      resolveDevGlobalStylesheetHref(this.config.root || process.cwd(), this.config.srcDir) ?? null
+    );
+  }
+
+  private devGlobalStylesheetLink(selfClosing = false): string {
+    const href = this.devGlobalStylesheetHref();
+    if (!href) return "";
+    return `<link rel="stylesheet" href="${escapeHtmlAttribute(href)}"${selfClosing ? " /" : ""}>`;
+  }
+
+  private devGlobalStylesheetAssets(): Array<{ tag: string; attrs: Record<string, string> }> {
+    const href = this.devGlobalStylesheetHref();
+    return href ? [{ tag: "link", attrs: { rel: "stylesheet", href } }] : [];
+  }
+
   /// Stylesheets the app imported through JS (fontsource packages, component
   /// CSS) that the document must link alongside globals.css — see #658.
   private collectDevStyleHrefs(): string[] {
     const graph = this.viteServer?.moduleGraph;
     if (!graph) return [];
-    return collectDevStylesheetUrls(graph.idToModuleMap.values());
+    return collectDevStylesheetUrls(
+      graph.idToModuleMap.values(),
+      this.devGlobalStylesheetHref() ?? undefined,
+    );
   }
 
   private collectDevStyleLinks(): string[] {
@@ -739,7 +750,10 @@ export class ServerRenderer {
       const rendered = await this.rendererRuntime.renderToStringWithHead(element);
       return { html: rendered.html, head: rendered.head || "" };
     }
-    return { html: await this.rendererRuntime.renderToString(element), head: "" };
+    // Render to completion through the streaming renderer where there is one, so a
+    // component that suspends (data hooks, lazy imports) resolves instead of failing
+    // React's synchronous renderToString. Production buffers the same stream.
+    return { html: await this.renderElementToCompleteHTML(element), head: "" };
   }
 
   /**
@@ -2588,10 +2602,7 @@ export class ServerRenderer {
         layouts: {} as Record<string, any>,
         slots: [] as Array<Record<string, any>>,
         sharedAssets: [
-          {
-            tag: "link",
-            attrs: { rel: "stylesheet", href: "/src/app/globals.css" },
-          },
+          ...this.devGlobalStylesheetAssets(),
           ...this.collectDevStyleHrefs().map((href) => ({
             tag: "link",
             attrs: { rel: "stylesheet", href },
@@ -2709,7 +2720,6 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
       const fullDocument = extractFarmFullDocument(content);
       let html: string;
       if (fullDocument) {
-        warnFarmFullDocumentLayout();
         const shouldReplaceLayoutTitle = hasExplicitTitle || rendererHasTitle;
         const documentHtml = shouldReplaceLayoutTitle
           ? removeFarmDocumentTitles(fullDocument)
@@ -2718,6 +2728,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
           ? removeFarmDocumentTitles(rendererHead)
           : rendererHead;
         html = composeFarmFullDocument(documentHtml, {
+          fallbackIcon: !hasFavicon,
           htmlAttributes: `${
             i18nSnapshot
               ? ` lang="${escapeHtmlAttribute(i18nSnapshot.locale)}" dir="${escapeHtmlAttribute(i18nSnapshot.direction)}"`
@@ -2735,7 +2746,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
             alternateTags,
             effectiveRendererHead,
             renderFarmFontDevHead(this.config.root || process.cwd()),
-            `<link rel="stylesheet" href="/src/app/globals.css">`,
+            this.devGlobalStylesheetLink(),
             ...this.collectDevStyleLinks(),
             `<script type="module" src="/@vite/client"></script>`,
             rendererHydrationScript,
@@ -2760,7 +2771,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
   ${hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   ${documentTitleTag}${metaTags}${alternateTags}${rendererHead ? `\n  ${rendererHead}` : ""}
   ${renderFarmFontDevHead(this.config.root || process.cwd())}
-  <link rel="stylesheet" href="/src/app/globals.css">${this.collectDevStyleLinks()
+  ${this.devGlobalStylesheetLink()}${this.collectDevStyleLinks()
     .map((l) => `\n  ${l}`)
     .join("")}
   <script type="module" src="/@vite/client"></script>
@@ -2873,10 +2884,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
         layouts: {} as Record<string, any>,
         slots: [] as Array<Record<string, any>>,
         sharedAssets: [
-          {
-            tag: "link",
-            attrs: { rel: "stylesheet", href: "/src/app/globals.css" },
-          },
+          ...this.devGlobalStylesheetAssets(),
           ...this.collectDevStyleHrefs().map((href) => ({
             tag: "link",
             attrs: { rel: "stylesheet", href },
@@ -2999,6 +3007,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
           ? element
           : this.rendererRuntime.createElement("div", { style: { display: "contents" } }, element);
       const devStyleLinks = this.collectDevStyleLinks();
+      const globalStylesheetLink = this.devGlobalStylesheetLink(true);
       const cspNonce = this.getCspNonce(req);
       const secureDocumentHTML = (html: string) =>
         cspNonce ? addFarmCspNonceToScriptTags(html, cspNonce) : html;
@@ -3037,9 +3046,7 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
   ${hasFavicon ? "" : '<link rel="icon" href="data:,">'}
   <title>${title}</title>${metaTags}${i18nAlternateTags}
   ${fontHead}
-  <link rel="stylesheet" href="/src/app/globals.css" />${devStyleLinks
-    .map((l) => `\n  ${l}`)
-    .join("")}
+  ${globalStylesheetLink}${devStyleLinks.map((l) => `\n  ${l}`).join("")}
   <script type="module" src="/@vite/client"></script>
   ${propsScript}
   ${hydrationClickQueueScript}
@@ -3060,7 +3067,6 @@ window.__FARM_I18N__ = ${getFarmI18nClientSnapshot() ? serializeInlineValue(getF
               checkedFullDocument = true;
               if (opensFarmFullDocument(chunkText)) {
                 fullDocumentRoutes.add(fullDocumentRouteKey);
-                warnFarmFullDocumentLayout();
               }
             }
             htmlParts.push(chunkText);
@@ -3515,10 +3521,10 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
     // the production build's `hasFullDocument` path.
     const fullDocument = extractFarmFullDocument(content);
     if (fullDocument) {
-      warnFarmFullDocumentLayout();
       return composeFarmFullDocument(
         metadataHead ? removeFarmDocumentTitles(fullDocument) : fullDocument,
         {
+          fallbackIcon: !metadataHead,
           htmlAttributes: `${
             i18nSnapshot
               ? ` lang="${escapeHtmlAttribute(i18nSnapshot.locale)}" dir="${escapeHtmlAttribute(i18nSnapshot.direction)}"`
@@ -3534,7 +3540,7 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
             metadataHead,
             alternateLinks,
             fontHead,
-            `<link rel="stylesheet" href="/src/app/globals.css" />`,
+            this.devGlobalStylesheetLink(true),
             ...this.collectDevStyleLinks(),
             `<script type="module" src="/@vite/client"></script>`,
             rendererHydrationScript,
@@ -3558,7 +3564,7 @@ ${i18nSnapshot ? `window.__FARM_I18N__ = ${serializeInlineValue(i18nSnapshot)};`
   <meta name="farm-deployment-id" content="${escapeHtmlAttribute(this.getDeploymentId())}">
   ${metadataHead ?? '<link rel="icon" href="data:,">\n  <title>Farm.js App</title>'}${alternateLinks}
   ${fontHead}
-  <link rel="stylesheet" href="/src/app/globals.css" />${this.collectDevStyleLinks()
+  ${this.devGlobalStylesheetLink(true)}${this.collectDevStyleLinks()
     .map((l) => `\n  ${l}`)
     .join("")}
   <script type="module" src="/@vite/client"></script>

@@ -1,5 +1,5 @@
 import { definePlugin } from "@farm.js/core/plugin";
-import stylexUnplugin, { type UserOptions } from "@stylexjs/unplugin";
+import type { UserOptions } from "@stylexjs/unplugin";
 import { resolveStylexOptions, type StyleXOptions } from "./config.js";
 import { injectStylexDevelopmentAssets, stripStylexDevelopmentBasePath } from "./html.js";
 
@@ -32,23 +32,25 @@ export function stylex(options: StyleXOptions = {}) {
         dev: context.isDev,
         devMode: context.isDev ? "full" : "off",
       };
-      const vitePlugin = createStylexVitePlugin(compilerOptions, context.isDev);
       const basePathPlugin =
         context.isDev && hasBasePath(configuredBasePath)
           ? createStylexBasePathVitePlugin(configuredBasePath)
           : undefined;
 
-      return {
+      // Loaded here rather than at the top: the server bundle includes this plugin for
+      // its render hook, and a static import would load the compiler (and lightningcss,
+      // which a deployed server doesn't have) every time the server starts.
+      return import("@stylexjs/unplugin").then(({ default: stylexUnplugin }) => ({
         ...config,
         vite: {
           ...config.vite,
           plugins: [
             ...(basePathPlugin ? [basePathPlugin] : []),
-            vitePlugin,
+            createStylexVitePlugin(stylexUnplugin, compilerOptions, context.isDev),
             ...(config.vite?.plugins ?? []),
           ],
         },
-      };
+      }));
     },
 
     render: {
@@ -93,6 +95,7 @@ function createStylexBasePathVitePlugin(basePath: string) {
 }
 
 function createStylexVitePlugin(
+  stylexUnplugin: typeof import("@stylexjs/unplugin").default,
   options: Partial<UserOptions> & { externalPackages: string[] },
   development: boolean,
 ): unknown {

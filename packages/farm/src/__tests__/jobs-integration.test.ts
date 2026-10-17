@@ -47,7 +47,9 @@ describe("jobs integration", () => {
     }>;
     const triggerRoute = routes.find((route) => route.path.endsWith("/trigger"));
 
-    for (const body of ["{", "null", "[]", '"recipient"']) {
+    // A bare array is a valid payload for array-input tasks; see
+    // jobs-trigger-payload.test.ts.
+    for (const body of ["{", "null", '"recipient"']) {
       const response = await triggerRoute!.handler(
         new Request("https://farmjs.dev/api/jobs/send-email/trigger", {
           method: "POST",

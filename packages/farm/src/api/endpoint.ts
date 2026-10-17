@@ -513,7 +513,9 @@ export function createEndpoint(
   // Store the path and type information on the endpoint for later access
   // Empty/undefined path means it will be inferred from file location by the API plugin
   endpoint.__path = path || undefined;
-  endpoint.__method = options.method || "GET";
+  // An explicit path is mounted as GET when no method is given. A path-inferred endpoint
+  // takes its method from the route file's export name, which the endpoint can't know.
+  endpoint.__method = options.method || (path ? "GET" : undefined);
   endpoint.__autoPath = !path; // Flag to indicate path should be auto-inferred
   endpoint.__handler = wrappedHandler; // Used by Farm's route runtime.
   endpoint.__farmInvoke = (ctx: EndpointMiddlewareContext<any, any, any, any>) =>

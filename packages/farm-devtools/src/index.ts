@@ -1,3 +1,4 @@
+import { resolveFarmDevtoolsConfig } from "@farm.js/core";
 import { definePlugin, type FarmPlugin } from "@farm.js/core/plugin";
 import type { Plugin } from "vite";
 import type { DevtoolsOptions } from "./types.js";
@@ -47,22 +48,24 @@ export function devtools(options: DevtoolsOptions = {}): FarmPlugin {
           "[farm:devtools] Remove devtools: false (or enabled: false) when using the devtools() plugin",
         );
       }
+      const devtoolsConfig = {
+        ...(typeof config.devtools === "object" ? config.devtools : {}),
+        enabled: true,
+        ...(options.shortcut === undefined ? {} : { shortcut: options.shortcut }),
+      };
+      const { shortcut } = resolveFarmDevtoolsConfig(devtoolsConfig);
       const vitePlugin: Plugin = {
         name: "farm:devtools-ui",
         enforce: "pre",
         apply: "serve",
         async configureServer(server) {
           const { installDevtoolsServer } = await import("./server.js");
-          installDevtoolsServer(server, { inspect });
+          installDevtoolsServer(server, { inspect, shortcut });
         },
       };
       return {
         ...config,
-        devtools: {
-          ...(typeof config.devtools === "object" ? config.devtools : {}),
-          enabled: true,
-          ...(options.shortcut === undefined ? {} : { shortcut: options.shortcut }),
-        },
+        devtools: devtoolsConfig,
         vite: { ...config.vite, plugins: [vitePlugin, ...(config.vite?.plugins ?? [])] },
       };
     },

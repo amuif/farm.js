@@ -21,8 +21,15 @@ import type {
   FarmMCPTool,
   FarmMCPStandaloneTool,
   FarmMCPExecuteContext,
+  FarmMCPServerFunction,
 } from "@farm.js/core";
-import { parseRouteSchema } from "@farm.js/core/api/runtime";
+import { isEndpointFailure, parseRouteSchema } from "@farm.js/core/api/runtime";
+import {
+  _describeServerFunction,
+  _invokeServerFunction,
+  isServerFnFailure,
+  type ServerFunctionDescriptor,
+} from "@farm.js/core/server-fn";
 import { emitFarmEvent } from "@farm.js/core/observability";
 import { toJSONSchema } from "zod";
 
@@ -62,6 +69,7 @@ type BoundTool = BoundToolBase &
         kind: "standalone";
         definition: FarmMCPStandaloneTool<RouteSchema, unknown, RouteSchema | undefined>;
       }
+    | { kind: "serverFunction"; definition: unknown }
   );
 
 export type { FarmMCPStandaloneTool, FarmMCPExecuteContext } from "@farm.js/core";
@@ -116,7 +124,7 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
         ...tool.annotations,
         ...(tool.kind === "endpoint"
           ? { kind: "endpoint" as const, method: tool.route.method, path: tool.route.path }
-          : { kind: "standalone" as const }),
+          : { kind: tool.kind }),
       }),
     ),
   );
@@ -161,13 +169,17 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
             const result =
               tool.kind === "endpoint"
                 ? await invokeTool(tool, input as JSONRecord, request, context.mcpReq.signal)
-                : !request || !authorization
-                  ? toolError("Missing MCP authorization context.")
-                  : await invokeStandaloneTool(tool, input, {
-                      request,
-                      authorization,
-                      signal: AbortSignal.any([request.signal, context.mcpReq.signal]),
-                    });
+                : tool.kind === "serverFunction"
+                  ? !request
+                    ? toolError("Missing MCP request context.")
+                    : await invokeServerFunctionTool(tool, input, request, context.mcpReq.signal)
+                  : !request || !authorization
+                    ? toolError("Missing MCP authorization context.")
+                    : await invokeStandaloneTool(tool, input, {
+                        request,
+                        authorization,
+                        signal: AbortSignal.any([request.signal, context.mcpReq.signal]),
+                      });
             outcome = "isError" in result && result.isError ? "error" : "success";
             return result;
           } finally {
@@ -235,6 +247,8 @@ async function invokeTool(
   sourceRequest: Request | undefined,
   signal: AbortSignal,
 ) {
+  let request: Request;
+  let routeParams: Record<string, string | string[]>;
   try {
     const params = asRecord(input.params, "params");
     const pathname = interpolatePath(tool.route.path, params);
@@ -248,18 +262,24 @@ async function invokeTool(
     const body = input.body === undefined ? undefined : JSON.stringify(input.body);
     if (body !== undefined) headers.set("content-type", "application/json");
 
-    const request = new Request(url, {
+    request = new Request(url, {
       method: tool.route.method,
       headers,
       body: tool.route.method === "GET" || tool.route.method === "HEAD" ? undefined : body,
       signal,
     });
-    const routeParams = Object.fromEntries(
+    routeParams = Object.fromEntries(
       Object.entries(params).map(([key, value]) => [
         key,
         Array.isArray(value) ? value.map(String) : String(value),
       ]),
     );
+  } catch (error) {
+    // Mapping errors describe the caller's own arguments.
+    return toolError(error instanceof Error ? error.message : "Invalid tool arguments.");
+  }
+
+  try {
     const response = await tool.route.invoke(request, routeParams);
     const mediaType = response.headers.get("content-type")?.split(";", 1)[0].trim() ?? "";
     if (
@@ -280,7 +300,7 @@ async function invokeTool(
       structuredContent: { result },
     };
   } catch (error) {
-    return toolError(error instanceof Error ? error.message : "Farm API tool invocation failed.");
+    return unexpectedToolError(tool, error, signal, "Farm API tool invocation failed.");
   }
 }
 
@@ -289,13 +309,22 @@ async function invokeStandaloneTool(
   input: unknown,
   context: FarmMCPExecuteContext,
 ) {
+  if (context.signal.aborted) return toolError("MCP tool call was cancelled.");
+  let parsed: unknown;
   try {
-    context.signal.throwIfAborted();
     // JSON Schema advertises the wire shape; the original validator owns async
     // refinements, defaults, and transforms, just as it does for API endpoints.
-    const parsed = await parseRouteSchema(tool.definition.inputSchema, input);
+    parsed = await parseRouteSchema(tool.definition.inputSchema, input);
+  } catch (error) {
+    // Validator issues describe the caller's own arguments. An exception thrown inside a
+    // refinement or transform is an application error and can carry private data.
+    if (isValidationError(error)) return toolError(error.message);
+    return unexpectedToolError(tool, error, context.signal, "Farm MCP tool execution failed.");
+  }
+  let result: unknown;
+  try {
     context.signal.throwIfAborted();
-    let result = await tool.definition.execute(parsed, context);
+    result = await tool.definition.execute(parsed, context);
     context.signal.throwIfAborted();
     if (tool.definition.outputSchema !== undefined) {
       try {
@@ -309,32 +338,128 @@ async function invokeStandaloneTool(
       }
       context.signal.throwIfAborted();
     }
-    const text = JSON.stringify(result, (_key, value) => {
-      if (
-        typeof value === "bigint" ||
-        typeof value === "function" ||
-        typeof value === "symbol" ||
-        (typeof value === "number" && !Number.isFinite(value)) ||
-        (value !== null &&
-          typeof value === "object" &&
-          !Array.isArray(value) &&
-          Object.getPrototypeOf(value) !== Object.prototype &&
-          Object.getPrototypeOf(value) !== null)
-      )
-        throw new TypeError(
-          "Standalone MCP tools must return JSON-serializable data, not a Response or stream.",
-        );
-      return value;
-    });
-    if (text === undefined)
-      throw new TypeError("Standalone MCP tools must return JSON-serializable data.");
-    return {
-      content: [{ type: "text" as const, text }],
-      structuredContent: { result: JSON.parse(text) },
-    };
+  } catch (error) {
+    // A declared failure is public by design, the same as from a server function tool.
+    if (isEndpointFailure(error) || isServerFnFailure(error)) {
+      const { code, status, message, data } = error;
+      return toolError(JSON.stringify({ error: { code, status, message, data } }));
+    }
+    return unexpectedToolError(tool, error, context.signal, "Farm MCP tool execution failed.");
+  }
+  try {
+    return toJSONToolResult(result, "Standalone MCP tools");
   } catch (error) {
     return toolError(error instanceof Error ? error.message : "Farm MCP tool execution failed.");
   }
+}
+
+function isValidationError(error: unknown): error is Error {
+  return error instanceof Error && Array.isArray((error as { issues?: unknown }).issues);
+}
+
+/** Undeclared errors can carry private data: log them and return a generic message. */
+function unexpectedToolError(
+  tool: BoundTool,
+  error: unknown,
+  signal: AbortSignal,
+  message: string,
+) {
+  if (signal.aborted) return toolError("MCP tool call was cancelled.");
+  console.error(`[Farm.js] MCP tool "${tool.config.name}" failed:`, error);
+  return toolError(message);
+}
+
+/** Serializes a tool's return value, rejecting anything that is not plain JSON data. */
+function toJSONToolResult(result: unknown, owner: string) {
+  const text = JSON.stringify(result, (_key, value) => {
+    if (
+      typeof value === "bigint" ||
+      typeof value === "function" ||
+      typeof value === "symbol" ||
+      (typeof value === "number" && !Number.isFinite(value)) ||
+      (value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        Object.getPrototypeOf(value) !== Object.prototype &&
+        Object.getPrototypeOf(value) !== null)
+    )
+      throw new TypeError(`${owner} must return JSON-serializable data, not a Response or stream.`);
+    return value;
+  });
+  if (text === undefined) throw new TypeError(`${owner} must return JSON-serializable data.`);
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent: { result: JSON.parse(text) },
+  };
+}
+
+async function invokeServerFunctionTool(
+  tool: BoundTool & { kind: "serverFunction" },
+  input: unknown,
+  request: Request,
+  signal: AbortSignal,
+) {
+  if (signal.aborted) return toolError("MCP tool call was cancelled.");
+  // The function's own pipeline validates input, runs middleware and checks output once.
+  const outcome = await _invokeServerFunction(tool.definition, input, request);
+  if (signal.aborted) return toolError("MCP tool call was cancelled.");
+  if (outcome.ok) {
+    try {
+      return toJSONToolResult(outcome.data, "Server functions exposed as MCP tools");
+    } catch (error) {
+      return toolError(error instanceof Error ? error.message : "Farm MCP tool execution failed.");
+    }
+  }
+  switch (outcome.reason) {
+    case "input":
+      // Validator issues describe the caller's own arguments.
+      return toolError(
+        outcome.error instanceof Error ? outcome.error.message : "Invalid tool arguments.",
+      );
+    case "failure": {
+      const { code, status, message, data } = outcome.failure;
+      return toolError(JSON.stringify({ error: { code, status, message, data } }));
+    }
+    case "redirect":
+      return toolError(JSON.stringify({ redirect: { url: outcome.url, status: outcome.status } }));
+    default:
+      // Undeclared errors can carry private data: log them, return a generic message.
+      console.error(
+        `[Farm.js] MCP server function tool "${tool.config.name}" failed:`,
+        outcome.error,
+      );
+      return toolError("Server function failed.");
+  }
+}
+
+function isServerFunction(value: unknown): value is FarmMCPServerFunction {
+  return _describeServerFunction(value) !== undefined;
+}
+
+function bindServerFunction(definition: unknown, described: ServerFunctionDescriptor): BoundTool {
+  const name = described.mcp?.name;
+  if (typeof name !== "string") {
+    throw new TypeError(
+      'Server functions in mcp.tools need a tool name: createServerFn({ mcp: { name: "..." }, ... }).',
+    );
+  }
+  const config = { ...described.mcp, name };
+  return {
+    kind: "serverFunction",
+    key: `server function ${name}`,
+    definition,
+    config,
+    inputSchema:
+      described.input === undefined
+        ? { type: "object", properties: {}, additionalProperties: false }
+        : requireObjectSchema(
+            toToolJSONSchema(described.input as RouteSchema, "input"),
+            `server function "${name}" input`,
+          ),
+    outputSchema: createToolOutputSchema(described.output as RouteSchema | undefined),
+    // Queries only read; actions get the conservative defaults of a standalone tool.
+    annotations: createAnnotations(described.kind === "query" ? "GET" : undefined, config),
+  };
 }
 
 function bindTools(api: PluginLocalAPI, options: NormalizedOptions): BoundTool[] {
@@ -399,6 +524,10 @@ function bindTools(api: PluginLocalAPI, options: NormalizedOptions): BoundTool[]
           outputSchema: createToolOutputSchema(definition.outputSchema),
           annotations: createAnnotations(undefined, config),
         });
+        continue;
+      }
+      if (isServerFunction(definition)) {
+        selected.push(bindServerFunction(definition, _describeServerFunction(definition)!));
         continue;
       }
       const { endpoint, ...metadata } =

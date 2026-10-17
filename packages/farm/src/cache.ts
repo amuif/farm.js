@@ -249,7 +249,12 @@ interface FarmCacheStaleEntry {
 
 export class FarmDataCache {
   private entries = new Map<string, InternalFarmCacheEntry>();
-  private inflight = new Map<string, Promise<unknown>>();
+  private inflight = new Map<
+    string,
+    { promise: Promise<unknown>; tags: readonly string[]; startVersion: number }
+  >();
+  /** Local entries by tag, so tag counts and pruning never scan unrelated entries. */
+  private entriesByTag = new Map<string, Set<InternalFarmCacheEntry>>();
   private invalidatedTagVersions = new Map<string, number>();
   private activeGenerations = new Set<{ tags: ReadonlySet<string>; createdVersion: number }>();
   private version = 0;
@@ -272,6 +277,7 @@ export class FarmDataCache {
   configure(config: FarmCacheUserConfig = {}): void {
     this.generation++;
     this.entries.clear();
+    this.entriesByTag.clear();
     this.inflight.clear();
     this.invalidatedTagVersions.clear();
     this.activeGenerations.clear();
@@ -483,15 +489,13 @@ export class FarmDataCache {
   }
 
   delete(key: string): boolean {
-    const deleted = this.entries.delete(key);
-    if (deleted) this.pruneInvalidatedTagVersions();
+    const deleted = this.deleteLocalEntry(key);
     emitFarmEvent({ type: "cache.delete", key, deleted });
     return deleted;
   }
 
   async deleteAsync(key: string): Promise<boolean> {
-    const deleted = this.entries.delete(key);
-    if (deleted) this.pruneInvalidatedTagVersions();
+    const deleted = this.deleteLocalEntry(key);
     if (this.adapter) {
       await this.adapter.delete(this.createAdapterKey(key));
     }
@@ -503,6 +507,7 @@ export class FarmDataCache {
     const count = this.entries.size;
     this.generation++;
     this.entries.clear();
+    this.entriesByTag.clear();
     this.inflight.clear();
     this.invalidatedTagVersions.clear();
     this.activeGenerations.clear();
@@ -624,27 +629,37 @@ export class FarmDataCache {
       return cached.value;
     }
 
-    const inflight = this.inflight.get(key) as Promise<T> | undefined;
-    if (inflight) {
+    const inflight = this.inflight.get(key);
+    if (inflight && !this.wasInvalidatedSince(inflight.tags, inflight.startVersion)) {
       emitFarmEvent({ type: "cache.dedupe", key });
-      return inflight;
+      return inflight.promise as Promise<T>;
     }
 
     const tags = Array.from(normalizeCacheOptionsTags(options));
     const generation = this.generation;
+    const startVersion = this.version;
     const promise = this.fillCacheEntry(key, producer, options, tags, generation)
       .catch((error) => {
         emitFarmEvent({ type: "cache.error", key, operation: "set", error });
         throw error;
       })
       .finally(() => {
-        if (this.inflight.get(key) === promise) {
+        if (this.inflight.get(key)?.promise === promise) {
           this.inflight.delete(key);
         }
       });
 
-    this.inflight.set(key, promise);
+    this.inflight.set(key, { promise, tags, startVersion });
     return promise;
+  }
+
+  /** A fill that started before one of its tags was invalidated cannot satisfy later readers. */
+  private wasInvalidatedSince(tags: readonly string[], version: number): boolean {
+    for (const tag of tags) {
+      const invalidatedVersion = this.invalidatedTagVersions.get(tag);
+      if (invalidatedVersion !== undefined && invalidatedVersion > version) return true;
+    }
+    return false;
   }
 
   private async fillCacheEntry<T>(
@@ -696,7 +711,7 @@ export class FarmDataCache {
       return value;
     } finally {
       this.activeGenerations.delete(activeGeneration);
-      this.pruneInvalidatedTagVersions();
+      this.pruneInvalidatedTagVersions(activeGeneration.tags);
       if (leaseToken && adapter?.releaseLease) {
         try {
           await adapter.releaseLease(leaseKey, leaseToken);
@@ -749,19 +764,9 @@ export class FarmDataCache {
     return undefined;
   }
 
-  private countEntriesForTag(tag: string): number {
+  private countEntriesForTags(tags: readonly [string, ...string[]]): number {
     let count = 0;
-    for (const entry of this.entries.values()) {
-      if (entry.tags.has(tag)) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  private countEntriesForTags(tags: readonly string[]): number {
-    let count = 0;
-    for (const entry of this.entries.values()) {
+    for (const entry of this.entriesByTag.get(tags[0]) ?? []) {
       if (tags.every((tag) => entry.tags.has(tag))) {
         count++;
       }
@@ -770,10 +775,10 @@ export class FarmDataCache {
   }
 
   private invalidateTag(normalizedTag: string): number {
-    const count = this.countEntriesForTag(normalizedTag);
+    const count = this.entriesByTag.get(normalizedTag)?.size ?? 0;
     this.invalidatedTagVersions.delete(normalizedTag);
     this.invalidatedTagVersions.set(normalizedTag, ++this.version);
-    this.pruneInvalidatedTagVersions();
+    this.pruneInvalidatedTagVersions([normalizedTag]);
     return count;
   }
 
@@ -807,23 +812,56 @@ export class FarmDataCache {
   }
 
   private storeLocalEntry(entry: InternalFarmCacheEntry): void {
-    this.entries.delete(entry.key);
+    const removed: InternalFarmCacheEntry[] = [];
+    const replaced = this.detachLocalEntry(entry.key);
+    if (replaced) removed.push(replaced);
     this.entries.set(entry.key, entry);
+    for (const tag of entry.tags) {
+      let tagged = this.entriesByTag.get(tag);
+      if (!tagged) this.entriesByTag.set(tag, (tagged = new Set()));
+      tagged.add(entry);
+    }
 
     while (this.entries.size > this.maxEntries) {
       const oldestKey = this.entries.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
-      this.entries.delete(oldestKey);
+      removed.push(this.detachLocalEntry(oldestKey)!);
     }
-    this.pruneInvalidatedTagVersions();
+    // Only tags of entries that left the cache can lose their last stale dependent.
+    for (const removedEntry of removed) this.pruneInvalidatedTagVersions(removedEntry.tags);
   }
 
-  private pruneInvalidatedTagVersions(): void {
-    // Stop as soon as a dependent entry or fill is found; do not materialize
-    // the entire cache for each invalidated tag on the write path.
-    tags: for (const [tag, invalidatedVersion] of this.invalidatedTagVersions) {
-      for (const entry of this.entries.values()) {
-        if (entry.tags.has(tag) && entry.createdVersion < invalidatedVersion) continue tags;
+  private deleteLocalEntry(key: string): boolean {
+    const entry = this.detachLocalEntry(key);
+    if (!entry) return false;
+    this.pruneInvalidatedTagVersions(entry.tags);
+    return true;
+  }
+
+  private detachLocalEntry(key: string): InternalFarmCacheEntry | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    this.entries.delete(key);
+    for (const tag of entry.tags) {
+      const tagged = this.entriesByTag.get(tag);
+      if (!tagged) continue;
+      tagged.delete(entry);
+      if (tagged.size === 0) this.entriesByTag.delete(tag);
+    }
+    return entry;
+  }
+
+  /**
+   * Drop invalidation versions that no local entry or active fill can be stale against.
+   * Callers pass only the tags whose dependents just changed, so the cost is bounded by
+   * the entries sharing those tags rather than by the whole cache.
+   */
+  private pruneInvalidatedTagVersions(tags: Iterable<string>): void {
+    tags: for (const tag of tags) {
+      const invalidatedVersion = this.invalidatedTagVersions.get(tag);
+      if (invalidatedVersion === undefined) continue;
+      for (const entry of this.entriesByTag.get(tag) ?? []) {
+        if (entry.createdVersion < invalidatedVersion) continue tags;
       }
       for (const generation of this.activeGenerations) {
         if (generation.tags.has(tag) && generation.createdVersion < invalidatedVersion)

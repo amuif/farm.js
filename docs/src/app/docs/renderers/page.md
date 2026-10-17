@@ -206,8 +206,11 @@ compiler. FARMJS gates integration provider components on this capability.
 
 All official renderers support synchronous plain function components. React and Preact handle them
 through their native element model, while Vue and Solid materialize their returned element tree in
-the adapter. A compile-time renderer such as Svelte also needs its adapter to distinguish a plain
-function from one of its own compiled components, because both are functions at runtime.
+the adapter. Vue and Svelte also need their adapters to distinguish a plain function from one of
+their own components, because both are functions at runtime: a native Vue functional component
+takes `(props, { slots, attrs, emit })` and returns VNodes, and a compiled Svelte component is a
+function too. Their adapters call only the functions FARMJS marked and render every other function
+as a native component, so Vue functional components keep their slots, attrs, and emit.
 
 FARMJS resolves the ambiguity at build time rather than guessing. A provider component in a
 production build must be an importable module reference, so the module's extension answers the

@@ -358,6 +358,88 @@ test("checks beta registry tags only when requested and reports a stale beta", a
   }
 });
 
+test("compares registry versions by precedence across the beta and latest tags", async () => {
+  const root = await createTempProject();
+  const packagePath = path.join(root, "package.json");
+  const signals = [];
+  const runWithDeclared = async (declared) => {
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.dependencies["@farm.js/core"] = declared;
+    await writeFile(packagePath, JSON.stringify(packageJson), "utf8");
+    const report = await runFarmDoctor({
+      root,
+      offline: true,
+      registry: true,
+      fetch: async (_input, init) => {
+        signals.push(init?.signal);
+        return Response.json({
+          "dist-tags": { beta: "0.1.3-beta.0", latest: "0.1.17" },
+          versions: { "0.1.3-beta.0": {}, "0.1.17": {} },
+        });
+      },
+    });
+    return report.checks.find((check) => check.code === "FARM_BETA_STALE");
+  };
+
+  try {
+    assert.equal(await runWithDeclared("0.1.17"), undefined);
+    assert.equal(await runWithDeclared("0.1.18-beta.0"), undefined);
+
+    const stale = await runWithDeclared("0.1.16");
+    assert.equal(stale?.status, "warn");
+    assert.match(stale?.message || "", /declares 0\.1\.16; registry latest is 0\.1\.17/);
+    assert.match(stale?.action || "", /^Run farm upgrade,/);
+
+    assert.ok(signals.length > 0);
+    assert.ok(signals.every((signal) => signal instanceof AbortSignal));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolves unscoped workspace aliases and flow-style workspace packages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-doctor-workspace-alias-"));
+
+  try {
+    await mkdir(path.join(root, "packages/core"), { recursive: true });
+    await mkdir(path.join(root, "packages/bar"), { recursive: true });
+    await mkdir(path.join(root, "src/app"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "doctor-workspace-alias",
+        packageManager: "pnpm@8.12.1",
+        dependencies: { "@farm.js/core": "workspace:*", "bar-alias": "workspace:bar@*" },
+      }),
+    );
+    await writeFile(path.join(root, "pnpm-workspace.yaml"), "packages: ['packages/*']\n");
+    await writeFile(
+      path.join(root, "packages/core/package.json"),
+      JSON.stringify({ name: "@farm.js/core", version: "0.1.0-beta.106" }),
+    );
+    await writeFile(
+      path.join(root, "packages/bar/package.json"),
+      JSON.stringify({ name: "bar", version: "1.0.0" }),
+    );
+    await writeFile(path.join(root, "farm.config.mjs"), "export default {};\n");
+    await writeFile(path.join(root, "src/app/page.tsx"), "export default () => null;\n");
+    await writeFile(
+      path.join(root, "src/app/layout.tsx"),
+      "export default ({ children }) => children;\n",
+    );
+    await generateFarmArtifacts({ root });
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const missing = report.checks.find((check) => check.code === "LOCAL_PACKAGES_MISSING");
+    const resolved = report.checks.find((check) => check.code === "LOCAL_PACKAGES_RESOLVED");
+
+    assert.equal(missing, undefined, missing?.message);
+    assert.match(resolved?.message || "", /@farm\.js\/core, bar-alias/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("reports missing cron routes and ephemeral serverless storage", async () => {
   const root = await createTempProject({
     target: "vercel",

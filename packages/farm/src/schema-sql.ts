@@ -2,6 +2,7 @@ import type { FarmSchema, FarmSchemaReference } from "./schema";
 import { assertNoSchemaListField } from "./schema-capabilities";
 import { isDatabaseEnforcedReference } from "./schema-reference";
 import { resolveSchemaModels } from "./schema-resolve";
+import { fitSqlIndexName } from "./schema-sql-identifiers";
 import type { ResolvedSchemaField, ResolvedSchemaModel } from "./schema-resolve";
 
 export { assertNoSchemaListField } from "./schema-capabilities";
@@ -258,7 +259,7 @@ function collectSchemaIndexes(
     }
 
     definitions.push({
-      name: `${model.modelName}_${field.name}_idx`,
+      name: fitSqlIndexName(dialect, `${model.modelName}_${field.name}_idx`),
       columns: [quoteSqlIdentifier(dialect, field.name)],
       unique: false,
     });
@@ -266,9 +267,11 @@ function collectSchemaIndexes(
 
   for (const constraint of model.model.constraints || []) {
     definitions.push({
-      name:
+      name: fitSqlIndexName(
+        dialect,
         constraint.name ||
-        `${model.modelName}_${constraint.fields.map((fieldKey) => model.model.fields[fieldKey]?.name || fieldKey).join("_")}_${constraint.type}`,
+          `${model.modelName}_${constraint.fields.map((fieldKey) => model.model.fields[fieldKey]?.name || fieldKey).join("_")}_${constraint.type}`,
+      ),
       columns: constraint.fields.map((fieldKey) =>
         quoteSqlIdentifier(dialect, model.model.fields[fieldKey]?.name || fieldKey),
       ),

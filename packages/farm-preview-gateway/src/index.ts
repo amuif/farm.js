@@ -99,12 +99,34 @@ export interface PreviewGatewayResponse {
 }
 
 export interface PreviewGatewayStore {
-  createSession(session: PreviewGatewaySession, ttlMs: number): Promise<void>;
+  /**
+   * Stores a session and claims its name atomically. The claim succeeds when
+   * the name is free, already belongs to this session, or still belongs to
+   * `options.replaceSessionId` (a stale session the gateway decided to take
+   * over). Return `false` when another session holds the name; nothing may
+   * be stored in that case. Stores that resolve `undefined` are treated as
+   * having claimed the name.
+   */
+  createSession(
+    session: PreviewGatewaySession,
+    ttlMs: number,
+    options?: PreviewGatewayCreateSessionOptions,
+  ): Promise<boolean | void>;
   getSessionByName(name: string): Promise<PreviewGatewaySession | undefined>;
   getSessionById(id: string): Promise<PreviewGatewaySession | undefined>;
   touchSession(session: PreviewGatewaySession, ttlMs: number): Promise<void>;
   enqueueRequest(sessionId: string, request: PreviewGatewayRequest, ttlMs: number): Promise<void>;
   takeRequests(sessionId: string, limit: number): Promise<PreviewGatewayRequest[]>;
+  /**
+   * Puts requests taken by a poll that could not deliver them back at the
+   * head of the queue, in their original order. Stores without it fall back
+   * to `enqueueRequest`, which keeps the requests but not their position.
+   */
+  requeueRequests?(
+    sessionId: string,
+    requests: PreviewGatewayRequest[],
+    ttlMs: number,
+  ): Promise<void>;
   saveResponse(
     sessionId: string,
     requestId: string,
@@ -114,6 +136,11 @@ export interface PreviewGatewayStore {
   getResponse(sessionId: string, requestId: string): Promise<PreviewGatewayResponse | undefined>;
   deleteResponse(sessionId: string, requestId: string): Promise<void>;
   deleteSession(session: PreviewGatewaySession): Promise<void>;
+}
+
+export interface PreviewGatewayCreateSessionOptions {
+  /** A stale session whose name the new session may take over. */
+  replaceSessionId?: string;
 }
 
 interface PreviewGatewayRuntimeConfig {
@@ -328,10 +355,10 @@ export function createPreviewGatewayHandler(
       if (error instanceof GatewayHttpError || error instanceof PreviewAuthError) {
         return text(error.message, error.status);
       }
-      return text(
-        error instanceof Error ? error.message : "Unexpected preview gateway error.",
-        500,
-      );
+      // Unexpected errors can carry store or provider details (for example a
+      // Redis REST error body), so visitors only see a fixed message.
+      console.error("[farm-preview-gateway] Unexpected error:", error);
+      return text("Unexpected preview gateway error.", 500);
     }
   };
 
@@ -484,10 +511,26 @@ export class MemoryPreviewGatewayStore implements PreviewGatewayStore {
   private queues = new Map<string, PreviewGatewayRequest[]>();
   private responses = new Map<string, PreviewGatewayResponse>();
 
-  async createSession(session: PreviewGatewaySession): Promise<void> {
+  async createSession(
+    session: PreviewGatewaySession,
+    _ttlMs: number,
+    options: PreviewGatewayCreateSessionOptions = {},
+  ): Promise<boolean> {
+    // No await between the ownership check and the write, so concurrent
+    // claims for one name cannot both succeed.
+    const owner = this.names.get(session.name);
+    if (
+      owner &&
+      owner !== session.id &&
+      owner !== options.replaceSessionId &&
+      this.sessions.has(owner)
+    ) {
+      return false;
+    }
     this.sessions.set(session.id, session);
     this.names.set(session.name, session.id);
     this.queues.set(session.id, []);
+    return true;
   }
 
   async getSessionByName(name: string): Promise<PreviewGatewaySession | undefined> {
@@ -528,6 +571,13 @@ export class MemoryPreviewGatewayStore implements PreviewGatewayStore {
     return queue.splice(0, limit);
   }
 
+  async requeueRequests(sessionId: string, requests: PreviewGatewayRequest[]): Promise<void> {
+    if (!this.sessions.has(sessionId)) return;
+    const queue = this.queues.get(sessionId) || [];
+    queue.unshift(...requests);
+    this.queues.set(sessionId, queue);
+  }
+
   async saveResponse(
     sessionId: string,
     requestId: string,
@@ -558,13 +608,41 @@ export class MemoryPreviewGatewayStore implements PreviewGatewayStore {
   }
 }
 
+// Claims KEYS[1] for ARGV[2] when the name is free, already ours, or still
+// held by the replaceable owner ARGV[1] (empty when there is none).
+const CLAIM_NAME_SCRIPT = `
+  local owner = redis.call("GET", KEYS[1])
+  if not owner or owner == ARGV[2] or (ARGV[1] ~= "" and owner == ARGV[1]) then
+    redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+    return 1
+  end
+  return 0
+`;
+
 export class RedisRestPreviewGatewayStore implements PreviewGatewayStore {
   constructor(private options: { url: string; token: string; prefix?: string }) {}
 
-  async createSession(session: PreviewGatewaySession, ttlMs: number): Promise<void> {
+  async createSession(
+    session: PreviewGatewaySession,
+    ttlMs: number,
+    options: PreviewGatewayCreateSessionOptions = {},
+  ): Promise<boolean> {
+    // The session record is written before the name is claimed, so a name
+    // that points at a missing session always belongs to a dead one.
     await this.command("SET", this.sessionKey(session.id), JSON.stringify(session), "PX", ttlMs);
-    await this.command("SET", this.nameKey(session.name), session.id, "PX", ttlMs);
+    let claimed = await this.claimName(session, options.replaceSessionId, ttlMs);
+    if (!claimed) {
+      const owner = await this.command<string | null>("GET", this.nameKey(session.name));
+      if (owner && !(await this.command<number>("EXISTS", this.sessionKey(owner)))) {
+        claimed = await this.claimName(session, owner, ttlMs);
+      }
+    }
+    if (!claimed) {
+      await this.command("DEL", this.sessionKey(session.id));
+      return false;
+    }
     await this.command("DEL", this.queueKey(session.id));
+    return true;
   }
 
   async getSessionByName(name: string): Promise<PreviewGatewaySession | undefined> {
@@ -592,10 +670,7 @@ export class RedisRestPreviewGatewayStore implements PreviewGatewayStore {
       "XX",
     );
     if (result === null) return;
-    const nameOwner = await this.command<string | null>("GET", this.nameKey(session.name));
-    if (!nameOwner || nameOwner === session.id) {
-      await this.command("SET", this.nameKey(session.name), session.id, "PX", remainingTtlMs);
-    }
+    await this.claimName(session, undefined, remainingTtlMs);
     await this.command("EXPIRE", this.queueKey(session.id), Math.ceil(remainingTtlMs / 1000));
   }
 
@@ -617,6 +692,18 @@ export class RedisRestPreviewGatewayStore implements PreviewGatewayStore {
     if (!values) return [];
     const list = Array.isArray(values) ? values : [values];
     return list.map((value) => JSON.parse(value));
+  }
+
+  async requeueRequests(
+    sessionId: string,
+    requests: PreviewGatewayRequest[],
+    ttlMs: number,
+  ): Promise<void> {
+    if (!requests.length) return;
+    // LPUSH prepends one value at a time, so push in reverse to keep order.
+    const values = requests.map((request) => JSON.stringify(request)).reverse();
+    await this.command("LPUSH", this.queueKey(sessionId), ...values);
+    await this.command("EXPIRE", this.queueKey(sessionId), Math.ceil(ttlMs / 1000));
   }
 
   async saveResponse(
@@ -655,6 +742,23 @@ export class RedisRestPreviewGatewayStore implements PreviewGatewayStore {
       keys.push(this.nameKey(session.name));
     }
     await this.command("DEL", ...keys);
+  }
+
+  private async claimName(
+    session: PreviewGatewaySession,
+    replaceSessionId: string | undefined,
+    ttlMs: number,
+  ) {
+    const result = await this.command<number>(
+      "EVAL",
+      CLAIM_NAME_SCRIPT,
+      1,
+      this.nameKey(session.name),
+      replaceSessionId || "",
+      session.id,
+      Math.max(1, Math.ceil(ttlMs)),
+    );
+    return Number(result) === 1;
   }
 
   private async command<T = unknown>(...args: Array<string | number>) {
@@ -748,13 +852,37 @@ async function createSession(
   }
 
   // A name that is still owned by a live session cannot be claimed by a new
-  // one — otherwise any caller could repoint an active preview's public URL
+  // one, otherwise any caller could repoint an active preview's public URL
   // to their own session. Stale sessions (missed heartbeats) may be taken
-  // over, matching how public routing treats them.
+  // over, matching how public routing treats them. The store claims the name
+  // atomically, so two concurrent creates cannot both win the same name.
+  let session: PreviewGatewaySession;
   for (let attempt = 0; ; attempt++) {
     const existing = await store.getSessionByName(name);
     if (!existing || !isPreviewClientOnline(existing, config)) {
-      break;
+      session = {
+        ...(grantId ? { grantId } : {}),
+        ...(project ? { project } : {}),
+        ...(keyId ? { keyId } : {}),
+        ...(ownerId ? { ownerId } : {}),
+        id: randomId("sess"),
+        name,
+        hostname: `${name}.${config.domain}`,
+        publicUrl: createPublicUrl(request, config, name),
+        token: randomId("token"),
+        localUrl: input.localUrl,
+        createdAt: Date.now(),
+        expiresAt,
+        ...(slidingExpiration ? { slidingExpiration: true as const } : {}),
+        lastHeartbeatAt: Date.now(),
+      };
+      await requireSessionAccess(config, session);
+      const claimed = await store.createSession(
+        session,
+        Math.max(1, expiresAt - Date.now()),
+        existing ? { replaceSessionId: existing.id } : undefined,
+      );
+      if (claimed !== false) break;
     }
     if (requestedName || config.auth) {
       return text(
@@ -768,26 +896,6 @@ async function createSession(
     name = randomPreviewName();
   }
 
-  const hostname = `${name}.${config.domain}`;
-  const session: PreviewGatewaySession = {
-    ...(grantId ? { grantId } : {}),
-    ...(project ? { project } : {}),
-    ...(keyId ? { keyId } : {}),
-    ...(ownerId ? { ownerId } : {}),
-    id: randomId("sess"),
-    name,
-    hostname,
-    publicUrl: createPublicUrl(request, config, name),
-    token: randomId("token"),
-    localUrl: input.localUrl,
-    createdAt: Date.now(),
-    expiresAt,
-    ...(slidingExpiration ? { slidingExpiration: true as const } : {}),
-    lastHeartbeatAt: Date.now(),
-  };
-
-  await requireSessionAccess(config, session);
-  await store.createSession(session, Math.max(1, expiresAt - Date.now()));
   reportSession(config, session, "connected");
 
   return json({
@@ -816,7 +924,7 @@ async function handleSessionRoute(
   if (request.method !== "DELETE" || route.action) await requireSessionAccess(config, session);
 
   if (request.method === "GET" && route.action === "requests") {
-    return await pollSessionRequests(url, store, config, session);
+    return await pollSessionRequests(url, store, config, session, request.signal);
   }
 
   if (request.method === "POST" && route.action === "responses" && route.requestId) {
@@ -908,29 +1016,66 @@ async function pollSessionRequests(
   store: PreviewGatewayStore,
   config: PreviewGatewayRuntimeConfig,
   session: PreviewGatewaySession,
+  signal: AbortSignal,
 ) {
   const waitMs = clamp(Number(url.searchParams.get("wait") || config.pollTimeoutMs), 1000, 25000);
   const deadline = Date.now() + waitMs;
   let nextAccessCheckAt = Date.now() + 1000;
+  // A poll whose client went away must neither take requests nor keep the
+  // session looking online: nobody receives its response.
+  const abandoned = () => new Response(null, { status: 499 });
 
+  if (signal.aborted) return abandoned();
   await markSessionOnline(store, config, session);
 
   while (Date.now() < deadline) {
+    if (signal.aborted) return abandoned();
     if (Date.now() >= nextAccessCheckAt) {
       await requireSessionAccess(config, session);
       nextAccessCheckAt = Date.now() + 1000;
     }
     const requests = await store.takeRequests(session.id, DEFAULT_POLL_REQUEST_LIMIT);
     if (requests.length) {
-      await requireSessionAccess(config, session);
-      await markSessionOnline(store, config, session);
+      try {
+        await requireSessionAccess(config, session);
+        if (!signal.aborted) await markSessionOnline(store, config, session);
+      } catch (error) {
+        await requeuePreviewRequests(store, config, session, requests);
+        throw error;
+      }
+      if (signal.aborted) {
+        await requeuePreviewRequests(store, config, session, requests);
+        return abandoned();
+      }
       return json({ requests });
     }
-    await delay(config.pollIntervalMs);
+    try {
+      await delay(config.pollIntervalMs, undefined, { signal });
+    } catch {
+      if (signal.aborted) return abandoned();
+      throw new Error("Preview request polling was interrupted.");
+    }
   }
 
+  if (signal.aborted) return abandoned();
   await markSessionOnline(store, config, session);
   return new Response(null, { status: 204 });
+}
+
+async function requeuePreviewRequests(
+  store: PreviewGatewayStore,
+  config: PreviewGatewayRuntimeConfig,
+  session: PreviewGatewaySession,
+  requests: PreviewGatewayRequest[],
+) {
+  const ttlMs = remainingSessionTtl(session, config);
+  if (store.requeueRequests) {
+    await store.requeueRequests(session.id, requests, ttlMs);
+    return;
+  }
+  for (const request of requests) {
+    await store.enqueueRequest(session.id, request, ttlMs);
+  }
 }
 
 async function proxyPublicRequest(
@@ -1211,22 +1356,27 @@ async function requireSession(store: PreviewGatewayStore, sessionId: string, tok
 }
 
 function resolvePublicPreviewRoute(request: Request, url: URL, domain: string) {
-  const pathMatch = url.pathname.match(/^\/__preview\/([^/]+)(\/.*)?$/);
-  if (pathMatch) {
+  const host = (request.headers.get("host") || url.host)
+    .split(":")[0]
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+
+  // Every preview subdomain is its own origin. Honoring the path form there
+  // would let `alice.<domain>/__preview/bob` serve bob's app, cookies, and
+  // scripts on alice's origin, so tenant hosts route only by subdomain.
+  if (host.endsWith(`.${domain}`)) {
     return {
-      name: pathMatch[1],
-      path: pathMatch[2] || "/",
+      name: host.slice(0, -(domain.length + 1)),
+      path: url.pathname || "/",
     };
   }
 
-  const host = (request.headers.get("host") || url.host).split(":")[0];
-  if (!host || host === domain || !host.endsWith(`.${domain}`)) {
-    return undefined;
-  }
-
+  const pathMatch = url.pathname.match(/^\/__preview\/([^/]+)(\/.*)?$/);
+  if (!pathMatch) return undefined;
   return {
-    name: host.slice(0, -(domain.length + 1)),
-    path: url.pathname || "/",
+    name: pathMatch[1],
+    path: pathMatch[2] || "/",
   };
 }
 
@@ -1337,7 +1487,7 @@ function inactivePreviewResponse(request: Request, name: string) {
     return "&#39;";
   });
   return new Response(
-    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Farm preview expired</title><style>body{font:16px/1.5 system-ui,sans-serif;display:grid;min-height:100vh;margin:0;place-items:center;background:#f7f7f5;color:#171714}main{max-width:34rem;padding:2rem;text-align:center}h1{font-size:1.75rem}code{background:#e9e9e4;border-radius:.35rem;padding:.15rem .35rem}</style><main><h1>This Farm preview has expired</h1><p>The temporary preview <code>${safeName}</code> is no longer connected.</p><p>Ask its owner to run <code>farm preview</code> again.</p></main></html>`,
+    `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Farm preview expired</title><style>body{font:16px/1.5 system-ui,sans-serif;display:grid;min-height:100vh;margin:0;place-items:center;background:#f7f7f5;color:#171714}main{max-width:34rem;padding:2rem;text-align:center}h1{font-size:1.75rem}code{background:#e9e9e4;border-radius:.35rem;padding:.15rem .35rem}footer{margin-top:2.5rem;padding-top:1.5rem;border-top:1px solid #e3e3de;color:#6b6b63;font-size:.875rem}footer p{margin:0 0 1rem}footer p a{color:#171714;text-underline-offset:.2em}.start{display:inline-block;border-radius:.5rem;padding:.5rem .9rem;background:#171714;color:#f7f7f5;font-weight:500;text-decoration:none}</style><main><h1>This Farm preview has expired</h1><p>The temporary preview <code>${safeName}</code> is no longer connected.</p><p>Ask its owner to run <code>farm preview</code> again.</p><footer><p>Previews like this come from <a href="https://farmjs.dev">Farm.js</a>. One command shares your local app.</p><a class="start" href="https://farmjs.dev/docs/preview">Try farm preview</a></footer></main></html>`,
     {
       status: 410,
       headers: {
@@ -1367,6 +1517,8 @@ function randomId(prefix: string) {
 
 function normalizeDomain(value: string) {
   return value
+    .trim()
+    .toLowerCase()
     .replace(/^https?:\/\//, "")
     .replace(/^\.*/, "")
     .replace(/\/*$/, "");

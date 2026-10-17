@@ -1,4 +1,4 @@
-import { logger } from "@farm.js/core";
+import { logger } from "@farm.js/core/internal/cli-runtime";
 import { loadPreviewEnvironment } from "./preview";
 import {
   PreviewApiKeyDeclinedError,
