@@ -302,6 +302,55 @@ export default function AboutPage() {
   }
 });
 
+test("rewrites Next imports in shared code outside the App Router", async () => {
+  const root = await createTempProject({
+    scripts: { dev: "next dev", build: "next build" },
+    dependencies: { next: "latest", react: "latest", "react-dom": "latest" },
+  });
+
+  try {
+    await mkdir(path.join(root, "app"), { recursive: true });
+    await mkdir(path.join(root, "components"), { recursive: true });
+    await mkdir(path.join(root, "content"), { recursive: true });
+    await writeFile(
+      path.join(root, "app", "page.tsx"),
+      `import { Nav } from "@/components/nav";\nexport default function Home() {\n  return <Nav />;\n}\n`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "components", "nav.tsx"),
+      `import Link from "next/link";\nimport Image from "next/image";\nimport { usePathname } from "next/navigation";\n\nexport function Nav() {\n  usePathname();\n  return <Link href="/"><Image alt="" src="/a.png" width={1} height={1} /></Link>;\n}\n`,
+      "utf8",
+    );
+    // A docs page that shows Next.js code stays as written.
+    const guide = '```tsx\nimport Link from "next/link";\n```\n';
+    await writeFile(path.join(root, "content", "guide.mdx"), guide, "utf8");
+    await writeFile(
+      path.join(root, "tsconfig.json"),
+      `{\n  // Next's default alias\n  "compilerOptions": { "paths": { "@/*": ["./*"] } },\n}\n`,
+      "utf8",
+    );
+    await writeFile(path.join(root, "next.config.ts"), "export default {};\n", "utf8");
+
+    const plan = await createFrameworkMigrationPlan(root, "next");
+    assert.ok(
+      plan.manual.some((note) => note.includes("components/nav.tsx; it still imports next/image")),
+    );
+    assert.ok(plan.manual.some((note) => note.includes("maps @/* to ./*")));
+    assert.ok(plan.manual.some((note) => note.includes("next.config.*")));
+
+    await migrateFarm({ root, source: "next", write: true });
+
+    const nav = await readFile(path.join(root, "components", "nav.tsx"), "utf8");
+    assert.match(nav, /import \{ Link \} from "@farm.js\/core\/client";/);
+    assert.match(nav, /from "@farm.js\/core\/navigation";/);
+    assert.match(nav, /from "next\/image";/);
+    assert.equal(await readFile(path.join(root, "content", "guide.mdx"), "utf8"), guide);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("keeps a Next root layout instead of overwriting it with the stub", async () => {
   const root = await createTempProject({
     scripts: { dev: "next dev", build: "next build" },

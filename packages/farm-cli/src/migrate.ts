@@ -1,6 +1,6 @@
 import { loadConfig, logger } from "@farm.js/core/internal/cli-runtime";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -298,6 +298,32 @@ async function planNextMigration(
     });
   }
 
+  // Code outside the App Router (components/, lib/, hooks/, ...) imports next/link and
+  // friends too. Rewrite the supported imports in place, or the routes keep loading Next.js
+  // through the modules they import.
+  for (const file of await collectSharedSourceFiles(root, sourceAppDir)) {
+    const content = await readFile(file, "utf8");
+    const transformed = transformNextContent(content);
+    const relative = path.relative(root, file);
+    collectNextManualNotes(relative, transformed, plan);
+    if (transformed === content) continue;
+    await addWriteFileOperation(plan, {
+      root,
+      source: file,
+      target: file,
+      content: transformed,
+      description: `Update Next imports in ${toPosix(relative)}`,
+      force: options.force,
+    });
+  }
+
+  const sourceAlias = readTsconfigSourceAlias(root);
+  if (sourceAlias) {
+    plan.manual.push(
+      `tsconfig.json maps @/* to ${sourceAlias}, but Farm resolves @ to src/. Move the folders it points at under src/ and map @/* to ./src/*, or set an @ alias in farm.config.ts (vite.resolve.alias).`,
+    );
+  }
+
   const rootMiddleware = ["middleware.ts", "middleware.tsx", "middleware.js", "middleware.jsx"]
     .map((file) => path.join(root, file))
     .find((file) => existsSync(file));
@@ -319,8 +345,13 @@ async function planNextMigration(
   }
 
   if (
-    existsSync(path.join(root, "next.config.js")) ||
-    existsSync(path.join(root, "next.config.mjs"))
+    [
+      "next.config.js",
+      "next.config.mjs",
+      "next.config.cjs",
+      "next.config.ts",
+      "next.config.mts",
+    ].some((file) => existsSync(path.join(root, file)))
   ) {
     plan.manual.push(
       "Review next.config.* and move equivalent settings into farm.config.ts or Vite config.",
@@ -630,6 +661,58 @@ async function collectFiles(dir: string): Promise<string[]> {
   }
 
   return files.sort();
+}
+
+const SHARED_SOURCE_SKIP = new Set([
+  "node_modules",
+  ".next",
+  ".output",
+  ".farm",
+  ".vercel",
+  ".git",
+  "dist",
+  "build",
+  "out",
+  "coverage",
+  "public",
+  "pages",
+]);
+
+/** Code files outside the App Router, for import rewrites. Content files are left alone. */
+async function collectSharedSourceFiles(root: string, appDir: string): Promise<string[]> {
+  const appDirs = new Set([path.resolve(appDir), path.resolve(root, "src", "app")]);
+  const files: string[] = [];
+  const visit = async (dir: string) => {
+    for (const entry of await readdir(dir)) {
+      if (SHARED_SOURCE_SKIP.has(entry) || entry.startsWith(".")) continue;
+      const fullPath = path.join(dir, entry);
+      if (appDirs.has(path.resolve(fullPath))) continue;
+      const info = await stat(fullPath);
+      if (info.isDirectory()) await visit(fullPath);
+      else if (info.isFile() && /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(entry)) {
+        files.push(fullPath);
+      }
+    }
+  };
+  await visit(root);
+  return files.sort();
+}
+
+/** The `@/*` target from tsconfig.json when it points somewhere other than src/. */
+function readTsconfigSourceAlias(root: string): string | null {
+  const tsconfigPath = path.join(root, "tsconfig.json");
+  if (!existsSync(tsconfigPath)) return null;
+  try {
+    const raw = readFileSync(tsconfigPath, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/,(\s*[}\]])/g, "$1");
+    const target = JSON.parse(raw)?.compilerOptions?.paths?.["@/*"]?.[0];
+    if (typeof target !== "string") return null;
+    return /^(\.\/)?src\/\*$/.test(target) ? null : target;
+  } catch {
+    return null;
+  }
 }
 
 function transformNextContent(content: string) {
