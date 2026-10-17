@@ -1431,9 +1431,7 @@ if (document.readyState === 'loading') {
                   const ssrSource =
                     (ssrEnv.config?.build as any)?.rollupOptions?.input?.index ??
                     path.join(server.config.root, ".farm/rsc-entries/entry.ssr.tsx");
-                  const resolved = await ssrEnv.pluginContainer.resolveId(ssrSource, undefined, {
-                    ssr: true,
-                  });
+                  const resolved = await ssrEnv.pluginContainer.resolveId(ssrSource);
                   if (resolved?.id) return loadFarmDevModule(server, resolved.id);
                 }
                 return loadFarmDevModule(server, "./.farm/rsc-entries/entry.ssr.tsx");
@@ -1503,13 +1501,9 @@ if (document.readyState === 'loading') {
                   "entry.rsc.tsx",
                 );
                 const resolved =
-                  (await rscEnv.pluginContainer.resolveId(rscSource, importer, {
-                    ssr: true,
-                  })) ??
-                  (await rscEnv.pluginContainer.resolveId(rscSource, undefined, { ssr: true })) ??
-                  (await rscEnv.pluginContainer.resolveId(absoluteRscEntry, undefined, {
-                    ssr: true,
-                  }));
+                  (await rscEnv.pluginContainer.resolveId(rscSource, importer)) ??
+                  (await rscEnv.pluginContainer.resolveId(rscSource)) ??
+                  (await rscEnv.pluginContainer.resolveId(absoluteRscEntry));
                 const id = resolved?.id ?? pathToFileURL(absoluteRscEntry).href;
                 rscEntry = await loadFarmDevModule(server, id, "rsc");
               }

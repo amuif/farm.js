@@ -3361,9 +3361,10 @@ export const manifest = getManifest();
         // and svelte's hot API) which preserves component state, so leave the
         // module for them to accept: appending our own `import.meta.hot.accept`
         // here would swallow the update instead of letting theirs run.
-        const hmrCode = !shouldEmitFarmClientRootHmr(currentConfig.renderer)
-          ? ""
-          : `
+        const hmrCode =
+          transformOptions?.ssr || !shouldEmitFarmClientRootHmr(currentConfig.renderer)
+            ? ""
+            : `
 if (import.meta.hot) {
   import.meta.hot.accept((newModule) => {
     ${isolatedHmrUpdate}
