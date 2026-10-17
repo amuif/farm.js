@@ -823,16 +823,24 @@ function createMigratedPackageJson(packageJson: any, source: FarmFrameworkMigrat
   const changes: string[] = [];
   nextPackageJson.scripts = nextPackageJson.scripts || {};
 
+  // `farm build` writes the server to .farm/.output with the farm.config.ts this migration
+  // creates, the same start command new Farm projects use.
+  const startScript = "node .farm/.output/server/index.mjs";
   const scriptReplacements =
     source === "next"
       ? [
           ["dev", "farm dev", /(^|\s)next\s+dev(\s|$)/],
           ["build", "farm build", /(^|\s)next\s+build(\s|$)/],
-          ["start", "node .output/server/index.mjs", /(^|\s)next\s+start(\s|$)/],
+          ["start", startScript, /(^|\s)next\s+start(\s|$)/],
         ]
       : [
           ["dev", "farm dev", /(^|\s)vite(\s|$)|(^|\s)vinxi\s+dev(\s|$)/],
           ["build", "farm build", /(^|\s)vite\s+build(\s|$)|(^|\s)vinxi\s+build(\s|$)/],
+          [
+            "start",
+            startScript,
+            /(^|\s)vinxi\s+start(\s|$)|(^|\s)node\s+\.?\/?\.output\/server\/index\.mjs(\s|$)/,
+          ],
         ];
 
   for (const [name, value, matcher] of scriptReplacements as [string, string, RegExp][]) {

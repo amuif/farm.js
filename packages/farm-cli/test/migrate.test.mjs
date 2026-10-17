@@ -294,7 +294,7 @@ export default function AboutPage() {
     const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
     assert.equal(packageJson.scripts.dev, "farm dev");
     assert.equal(packageJson.scripts.build, "farm build");
-    assert.equal(packageJson.scripts.start, "node .output/server/index.mjs");
+    assert.equal(packageJson.scripts.start, "node .farm/.output/server/index.mjs");
     assert.equal(packageJson.dependencies["@farm.js/core"], "latest");
     assert.equal(packageJson.devDependencies["@farm.js/cli"], "latest");
   } finally {
@@ -426,8 +426,36 @@ function PostPage() {
     const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
     assert.equal(packageJson.scripts.dev, "farm dev");
     assert.equal(packageJson.scripts.build, "farm build");
+    // TanStack starters have no start script; add the one new Farm projects use.
+    assert.equal(packageJson.scripts.start, "node .farm/.output/server/index.mjs");
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("replaces a TanStack start script and keeps a custom one", async () => {
+  for (const [start, expected] of [
+    ["vinxi start", "node .farm/.output/server/index.mjs"],
+    ["node .output/server/index.mjs", "node .farm/.output/server/index.mjs"],
+    ["node server/custom.mjs", "node server/custom.mjs"],
+  ]) {
+    const root = await createTempProject({
+      scripts: { dev: "vinxi dev", build: "vinxi build", start },
+      dependencies: { "@tanstack/react-router": "latest" },
+    });
+    try {
+      await mkdir(path.join(root, "src", "routes"), { recursive: true });
+      await writeFile(
+        path.join(root, "src", "routes", "index.tsx"),
+        "export default function Home() { return null; }\n",
+        "utf8",
+      );
+      await migrateFarm({ root, source: "tanstack", write: true });
+      const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+      assert.equal(packageJson.scripts.start, expected, start);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
