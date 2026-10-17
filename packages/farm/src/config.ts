@@ -50,6 +50,7 @@ import {
   type FarmLayerEntry,
   type ResolvedFarmLayer,
 } from "./layers";
+import { bundleNodeModule } from "./build/node-module-bundle";
 import path from "path";
 import { logger } from "./utils";
 import { normalizeFarmDeploymentId } from "./deployment";
@@ -817,7 +818,6 @@ export async function loadDocsConfig(
       return { config: JSON.parse(content), configPath: resolvedPath };
     }
 
-    const { build } = await import("esbuild");
     const configCacheDir = path.join(root, ".farm", ".config-loader");
     await fs.mkdir(configCacheDir, { recursive: true });
     const modulePath = path.join(
@@ -825,18 +825,12 @@ export async function loadDocsConfig(
       `docs-config-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`,
     );
 
-    await build({
-      absWorkingDir: root,
-      entryPoints: [resolvedPath],
+    await bundleNodeModule({
+      root,
+      entry: resolvedPath,
       outfile: modulePath,
-      bundle: true,
-      format: "esm",
-      platform: "node",
       target: `node${process.versions.node.split(".")[0]}`,
-      packages: "external",
-      jsx: "automatic",
-      logLevel: "silent",
-      sourcemap: "inline",
+      externalPackages: true,
     });
 
     const moduleUrl = pathToFileURL(modulePath).href + `?t=${Date.now()}`;

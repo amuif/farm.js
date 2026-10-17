@@ -695,7 +695,6 @@
     "better-call": "^1.0.19",
     "db0": "^0.3.4",
     "es-module-lexer": "2.0.0",
-    "esbuild": "^0.28.0",
     "fast-glob": "^3.3.2",
     "h3": "2.0.1-rc.32",
     "image-size": "^2.0.4",
@@ -705,6 +704,7 @@
     "pg": "^8.20.0",
     "picocolors": "^1.0.0",
     "remark-gfm": "^4.0.1",
+    "rolldown": "^1.2.7",
     "sugar-high": "^0.9.5",
     "supports-color": "^10.2.2",
     "unstorage": "2.0.0-alpha.10",
@@ -722,6 +722,7 @@
     "@types/react-dom": "^18.2.18",
     "@vercel/og": "1.0.1",
     "@vitest/coverage-v8": "5.0.5",
+    "esbuild": "^0.28.0",
     "jsdom": "^25.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -758,9 +759,6 @@
     "sharp": {
       "optional": true
     }
-  },
-  "optionalDependencies": {
-    "rolldown": "^1.2.7"
   },
   "engines": {
     "node": ">=22.13.0"

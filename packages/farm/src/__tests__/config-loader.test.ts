@@ -93,53 +93,41 @@ describe("Farm config helper import fast path", () => {
 });
 
 describe("Farm config resolution plugin", () => {
-  type OnResolveArgs = {
-    path: string;
-    importer: string;
-    namespace: string;
-    resolveDir: string;
-    kind: string;
-    pluginData?: Record<string, unknown>;
-  };
-  type OnResolveCallback = (args: OnResolveArgs) => Promise<unknown>;
+  type ResolveResult = { id: string; external?: boolean } | null;
 
-  async function resolveWithPlugin(args: OnResolveArgs): Promise<unknown> {
-    const callbacks: Array<{ filter: RegExp; callback: OnResolveCallback }> = [];
-    const pluginBuild = {
-      onResolve(options: { filter: RegExp }, callback: OnResolveCallback) {
-        callbacks.push({ filter: options.filter, callback });
-      },
+  async function resolveWithPlugin(
+    source: string,
+    importer: string | undefined,
+    options: { isEntry?: boolean; resolve?: (specifier: string) => ResolveResult } = {},
+  ): Promise<unknown> {
+    const plugin = createFarmConfigResolutionPlugin({
+      transform: (async () => ({ code: "", errors: [], warnings: [] })) as never,
+    });
+    const context = {
       async resolve(specifier: string) {
-        return { path: `/resolved/${specifier}`, errors: [], warnings: [] };
+        return options.resolve
+          ? options.resolve(specifier)
+          : { id: `/resolved/${specifier}`, external: false };
       },
     };
-
-    const plugin = createFarmConfigResolutionPlugin({
-      transform: async () => ({ code: "", map: "", warnings: [] }),
+    const resolveId = plugin.resolveId as (
+      this: typeof context,
+      source: string,
+      importer: string | undefined,
+      extraOptions: { kind: string; isEntry: boolean },
+    ) => Promise<unknown>;
+    return resolveId.call(context, source, importer, {
+      kind: options.isEntry ? "entry-point" : "import-statement",
+      isEntry: options.isEntry ?? false,
     });
-    plugin.setup(pluginBuild as never);
-
-    for (const { filter, callback } of callbacks) {
-      if (!filter.test(args.path)) continue;
-      const result = await callback(args);
-      if (result !== undefined) return result;
-    }
-    return undefined;
   }
 
   it("does not mark Windows entry points as external", async () => {
     // Windows absolute paths match the bare-specifier filter (/^[^./]/); the
-    // entry point must not be externalized or esbuild fails with
-    // "The entry point ... cannot be marked as external".
+    // entry point must not be externalized or the bundle has nothing to build.
     await expect(
-      resolveWithPlugin({
-        path: "E:\\farming\\stacklens\\farm.config.ts",
-        importer: "",
-        namespace: "file",
-        resolveDir: "",
-        kind: "entry-point",
-      }),
-    ).resolves.toBeUndefined();
+      resolveWithPlugin("E:\\farming\\stacklens\\farm.config.ts", undefined, { isEntry: true }),
+    ).resolves.toBeNull();
   });
 
   it("does not externalize Windows absolute import paths", async () => {
@@ -149,14 +137,8 @@ describe("Farm config resolution plugin", () => {
       "\\\\server\\share\\shared-config.ts",
     ]) {
       await expect(
-        resolveWithPlugin({
-          path: importPath,
-          importer: "E:\\farming\\stacklens\\farm.config.ts",
-          namespace: "file",
-          resolveDir: "E:\\farming\\stacklens",
-          kind: "import-statement",
-        }),
-      ).resolves.toBeUndefined();
+        resolveWithPlugin(importPath, "E:\\farming\\stacklens\\farm.config.ts"),
+      ).resolves.toBeNull();
     }
   });
 
@@ -164,46 +146,25 @@ describe("Farm config resolution plugin", () => {
     // Raw absolute paths are written verbatim into the compiled config's
     // import statements; on Windows, Node's ESM loader parses `E:\...` as a
     // URL with protocol "e:" and rejects it, so externals must be file:// URLs.
-    await expect(
-      resolveWithPlugin({
-        path: "picocolors",
-        importer: "/project/farm.config.ts",
-        namespace: "file",
-        resolveDir: "/project",
-        kind: "import-statement",
-      }),
-    ).resolves.toMatchObject({
-      external: true,
-      path: pathToFileURL(path.resolve("/resolved/picocolors")).href,
-    });
+    await expect(resolveWithPlugin("picocolors", "/project/farm.config.ts")).resolves.toMatchObject(
+      {
+        external: true,
+        id: pathToFileURL(path.resolve("/resolved/picocolors")).href,
+      },
+    );
   });
 
   it("keeps unresolvable bare specifiers external without rewriting them", async () => {
-    const callbacks: Array<{ filter: RegExp; callback: OnResolveCallback }> = [];
-    const pluginBuild = {
-      onResolve(options: { filter: RegExp }, callback: OnResolveCallback) {
-        callbacks.push({ filter: options.filter, callback });
-      },
-      async resolve(specifier: string) {
-        return { path: "", errors: [{ text: `cannot resolve ${specifier}` }], warnings: [] };
-      },
-    };
-
-    const plugin = createFarmConfigResolutionPlugin({
-      transform: async () => ({ code: "", map: "", warnings: [] }),
-    });
-    plugin.setup(pluginBuild as never);
-
-    const bareCallback = callbacks.find(({ filter }) => filter.test("some-missing-package"));
     await expect(
-      bareCallback?.callback({
-        path: "some-missing-package",
-        importer: "/project/farm.config.ts",
-        namespace: "file",
-        resolveDir: "/project",
-        kind: "import-statement",
+      resolveWithPlugin("some-missing-package", "/project/farm.config.ts", {
+        resolve: () => null,
       }),
-    ).resolves.toMatchObject({ external: true, path: "some-missing-package" });
+    ).resolves.toMatchObject({ external: true, id: "some-missing-package" });
+  });
+
+  it("leaves Node built-ins to the bundler", async () => {
+    await expect(resolveWithPlugin("node:fs", "/project/farm.config.ts")).resolves.toBeNull();
+    await expect(resolveWithPlugin("path", "/project/farm.config.ts")).resolves.toBeNull();
   });
 });
 

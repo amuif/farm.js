@@ -99,7 +99,6 @@ import {
   generateFarmIntegrationProviderClientCode,
   generateFarmIntegrationProviderServerModules,
 } from "../integration-provider-build";
-import type { TransformOptions } from "esbuild";
 import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
 import { loadTailwindVitePlugin } from "../build/tailwind";
 import { SHARP_INSTALL_HINT } from "../image-runtime";
@@ -128,11 +127,11 @@ import { farmPluginMayAffectRuntimePath } from "../plugin-runtime-endpoint";
 
 // Type alias for OutputBundle
 type OutputBundle = Rollup.OutputBundle;
-type FarmEsbuildOptions = TransformOptions & {
-  exclude?: unknown;
-  include?: unknown;
-  loaders?: unknown;
-  sourceMap?: unknown;
+type FarmServerChunkMinifyOptions = {
+  /** Keep `Function.prototype.name` and class names stable. */
+  keepNames: boolean;
+  /** Oxc target; minification never emits newer syntax than this. */
+  target: string;
 };
 type NitroOutputPackage = {
   dependencies?: Record<string, string>;
@@ -323,6 +322,8 @@ const NITRO_EXTERNAL_MODULES = new Set([
   "fsevents",
   "esbuild",
   "lightningcss",
+  "rolldown",
+  "rolldown/utils",
   "rollup",
   "vite",
   "nitro",
@@ -462,7 +463,7 @@ async function canUseRolldownBuilder(): Promise<boolean> {
     await import("rolldown");
     return true;
   } catch {
-    // Rolldown is optional so --no-optional installs retain Rollup.
+    // Keep Rollup when Rolldown's native binding cannot load on this platform.
     return false;
   }
 }
@@ -672,83 +673,38 @@ export function hasFarmRuntimeConfigModule(
   return Boolean(configModulePath || (config.layers || []).some((layer) => layer.configFile));
 }
 
-function createEsbuildTransformOptions(
-  configuredEsbuildOptions: FarmEsbuildOptions,
-  minify: boolean,
-  defaultTarget: string,
-): TransformOptions {
-  const {
-    include: _include,
-    exclude: _exclude,
-    sourceMap: _sourceMap,
-    loaders: _loaders,
-    ...configuredTransformOptions
-  } = configuredEsbuildOptions;
-  const configuredTarget = Array.isArray(configuredTransformOptions.target)
-    ? configuredTransformOptions.target.filter(
-        (target): target is string => typeof target === "string",
-      )
-    : configuredTransformOptions.target;
-  const transformTarget =
-    Array.isArray(configuredTarget) && configuredTarget.length === 0
-      ? defaultTarget
-      : (configuredTarget ?? defaultTarget);
-  const transformSupported = configuredTransformOptions.supported
-    ? Object.fromEntries(
-        Object.entries(configuredTransformOptions.supported).filter(
-          (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
-        ),
-      )
-    : undefined;
-
-  return {
-    ...(configuredTransformOptions as TransformOptions),
-    format: "esm",
-    target: transformTarget,
-    loader: "js",
+/**
+ * Minify one emitted server chunk with Oxc. Mirrors the esbuild pass this
+ * replaced: ES module scope, no legal comments, ASCII-only output, and
+ * function/class names preserved unless `keepNames` is false.
+ */
+export async function minifyFarmServerChunk(
+  code: string,
+  fileName: string,
+  options: FarmServerChunkMinifyOptions,
+): Promise<string> {
+  const { minify } = await import("rolldown/utils");
+  const keepNames = { function: options.keepNames, class: options.keepNames };
+  const result = await minify(fileName, code, {
+    module: true,
+    compress: { target: options.target, keepNames },
+    mangle: { keepNames },
+    codegen: { legalComments: "none", asciiOnly: true },
     sourcemap: false,
-    minify,
-    keepNames: configuredTransformOptions.keepNames ?? true,
-    legalComments: configuredTransformOptions.legalComments ?? "none",
-    supported: transformSupported,
-  };
+  });
+  if (result.errors.length > 0) {
+    throw new Error(`Failed to minify ${fileName}: ${result.errors[0].message}`);
+  }
+  return result.code;
 }
 
-function createEsbuildChunkMinifyPlugin(
-  configuredEsbuildOptions: FarmEsbuildOptions,
-): Rollup.Plugin {
-  const configuredTransformOptions = createEsbuildTransformOptions(
-    configuredEsbuildOptions,
-    true,
-    "esnext",
-  );
-  // Nitro already applies the configured esbuild transform to every module.
-  // Keep this final chunk pass limited to minification controls so options such
-  // as banner, footer, define, drop, and property mangling are not applied twice.
-  const transformOptions: TransformOptions = {
-    format: "esm",
-    target: configuredTransformOptions.target,
-    loader: "js",
-    sourcemap: false,
-    minify: true,
-    keepNames: configuredTransformOptions.keepNames,
-    legalComments: configuredTransformOptions.legalComments,
-    charset: configuredTransformOptions.charset,
-  };
-
+function createServerChunkMinifyPlugin(options: FarmServerChunkMinifyOptions): Rollup.Plugin {
   return {
-    name: "farm-esbuild-minify",
+    name: "farm-server-chunk-minify",
     async renderChunk(code, chunk) {
-      const { transform } = await import("esbuild");
-      const result = await transform(code, {
-        ...transformOptions,
-        sourcefile: chunk.fileName,
-      });
-      if (!result.code) return null;
-      return {
-        code: result.code,
-        map: result.map || null,
-      };
+      const minified = await minifyFarmServerChunk(code, chunk.fileName, options);
+      if (!minified) return null;
+      return { code: minified, map: null };
     },
   };
 }
@@ -1848,6 +1804,8 @@ async function buildClient(
               id === "nitro" ||
               id === "vite" ||
               id === "esbuild" ||
+              id === "rolldown" ||
+              id.startsWith("rolldown/") ||
               id === "rollup" ||
               id.startsWith("nitro/") ||
               id.includes("node-pre-gyp") ||
@@ -4512,6 +4470,8 @@ async function buildSSRInMemory(
           ...(useExternalMetadataImageRuntime ? ["@vercel/og"] : []),
           "esbuild",
           "lightningcss",
+          "rolldown",
+          "rolldown/utils",
           "rollup",
           "@rollup/rollup-darwin-arm64",
           "@rollup/rollup-darwin-x64",
@@ -9788,24 +9748,16 @@ export default async function farmNitroEventHandler(event) {
     canReusePrebuiltSSR && (nitroConfig.builder ?? process.env.NITRO_BUILDER) === "rolldown";
 
   const shouldMinify = nitroConfig.minify !== false;
-  const configuredEsbuildOptions: FarmEsbuildOptions = {};
-  const resolvedEsbuildOptions: FarmEsbuildOptions = {
-    // Function-name helpers are unsafe for provider scripts that serialize a
-    // function with toString(); the helper is outside the emitted script scope.
-    keepNames: !(config.docs?.enabled && config.docs.adapter?.server),
-    legalComments: "none",
-  };
-  const prebuiltSSREsbuildOptions =
-    config.docs?.enabled && config.docs.adapter?.server
-      ? resolvedEsbuildOptions
-      : configuredEsbuildOptions;
-  const useFarmEsbuildMinifier =
+  // Docs adapters serialize provider-script functions with toString(), so their
+  // builds have always minified without name preservation.
+  const keepServerNames = !(config.docs?.enabled && config.docs.adapter?.server);
+  const useFarmServerMinifier =
     shouldMinify &&
     nitroConfig.sourcemap === false &&
     !hasCustomOxcOptions &&
     !hasLateBuildMutationConfig;
-  const esbuildChunkMinifier = useFarmEsbuildMinifier
-    ? createEsbuildChunkMinifyPlugin(resolvedEsbuildOptions)
+  const serverChunkMinifier = useFarmServerMinifier
+    ? createServerChunkMinifyPlugin({ keepNames: keepServerNames, target: "esnext" })
     : null;
   if (canReusePrebuiltSSR) {
     const configuredRollupPlugins = nitroConfig.rollupConfig?.plugins;
@@ -9822,7 +9774,7 @@ export default async function farmNitroEventHandler(event) {
     };
   }
 
-  nitroConfig.minify = useFarmEsbuildMinifier ? false : shouldMinify;
+  nitroConfig.minify = useFarmServerMinifier ? false : shouldMinify;
 
   // Build with Nitro
   const nitroInstance = await nitroBuilder.createNitro(nitroConfig);
@@ -9898,15 +9850,14 @@ export default async function farmNitroEventHandler(event) {
         await copyPrebuiltSSRBundle(
           ssrBundle,
           path.join(prerenderServerDir, FARM_SSR_OUTPUT_DIR),
-          {},
-          false,
+          null,
           fs,
         );
         await registerPrebuiltSSRPackageImport(prerenderServerDir, ssrEntryFile, fs);
       });
     });
   }
-  if (esbuildChunkMinifier || useRolldownBuilder) {
+  if (serverChunkMinifier || useRolldownBuilder) {
     // Register after Nitro and user hooks are prepared so the minifier is the
     // final renderChunk transform, matching Nitro's Terser ordering.
     nitroInstance.hooks.hook("rollup:before", (_nitro, rollupConfig) => {
@@ -9921,7 +9872,7 @@ export default async function farmNitroEventHandler(event) {
         delete rolldownConfig.inject;
         delete rolldownConfig.jsx;
       }
-      if (esbuildChunkMinifier) {
+      if (serverChunkMinifier) {
         const configuredPlugins = rollupConfig.plugins;
         rollupConfig.plugins = [
           ...(Array.isArray(configuredPlugins)
@@ -9929,7 +9880,7 @@ export default async function farmNitroEventHandler(event) {
             : configuredPlugins
               ? [configuredPlugins]
               : []),
-          esbuildChunkMinifier,
+          serverChunkMinifier,
         ];
       }
     });
@@ -9985,8 +9936,7 @@ export default async function farmNitroEventHandler(event) {
       ? copyPrebuiltSSRBundle(
           ssrBundle,
           path.join(outputDir, "server", FARM_SSR_OUTPUT_DIR),
-          prebuiltSSREsbuildOptions,
-          shouldMinify,
+          shouldMinify ? { keepNames: keepServerNames, target: "node18" } : null,
           fs,
         )
       : Promise.resolve(),
@@ -10055,27 +10005,9 @@ export function resolveFarmNitroOutputConfig(
 async function copyPrebuiltSSRBundle(
   ssrBundle: OutputBundle,
   targetDir: string,
-  configuredEsbuildOptions: FarmEsbuildOptions,
-  minify: boolean,
+  minifyOptions: FarmServerChunkMinifyOptions | null,
   fs: typeof import("fs/promises"),
 ): Promise<void> {
-  const {
-    include: _include,
-    exclude: _exclude,
-    sourceMap: _sourceMap,
-    loaders: _loaders,
-    ...configuredTransformOptions
-  } = configuredEsbuildOptions;
-  const hasConfiguredTransforms = Object.keys(configuredTransformOptions).some(
-    (option) => option !== "minify",
-  );
-  const transformOptions = createEsbuildTransformOptions(
-    configuredEsbuildOptions,
-    minify,
-    "node18",
-  );
-  const transform = minify || hasConfiguredTransforms ? (await import("esbuild")).transform : null;
-
   await fs.rm(targetDir, { recursive: true, force: true });
   await Promise.all(
     Object.entries(ssrBundle).map(async ([fileName, output]) => {
@@ -10087,15 +10019,9 @@ async function copyPrebuiltSSRBundle(
         return;
       }
 
-      let code = output.code;
-      if (transform) {
-        const result = await transform(code, {
-          ...transformOptions,
-          sourcefile: fileName,
-        });
-        code = result.code;
-      }
-
+      const code = minifyOptions
+        ? await minifyFarmServerChunk(output.code, fileName, minifyOptions)
+        : output.code;
       await fs.writeFile(targetPath, code);
     }),
   );

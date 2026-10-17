@@ -423,7 +423,7 @@ export function extractRscMiddlewareConfigModule(
   };
 }
 
-function esbuildLoader(file: string): "js" | "jsx" | "ts" | "tsx" {
+function sourceLang(file: string): "js" | "jsx" | "ts" | "tsx" {
   switch (path.extname(file)) {
     case ".ts":
     case ".mts":
@@ -439,18 +439,25 @@ function esbuildLoader(file: string): "js" | "jsx" | "ts" | "tsx" {
 }
 
 export async function loadRscMiddlewareConfigModule(configPath: string): Promise<ExtractionResult> {
-  const [{ readFile }, { parseAst, transformWithEsbuild }] = await Promise.all([
-    import("node:fs/promises"),
-    import("vite"),
-  ]);
+  const [{ readFile }, vite] = await Promise.all([import("node:fs/promises"), import("vite")]);
   const source = await readFile(configPath, "utf8");
-  const transformed = await transformWithEsbuild(source, configPath, {
-    format: "esm",
-    jsx: "automatic",
-    loader: esbuildLoader(configPath),
-  });
+  const lang = sourceLang(configPath);
+  // Vite 8 transforms with Oxc and only reaches esbuild when the app installs it.
+  // Vite 6 and 7 have no transformWithOxc and always ship esbuild.
+  const transformed =
+    typeof vite.transformWithOxc === "function"
+      ? await vite.transformWithOxc(source, configPath, {
+          lang,
+          sourceType: "module",
+          jsx: { runtime: "automatic" },
+        })
+      : await vite.transformWithEsbuild(source, configPath, {
+          format: "esm",
+          jsx: "automatic",
+          loader: lang,
+        });
   return extractRscMiddlewareConfigModule(
     transformed.code,
-    parseAst(transformed.code) as unknown as AstNode,
+    vite.parseAst(transformed.code) as unknown as AstNode,
   );
 }
