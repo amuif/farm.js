@@ -9938,7 +9938,7 @@ export default async function farmNitroEventHandler(event) {
   }
   const sharpRuntimeStagePromise =
     imageRuntime === "node"
-      ? stageSharpRuntime(config, root, distDir, fs)
+      ? stageSharpRuntime(config, root, distDir, fs, preset)
       : Promise.resolve<StagedSharpRuntime | null>(null);
   const [nitroBuildResult, sharpRuntimeStageResult] = await Promise.allSettled([
     nitroBuilder.build(nitroInstance),
@@ -9959,7 +9959,7 @@ export default async function farmNitroEventHandler(event) {
   }
   const stagedSharpRuntime =
     sharpRuntimeStageResult.value ??
-    (imageRuntime === "node" ? await stageSharpRuntime(config, root, distDir, fs) : null);
+    (imageRuntime === "node" ? await stageSharpRuntime(config, root, distDir, fs, preset) : null);
 
   const runtimeCopyPromise = (async () => {
     if (stagedSharpRuntime) {
@@ -10249,12 +10249,57 @@ interface StagedSharpRuntime {
   dependencies: Record<string, string>;
 }
 
-async function stageSharpRuntime(
+interface ServerFunctionPlatform {
+  os: string;
+  cpu: string;
+  libc: string;
+}
+
+/**
+ * The platform a preset's server function runs on when the provider fixes it, whatever machine
+ * builds the app: Vercel and Netlify run functions on x86-64 Linux with glibc. Other presets run
+ * wherever their output is deployed, so staging keeps every installed binary for them.
+ */
+function resolveServerFunctionPlatform(preset: string): ServerFunctionPlatform | null {
+  return preset === "vercel" || preset === "netlify"
+    ? { os: "linux", cpu: "x64", libc: "glibc" }
+    : null;
+}
+
+/** Whether a package's `os`, `cpu`, and `libc` fields allow it on a platform, as npm reads them. */
+function packageSupportsPlatform(
+  packageJson: { os?: unknown; cpu?: unknown; libc?: unknown },
+  platform: ServerFunctionPlatform,
+): boolean {
+  return (
+    platformFieldAllows(packageJson.os, platform.os) &&
+    platformFieldAllows(packageJson.cpu, platform.cpu) &&
+    platformFieldAllows(packageJson.libc, platform.libc)
+  );
+}
+
+function platformFieldAllows(field: unknown, value: string): boolean {
+  if (!Array.isArray(field)) return true;
+  const entries = field.filter((entry): entry is string => typeof entry === "string");
+  if (entries.includes(`!${value}`)) return false;
+  const allowed = entries.filter((entry) => !entry.startsWith("!"));
+  return allowed.length === 0 || allowed.includes(value);
+}
+
+/**
+ * @internal Copy Sharp and the dependencies it loads into a staging directory for the server
+ * output. Platform packages that cannot load where the preset's function runs are left out:
+ * an install that ignores platforms (`pnpm install --force`, `supportedArchitectures`) has one
+ * native Sharp build per platform, which is over 200 MB.
+ */
+export async function stageSharpRuntime(
   config: ResolvedFarmConfig,
   root: string,
   distDir: string,
   fs: typeof import("fs/promises"),
+  preset: string,
 ): Promise<StagedSharpRuntime> {
+  const functionPlatform = resolveServerFunctionPlatform(preset);
   const projectRequire = createRequire(path.join(root, "package.json"));
   let sharpRequire = projectRequire;
   if (!resolvePackageJson(projectRequire, "sharp")) {
@@ -10290,6 +10335,7 @@ async function stageSharpRuntime(
     const packageJsonPath = resolvePackageJson(parentRequire, packageName);
     if (!packageJsonPath) return;
     const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
+    if (functionPlatform && !packageSupportsPlatform(packageJson, functionPlatform)) return;
     const packageDir = path.dirname(packageJsonPath);
     const targetDir = path.join(targetNodeModules, ...packageName.split("/"));
     copiedPackages.set(packageName, String(packageJson.version || "*"));
