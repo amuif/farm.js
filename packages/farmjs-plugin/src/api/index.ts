@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "@farm.js/core/plugin";
 /**
  * Farm.js API Routes Plugin
  *
@@ -258,7 +259,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(filePath);
+            const routeModule = await loadFarmDevModule(server, filePath);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
@@ -299,7 +300,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         for (const routesFile of routesFiles) {
           if (fs.existsSync(routesFile)) {
             try {
-              const routesModule = await server.ssrLoadModule(routesFile);
+              const routesModule = await loadFarmDevModule(server, routesFile);
 
               // Look for exported endpoints with explicit paths
               for (const [exportName, exportValue] of Object.entries(routesModule)) {
@@ -479,7 +480,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         }
 
         try {
-          const routesModule = await server.ssrLoadModule(file);
+          const routesModule = await loadFarmDevModule(server, file);
 
           // Look for exported endpoints with explicit paths
           // Endpoints can be functions (from better-call) or objects
@@ -538,7 +539,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         if (routePathToUpdate) {
           try {
             // Reload the module
-            const routeModule = await server.ssrLoadModule(file);
+            const routeModule = await loadFarmDevModule(server, file);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
@@ -574,7 +575,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(file);
+            const routeModule = await loadFarmDevModule(server, file);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 

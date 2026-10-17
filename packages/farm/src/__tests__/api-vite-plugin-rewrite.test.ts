@@ -60,7 +60,9 @@ async function createDevHarness(
 
   const server = {
     config: { root },
-    ssrLoadModule: (filePath: string) => import(pathToFileURL(filePath).href),
+    environments: {
+      ssr: { runner: { import: (filePath: string) => import(pathToFileURL(filePath).href) } },
+    },
     middlewares: {
       use(fn: typeof handlerFn) {
         handlerFn = fn;
@@ -156,8 +158,14 @@ describe("dev API dispatch after middleware rewrites", () => {
     let rootModule: Record<string, unknown> = {};
     const server: any = {
       config: { root },
-      ssrLoadModule: async (filePath: string) =>
-        filePath === routesFile ? rootModule : { GET: async () => new Response("ok") },
+      environments: {
+        ssr: {
+          runner: {
+            import: async (filePath: string) =>
+              filePath === routesFile ? rootModule : { GET: async () => new Response("ok") },
+          },
+        },
+      },
       moduleGraph: { invalidateModule() {} },
       middlewares: { use() {} },
       watcher: { on() {} },
@@ -201,16 +209,22 @@ describe("dev API dispatch after middleware rewrites", () => {
     let rootMethod = "GET";
     const server = {
       config: { root },
-      ssrLoadModule: async (filePath: string) =>
-        filePath === routeFile
-          ? { GET: async () => new Response("file") }
-          : {
-              health: {
-                __path: "/api/health",
-                __method: rootMethod,
-                handler: async () => new Response("explicit"),
-              },
-            },
+      environments: {
+        ssr: {
+          runner: {
+            import: async (filePath: string) =>
+              filePath === routeFile
+                ? { GET: async () => new Response("file") }
+                : {
+                    health: {
+                      __path: "/api/health",
+                      __method: rootMethod,
+                      handler: async () => new Response("explicit"),
+                    },
+                  },
+          },
+        },
+      },
       middlewares: {
         use(handler: typeof apiMiddleware) {
           apiMiddleware = handler;

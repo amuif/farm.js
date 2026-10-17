@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "@farm.js/core/plugin";
 /**
  * Farm.js Middleware Plugin
  *
@@ -349,7 +350,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           const middlewareFile = path.join(dir, `middleware${ext}`);
           if (fs.existsSync(middlewareFile)) {
             try {
-              const module = await server.ssrLoadModule(middlewareFile);
+              const module = await loadFarmDevModule(server, middlewareFile);
               if (module.default) {
                 middlewareCache.set(routePath, {
                   path: routePath,
@@ -589,7 +590,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           if (mw.filePath === file) {
             try {
               // Reload the module
-              const module = await server.ssrLoadModule(file);
+              const module = await loadFarmDevModule(server, file);
               if (module.default) {
                 middlewareCache.set(routePath, {
                   path: routePath,
@@ -616,7 +617,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
               .replace(/\/middleware\.(ts|tsx|js|jsx)$/, "");
             const routePath = relativePath === "" ? "/" : relativePath;
 
-            const module = await server.ssrLoadModule(file);
+            const module = await loadFarmDevModule(server, file);
             if (module.default) {
               middlewareCache.set(routePath, {
                 path: routePath,

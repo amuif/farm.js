@@ -299,6 +299,13 @@ Farm keeps the options it needs to produce its production output: `root`, `base`
 `build.rollupOptions.input`, and `build.rollupOptions.output`), and any `build`, `define`, or
 `esbuild` value Farm sets for that build. Use `basePath` and `publicDir` in Farm's config instead.
 
+During development, Farm loads server modules through Vite's `ssr` environment runner. With
+React Server Components enabled, RSC entries use a separate `rsc` runner and resolution conditions;
+the browser uses `client`. Vite owns runner caching, hot updates, and cleanup when the server closes.
+Custom server environments must expose an in-process module runner. A fetch-only remote runtime
+needs a request/response adapter; selecting the Cloudflare deployment target does not yet run
+`farm dev` inside workerd.
+
 ## Application base path
 
 Set `basePath` when the complete application is mounted below the origin root. Farm applies the

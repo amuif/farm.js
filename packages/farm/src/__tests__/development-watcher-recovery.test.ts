@@ -67,6 +67,17 @@ export default function Layout({ children }) { return <>{children}</>; }`,
 }
 
 describe("development watcher recovery", () => {
+  it("keeps browser HMR callbacks out of server environment transforms", async () => {
+    const { server } = await startApp({
+      "src/app/page.tsx": "export default function Page() { return null; }",
+      "src/app/counter.tsx": '"use client"; export default function Counter() { return null; }',
+    });
+    const serverModule = await server.environments.ssr.transformRequest("/src/app/counter.tsx");
+    const clientModule = await server.environments.client.transformRequest("/src/app/counter.tsx");
+    expect(serverModule?.code).not.toContain("__FARM_REACT_ROOT__");
+    expect(clientModule?.code).toContain("__FARM_REACT_ROOT__");
+  });
+
   it("renders a page once its missing import is created, without touching the page", async () => {
     const { root, server, origin } = await startApp({
       "src/app/page.tsx": `import React from "react";

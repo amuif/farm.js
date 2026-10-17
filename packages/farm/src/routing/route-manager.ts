@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 import type {
   FarmConfig,
   ParsedRoute,
@@ -887,7 +888,7 @@ export class RouteManager {
         const components = await loadFarmMdxComponents(mdxConfig, {
           root: this.config.root,
           loadModule: this.viteServer
-            ? (componentModulePath) => this.viteServer!.ssrLoadModule(componentModulePath)
+            ? (componentModulePath) => loadFarmDevModule(this.viteServer!, componentModulePath)
             : undefined,
         });
         return await createFarmMarkdownRouteModuleFromFile(modulePath, {
@@ -897,7 +898,7 @@ export class RouteManager {
       }
 
       if (this.viteServer) {
-        const module = await this.viteServer.ssrLoadModule(modulePath);
+        const module = await loadFarmDevModule(this.viteServer, modulePath);
         return module as RouteModule;
       } else {
         const module = await import(/* @vite-ignore */ modulePath);
@@ -921,7 +922,7 @@ export class RouteManager {
       }
 
       if (this.viteServer) {
-        const module = await this.viteServer.ssrLoadModule(modulePath);
+        const module = await loadFarmDevModule(this.viteServer, modulePath);
         return module as LayoutModule;
       } else {
         const module = await import(/* @vite-ignore */ modulePath);
@@ -1242,7 +1243,7 @@ export class RouteManager {
   private async loadProgrammaticRoutesModule(filePath: string): Promise<Record<string, any>> {
     if (this.viteServer) {
       const viteRoot = this.viteServer.config?.root || this.config.root || process.cwd();
-      return await this.viteServer.ssrLoadModule(toViteModuleId(filePath, viteRoot));
+      return await loadFarmDevModule(this.viteServer, toViteModuleId(filePath, viteRoot));
     }
 
     return await import(/* @vite-ignore */ toFileModuleUrl(filePath));

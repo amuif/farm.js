@@ -43,9 +43,15 @@ async function setup(order: "middleware-first" | "api-first", handler: Middlewar
     config: { root, publicDir: path.join(root, "public") },
     hot: undefined,
     middlewares: { use: (fn: Handler) => handlers.push(fn) },
-    ssrLoadModule: vi.fn(async (file: string) =>
-      file === path.join(root, ROUTE_DIR, "route.ts") ? { GET: endpoint } : {},
-    ),
+    environments: {
+      ssr: {
+        runner: {
+          import: vi.fn(async (file: string) =>
+            file === path.join(root, ROUTE_DIR, "route.ts") ? { GET: endpoint } : {},
+          ),
+        },
+      },
+    },
     moduleGraph: { invalidateModule: vi.fn() },
   };
 

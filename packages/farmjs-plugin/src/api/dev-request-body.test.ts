@@ -27,9 +27,15 @@ async function createHarness(
         middleware = handler;
       },
     },
-    ssrLoadModule: vi.fn(async (filePath: string) =>
-      filePath === path.join(root, ECHO_ROUTE_FILE) ? endpointModule : {},
-    ),
+    environments: {
+      ssr: {
+        runner: {
+          import: vi.fn(async (filePath: string) =>
+            filePath === path.join(root, ECHO_ROUTE_FILE) ? endpointModule : {},
+          ),
+        },
+      },
+    },
     moduleGraph: { invalidateModule: vi.fn() },
   };
 

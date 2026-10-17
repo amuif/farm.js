@@ -192,6 +192,8 @@ function createConfig(
 function createModuleServer(root: string, modules: Map<string, Record<string, unknown>>) {
   return {
     config: { root },
-    ssrLoadModule: async (filePath: string) => modules.get(filePath) || {},
+    environments: {
+      ssr: { runner: { import: async (filePath: string) => modules.get(filePath) || {} } },
+    },
   } as any;
 }

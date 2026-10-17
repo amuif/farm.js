@@ -1,3 +1,4 @@
+import { loadFarmDevModule, invalidateFailedFarmDevModules } from "./dev-module";
 import { createBundledEnv } from "./env";
 import type {
   AliasOptions,
@@ -1090,6 +1091,9 @@ export function farmPlugin(
         // directory the production client build emits.
         ...(options.publicDir ? { publicDir: options.publicDir } : {}),
         define: getEnvDefines(options, configEnv),
+        // Keep development module ownership explicit; the RSC plugin adds its
+        // environment only when enabled. Production environment setup is unchanged.
+        ...(!isBuild ? { environments: { client: {}, ssr: {} } } : {}),
         resolve: {
           alias: { ...layerAliases, ...sourceAlias },
         },
@@ -1326,12 +1330,7 @@ export function farmPlugin(
       ["add", "change", "unlink"].forEach((ev) => {
         server.watcher.on(ev as "add", (file: string) => {
           if (ev === "add") {
-            // Vite keeps an unresolved import in the cached SSR transform and rethrows the
-            // importer's recorded evaluation error, so a module that imported a missing file
-            // stays broken after the file appears. Vite only retries this for the client graph.
-            for (const mod of server.moduleGraph.idToModuleMap.values()) {
-              if (mod.ssrError) server.moduleGraph.invalidateModule(mod);
-            }
+            invalidateFailedFarmDevModules(server);
           }
           const normalizedFile = file.replace(/\\/g, "/");
           const configChanged =
@@ -1439,7 +1438,7 @@ export function farmPlugin(
           { ...farmConfig, workflows: workflowConfig },
           {
             loadModule: async (filePath) =>
-              server.ssrLoadModule(filePath) as Promise<Record<string, any>>,
+              loadFarmDevModule(server, filePath) as Promise<Record<string, any>>,
           },
         );
         if (discoveredWorkflows.length > 0) {
@@ -1447,7 +1446,7 @@ export function farmPlugin(
             workflows: discoveredWorkflows,
             config: workflowConfig,
             loadModule: async (workflow: FarmDiscoveredWorkflow) =>
-              server.ssrLoadModule(workflow.filePath) as Promise<Record<string, any>>,
+              loadFarmDevModule(server, workflow.filePath) as Promise<Record<string, any>>,
             server: farmConfig.server,
           });
           logger.success(`✅ Discovered ${discoveredWorkflows.length} Farm workflow task(s)`);
@@ -1530,13 +1529,11 @@ export function farmPlugin(
                 farmConfig.srcDir,
               ),
               loadModule: async (specifier) => {
-                const resolved = await server.pluginContainer.resolveId(specifier, undefined, {
-                  ssr: true,
-                });
+                const resolved = await server.environments.ssr.pluginContainer.resolveId(specifier);
                 if (specifier === farmConfig.docs.adapter?.server && resolved?.id) {
                   return import(/* @vite-ignore */ pathToFileURL(resolved.id).href);
                 }
-                return server.ssrLoadModule(resolved?.id ?? specifier);
+                return loadFarmDevModule(server, resolved?.id ?? specifier);
               },
             })
           : farmDocsDevRuntime.createFarmDocsHandler(farmConfig.docs, {
@@ -1594,7 +1591,7 @@ export function farmPlugin(
         const [rendererRuntime, layoutModules] = await Promise.all([
           isReactRenderer(docsRenderer)
             ? import("./renderer/react/server")
-            : server.ssrLoadModule(docsRenderer.server),
+            : loadFarmDevModule(server, docsRenderer.server),
           Promise.all(
             layoutEntries.map((layout) => routeManager.loadLayoutModule(layout.modulePath)),
           ),
@@ -3364,9 +3361,10 @@ export const manifest = getManifest();
         // and svelte's hot API) which preserves component state, so leave the
         // module for them to accept: appending our own `import.meta.hot.accept`
         // here would swallow the update instead of letting theirs run.
-        const hmrCode = !shouldEmitFarmClientRootHmr(currentConfig.renderer)
-          ? ""
-          : `
+        const hmrCode =
+          transformOptions?.ssr || !shouldEmitFarmClientRootHmr(currentConfig.renderer)
+            ? ""
+            : `
 if (import.meta.hot) {
   import.meta.hot.accept((newModule) => {
     ${isolatedHmrUpdate}
