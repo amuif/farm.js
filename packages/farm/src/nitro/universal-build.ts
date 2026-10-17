@@ -323,6 +323,7 @@ const NITRO_EXTERNAL_MODULES = new Set([
   "esbuild",
   "lightningcss",
   "rolldown",
+  "rolldown/experimental",
   "rolldown/utils",
   "rollup",
   "vite",
@@ -683,9 +684,9 @@ export async function minifyFarmServerChunk(
   fileName: string,
   options: FarmServerChunkMinifyOptions,
 ): Promise<string> {
-  const { minify } = await import("rolldown/utils");
+  const rolldownUtils = await import("rolldown/utils");
   const keepNames = { function: options.keepNames, class: options.keepNames };
-  const result = await minify(fileName, code, {
+  const result = await rolldownUtils.minify(fileName, code, {
     module: true,
     compress: { target: options.target, keepNames },
     mangle: { keepNames },
@@ -695,7 +696,62 @@ export async function minifyFarmServerChunk(
   if (result.errors.length > 0) {
     throw new Error(`Failed to minify ${fileName}: ${result.errors[0].message}`);
   }
-  return result.code;
+  return restoreLiteralModuleSpecifiers(result.code, fileName, rolldownUtils);
+}
+
+/**
+ * Oxc prints whichever quote is shortest, so `import("./chunk.mjs")` comes out
+ * as import(`./chunk.mjs`). The value is the same, but Miniflare/workerd and
+ * other static module scanners only follow string-literal specifiers, and
+ * esbuild never printed module paths with backticks. Put string literals back
+ * for `import()` and `require()` arguments.
+ */
+function restoreLiteralModuleSpecifiers(
+  code: string,
+  fileName: string,
+  { parseSync, Visitor }: Pick<typeof import("rolldown/utils"), "parseSync" | "Visitor">,
+): string {
+  if (!code.includes("import(`") && !code.includes("require(`")) return code;
+
+  const parsed = parseSync(fileName, code, { lang: "js", sourceType: "module" });
+  if (parsed.errors.length > 0) {
+    throw new Error(`Failed to minify ${fileName}: ${parsed.errors[0].message}`);
+  }
+  const replacements: Array<{ start: number; end: number; text: string }> = [];
+  const restore = (node: { type: string; start: number; end: number } | undefined) => {
+    if (node?.type !== "TemplateLiteral") return;
+    const template = node as import("rolldown/utils").ESTree.TemplateLiteral;
+    const value = template.quasis[0]?.value.cooked;
+    if (template.expressions.length > 0 || typeof value !== "string") return;
+    // The minified chunk is ASCII-only; keep the restored literal ASCII too.
+    const text = JSON.stringify(value).replace(
+      /[\u007f-￿]/g,
+      (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
+    replacements.push({ start: template.start, end: template.end, text });
+  };
+  new Visitor({
+    ImportExpression(node) {
+      restore(node.source);
+    },
+    CallExpression(node) {
+      if (
+        node.callee.type === "Identifier" &&
+        node.callee.name === "require" &&
+        node.arguments.length === 1
+      ) {
+        restore(node.arguments[0]);
+      }
+    },
+  }).visit(parsed.program);
+
+  let restored = "";
+  let offset = 0;
+  for (const { start, end, text } of replacements.sort((a, b) => a.start - b.start)) {
+    restored += code.slice(offset, start) + text;
+    offset = end;
+  }
+  return restored + code.slice(offset);
 }
 
 function createServerChunkMinifyPlugin(options: FarmServerChunkMinifyOptions): Rollup.Plugin {
@@ -4471,6 +4527,7 @@ async function buildSSRInMemory(
           "esbuild",
           "lightningcss",
           "rolldown",
+          "rolldown/experimental",
           "rolldown/utils",
           "rollup",
           "@rollup/rollup-darwin-arm64",

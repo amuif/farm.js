@@ -4,7 +4,11 @@ import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Plugin } from "rolldown";
-import { bundleNodeModule } from "./build/node-module-bundle";
+import {
+  bundleNodeModule,
+  isDeclarationFile,
+  resolvePackageWithoutTsconfig,
+} from "./build/node-module-bundle";
 
 type OxcTransform = (typeof import("rolldown/utils"))["transform"];
 
@@ -255,6 +259,19 @@ export function createFarmConfigResolutionPlugin(options: { transform: OxcTransf
         return null;
       }
 
+      // A tsconfig `paths` entry that points at a declaration file is for the
+      // editor only (esbuild ignored those matches); Node loads the package.
+      const resolveRuntimePath = async (specifier: string): Promise<string | undefined> => {
+        const resolved = await this.resolve(specifier, importer, {
+          kind: extraOptions.kind,
+          skipSelf: true,
+        });
+        if (!resolved?.id || !isDeclarationFile(resolved.id)) return resolved?.id;
+        return (
+          (await resolvePackageWithoutTsconfig(specifier, importer, extraOptions.kind)) ?? undefined
+        );
+      };
+
       if (source === FARM_CORE_PACKAGE && extraOptions.kind === "import-statement") {
         let configEntryCheck = configEntryChecks.get(importer);
         if (!configEntryCheck) {
@@ -262,25 +279,19 @@ export function createFarmConfigResolutionPlugin(options: { transform: OxcTransf
           configEntryChecks.set(importer, configEntryCheck);
         }
         if (await configEntryCheck) {
-          const resolved = await this.resolve(FARM_CONFIG_ENTRY, importer, {
-            kind: extraOptions.kind,
-            skipSelf: true,
-          });
-          if (resolved?.id) {
-            return { id: toExternalSpecifier(resolved.id), external: true };
+          const configEntry = await resolveRuntimePath(FARM_CONFIG_ENTRY);
+          if (configEntry) {
+            return { id: toExternalSpecifier(configEntry), external: true };
           }
         }
       }
 
-      const resolved = await this.resolve(source, importer, {
-        kind: extraOptions.kind,
-        skipSelf: true,
-      });
-      if (!resolved?.id) {
+      const resolvedId = await resolveRuntimePath(source);
+      if (!resolvedId) {
         return { id: source, external: true };
       }
 
-      return { id: toExternalSpecifier(resolved.id), external: true };
+      return { id: toExternalSpecifier(resolvedId), external: true };
     },
   };
 }

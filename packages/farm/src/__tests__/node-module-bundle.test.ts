@@ -1,8 +1,9 @@
 // @vitest-environment node
 
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { bundleNodeModule } from "../build/node-module-bundle";
 import { minifyFarmServerChunk } from "../nitro/universal-build";
@@ -57,6 +58,59 @@ describe("bundleNodeModule", () => {
     expect(code).toContain("sourceMappingURL=data:application/json");
   });
 
+  it("keeps a workspace package external when tsconfig paths map it to declarations", async () => {
+    const root = await createRoot();
+    const packageRoot = path.join(root, "packages", "workspace-lib");
+    await mkdir(path.join(packageRoot, "dist"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "@farm.js"), { recursive: true });
+    await writeFile(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({
+        name: "@farm.js/workspace-lib",
+        type: "module",
+        types: "./dist/index.d.ts",
+        exports: { ".": { types: "./dist/index.d.ts", import: "./dist/index.js" } },
+      }),
+    );
+    await writeFile(path.join(packageRoot, "dist", "index.js"), "export const value = 1;\n");
+    await writeFile(
+      path.join(packageRoot, "dist", "index.d.ts"),
+      "export declare const value: number;\n",
+    );
+    await symlink(
+      packageRoot,
+      path.join(root, "node_modules", "@farm.js", "workspace-lib"),
+      "junction",
+    );
+    await writeFile(
+      path.join(root, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@farm.js/workspace-lib": ["./packages/workspace-lib/dist/index.d.ts"] },
+        },
+      }),
+    );
+    await writeFile(
+      path.join(root, "entry.ts"),
+      'import { value } from "@farm.js/workspace-lib";\nexport default value;\n',
+    );
+    const outfile = path.join(root, "out.mjs");
+
+    await bundleNodeModule({
+      root,
+      entry: path.join(root, "entry.ts"),
+      outfile,
+      target: "node20",
+      externalPackages: true,
+    });
+
+    const code = await readFile(outfile, "utf8");
+    expect(code).toMatch(/from ["']@farm\.js\/workspace-lib["']/);
+    expect(code).not.toContain("index.d.ts");
+    expect((await import(pathToFileURL(outfile).href)).default).toBe(1);
+  });
+
   it("reports load errors as plain text", async () => {
     const root = await createRoot();
     await writeFile(path.join(root, "broken.ts"), "export default { a: 1 ;\n");
@@ -107,6 +161,28 @@ describe("minifyFarmServerChunk", () => {
     expect(code).not.toContain("__name");
     const module = await import(`data:text/javascript,${encodeURIComponent(code)}`);
     expect(module.namedHandler()).toBe("café");
+  });
+
+  it("emits import() and require() specifiers as string literals", async () => {
+    // Miniflare/workerd and other static module scanners reject non-literal
+    // specifiers, and Oxc prints the shortest quote (a backtick) by default.
+    const code = await minifyFarmServerChunk(
+      [
+        'export const load = () => import("./_chunks/page-\u00e9.mjs");',
+        'export const legacy = () => require("./legacy.cjs");',
+        "export const label = `plain`;",
+        'export const sample = "import(`./not-a-module.mjs`)";',
+      ].join("\n"),
+      "_virtual_farm-ssr-entry.mjs",
+      { keepNames: true, target: "esnext" },
+    );
+
+    expect(code).toContain('import("./_chunks/page-\\u00e9.mjs")');
+    expect(code).toContain('require("./legacy.cjs")');
+    expect(code).not.toContain("import(`./_chunks");
+    expect(code).not.toContain("require(`");
+    expect(code).toContain("import(`./not-a-module.mjs`)");
+    expect([...code].every((character) => character.charCodeAt(0) < 128)).toBe(true);
   });
 
   it("throws on syntax errors instead of emitting partial output", async () => {

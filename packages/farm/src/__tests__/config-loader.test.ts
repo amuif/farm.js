@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -89,6 +89,31 @@ describe("Farm config helper import fast path", () => {
       extends: ["./base"],
       helperEntry: "config",
     });
+  });
+});
+
+describe("Farm config workspace packages", () => {
+  it("loads a symlinked workspace package that tsconfig paths map to its declarations", async () => {
+    const root = await createProject();
+    await createWorkspacePackage(root);
+    await writeFile(
+      path.join(root, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@farm.js/workspace-lib": ["./packages/workspace-lib/dist/index.d.ts"] },
+        },
+      }),
+    );
+    await writeFile(
+      path.join(root, "farm.config.ts"),
+      [
+        'import { workspaceValue } from "@farm.js/workspace-lib";',
+        "export default { workspaceValue };",
+      ].join("\n"),
+    );
+
+    await expect(loadProjectConfig(root)).resolves.toEqual({ workspaceValue: "runtime" });
   });
 });
 
@@ -203,6 +228,35 @@ async function createProject(): Promise<string> {
   );
 
   return root;
+}
+
+// A pnpm workspace package: linked into node_modules from outside it, with a
+// `types` condition listed before `import` and a declaration file that cannot run.
+async function createWorkspacePackage(root: string): Promise<void> {
+  const packageRoot = path.join(root, "packages", "workspace-lib");
+  await mkdir(path.join(packageRoot, "dist"), { recursive: true });
+  await writeFile(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({
+      name: "@farm.js/workspace-lib",
+      type: "module",
+      types: "./dist/index.d.ts",
+      exports: { ".": { types: "./dist/index.d.ts", import: "./dist/index.js" } },
+    }),
+  );
+  await writeFile(
+    path.join(packageRoot, "dist", "index.js"),
+    'export const workspaceValue = "runtime";\n',
+  );
+  await writeFile(
+    path.join(packageRoot, "dist", "index.d.ts"),
+    "export declare const workspaceValue: string;\n",
+  );
+  await symlink(
+    packageRoot,
+    path.join(root, "node_modules", "@farm.js", "workspace-lib"),
+    "junction",
+  );
 }
 
 async function loadProjectConfig(root: string): Promise<Record<string, unknown>> {
