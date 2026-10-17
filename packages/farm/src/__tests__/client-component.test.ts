@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../utils";
 import {
   describeSuppressedAsyncHydration,
   enforceFarmIsolatedHydrationRouteBudget,
@@ -310,6 +311,24 @@ describe("client component path resolution", () => {
       ).toEqual([
         { modulePath: path.join(root, "src/components/counter.tsx"), islandStrategy: "load" },
       ]);
+    });
+
+    it("warns once when an alias-shaped import resolves nowhere", () => {
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+      const root = writeAliasFixture({
+        "src/app/page.tsx":
+          'import { Nav } from "@/vite-only-alias/nav";\nimport { x } from "not-installed-package";\nexport default function Page() { return <Nav />; }\n',
+      });
+
+      getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root);
+      getClientModuleMetadata(path.join(root, "src/app/page.tsx"), root);
+
+      const messages = warn.mock.calls.map(([message]) => String(message));
+      expect(
+        messages.filter((message) => message.includes('"@/vite-only-alias/nav"')),
+      ).toHaveLength(1);
+      expect(messages.some((message) => message.includes("not-installed-package"))).toBe(false);
+      warn.mockRestore();
     });
 
     it("keeps a server-only page server-only when its @/ imports have no client code", () => {

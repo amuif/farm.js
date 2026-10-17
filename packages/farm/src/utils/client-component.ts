@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { isFarmIslandStrategy, type FarmIslandStrategy } from "../island";
 import { isReactRenderer, type FarmRenderer } from "../renderer";
 import type { FarmIsolatedClientHydrationMode } from "../types";
+import { logger } from "../utils";
 
 function readIfExists(filePath: string): string | null {
   try {
@@ -1573,7 +1574,25 @@ function resolveImportedModule(
   if (aliased) return { path: aliased, local: true };
   // Like TypeScript, fall back to node_modules when a matching alias has no
   // source file, e.g. `"*": ["src/*"]` or a `paths` entry that only maps types.
-  return { path: resolvePackageModuleSourcePath(importerPath, specifier, root), local: false };
+  const packagePath = resolvePackageModuleSourcePath(importerPath, specifier, root);
+  if (!packagePath) warnUnresolvedAliasImport(importerPath, specifier, root);
+  return { path: packagePath, local: false };
+}
+
+const warnedUnresolvedAliasImports = new Set<string>();
+// Only shapes no npm package can have: a miss here means hydration analysis cannot
+// see the module, so client components behind it would be left static.
+const ALIAS_IMPORT = /^(?:@\/|~\/|#)/;
+
+function warnUnresolvedAliasImport(importerPath: string, specifier: string, root?: string): void {
+  if (!ALIAS_IMPORT.test(specifier) || warnedUnresolvedAliasImports.has(specifier)) return;
+  warnedUnresolvedAliasImports.add(specifier);
+  const importer = root ? path.relative(root, importerPath) : importerPath;
+  logger.warn(
+    `Could not resolve "${specifier}" (imported by ${importer}) while checking which pages need ` +
+      `client JavaScript. If it holds client components, they will not hydrate. Map the alias ` +
+      `in tsconfig.json "paths" or package.json "imports".`,
+  );
 }
 
 interface ProjectImportAlias {
