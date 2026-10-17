@@ -1010,11 +1010,20 @@ const OPTIONAL_FEATURE_PACKAGES: readonly OptionalFeaturePackage[] = [
     missingStatus: "warn",
     findUse: findTailwindUse,
   },
+  {
+    name: "@vercel/og",
+    purpose: "render OG and metadata images",
+    missingStatus: "fail",
+    findUse: findOgImageUse,
+  },
 ];
 
 const POSTCSS_CONFIG_FILE =
   /^(?:postcss\.config\.(?:[cm]?[jt]s|json)|\.postcssrc(?:\.(?:json|[cm]?[jt]s))?)$/;
 const TAILWIND_CSS_IMPORT = /@import\s+["']tailwindcss["']/;
+const GENERATED_METADATA_IMAGE_FILE = /^(?:opengraph|twitter)-image\.(?:[cm]?[jt]sx?|vue|svelte)$/;
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|vue|svelte)$/;
+const CORE_OG_IMPORT = /["']@farm\.js\/core\/og["']/;
 
 function collectOptionalPackageChecks(
   config: ResolvedFarmConfig,
@@ -1060,6 +1069,20 @@ function findTailwindUse(config: ResolvedFarmConfig, root: string): string | und
     file.endsWith(".css") ? TAILWIND_CSS_IMPORT.test(readFileSync(file, "utf8")) : false,
   );
   return stylesheet ? `${toPosix(path.relative(root, stylesheet))} imports tailwindcss` : undefined;
+}
+
+function findOgImageUse(config: ResolvedFarmConfig, root: string): string | undefined {
+  const sourceRoot = path.join(config.root, config.srcDir);
+  const generated = findFile(sourceRoot, (file) =>
+    GENERATED_METADATA_IMAGE_FILE.test(path.basename(file)),
+  );
+  if (generated) return `${toPosix(path.relative(root, generated))} renders a metadata image`;
+  const importer = findFile(sourceRoot, (file) =>
+    SOURCE_FILE.test(file) ? CORE_OG_IMPORT.test(readFileSync(file, "utf8")) : false,
+  );
+  return importer
+    ? `${toPosix(path.relative(root, importer))} imports @farm.js/core/og`
+    : undefined;
 }
 
 function findFile(directory: string, matches: (file: string) => boolean): string | undefined {

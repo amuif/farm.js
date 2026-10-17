@@ -82,7 +82,7 @@ Rewrite these imports in every file, not only in `app/`. A shared component that
 | `next/font/google` | a font package with `localFont`, or `@fontsource*` CSS imports          |
 | `next/script`      | the [scripts plugin](/docs/plugins/scripts) or a `<script>` in a layout |
 | `next/dynamic`     | `React.lazy` with `<Suspense>`                                          |
-| `next/og`          | `ImageResponse` from `@farm.js/core/og`                                 |
+| `next/og`          | `ImageResponse` from `@farm.js/core/og` (install `@vercel/og`)          |
 | `next/server`      | standard `Request` and `Response`                                       |
 
 Replace `next/font`, `next/image`, and `next/server` before the first run. `next/font/google` makes

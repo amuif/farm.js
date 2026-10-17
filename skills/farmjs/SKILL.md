@@ -517,6 +517,7 @@ run its client generation immediately before type checking or building.
 - Cron is not a durable workflow engine; protect production routes with `CRON_SECRET` and design handlers for repeated or overlapping delivery.
 - In monorepos with pnpm and Prisma, generated clients can be stale or shared; run `prisma generate` immediately before builds.
 - Feature packages are optional peers of `@farm.js/core`; install the ones the app uses:
-  `@tailwindcss/vite` for built-in Tailwind CSS. `farm doctor` reports a missing one.
+  `@tailwindcss/vite` for built-in Tailwind CSS, `@vercel/og` for generated metadata images and
+  `@farm.js/core/og`. `farm doctor` reports a missing one.
 - Run `pnpm format` before `pnpm lint` if `oxfmt --check` fails.
 - Existing lint warnings may be present; treat nonzero exit codes as failures.

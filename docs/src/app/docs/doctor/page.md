@@ -67,8 +67,9 @@ Offline mode checks:
 - Generated route, API, environment, content, and i18n declarations are current.
 - The selected renderer's Vite, server, and client entrypoints resolve.
 - Configured integration entrypoints load, and declared Farm packages are installed.
-- Feature packages that Farm loads from the app, such as `@tailwindcss/vite` for a stylesheet that
-  imports `tailwindcss`, are installed when the app uses the feature.
+- Feature packages that Farm loads from the app are installed when the app uses the feature:
+  `@tailwindcss/vite` for a stylesheet that imports `tailwindcss` (a warning), and `@vercel/og` for
+  a generated `opengraph-image`/`twitter-image` or an `@farm.js/core/og` import (a failure).
 - The app directory or programmatic router contains page routes.
 - A root layout is available from the app or an extended layer.
 - Deployment target, preset, and output directory resolve.

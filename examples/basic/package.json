@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@farm.js/core": "workspace:*",
+    "@vercel/og": "^1.0.1",
     "better-call": "^1.0.19",
     "react": "19.2.8",
     "react-dom": "19.2.8",

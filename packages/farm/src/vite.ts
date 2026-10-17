@@ -14,6 +14,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { FarmApp } from "./app";
 import { logger, toPosixPath, toViteModuleId } from "./utils";
 import { loadTailwindVitePlugin } from "./build/tailwind";
+import { isOptionalPeerInstalled, VERCEL_OG_INSTALL_HINT } from "./optional-peer";
 import {
   FARM_NODE_RESPONSE_END_PENDING,
   type FarmPlugin,
@@ -285,19 +286,33 @@ const FARM_SERVER_ONLY_ENTRIES = new Set(["@farm.js/core/og"]);
 /**
  * Fail a browser graph that imports a server-only core entry, instead of
  * bundling its server runtime (for `@farm.js/core/og`, the `@vercel/og` wasm
- * renderer) into client code.
+ * renderer) into client code. A server graph that imports `@farm.js/core/og`
+ * without the optional `@vercel/og` peer fails with the install command.
  */
 export function farmServerOnlyEntriesPlugin(): Plugin {
+  let root = process.cwd();
+  let vercelOgInstalled = false;
   return {
     name: "farm:server-only-entries",
     enforce: "pre",
+    configResolved(config) {
+      root = config.root;
+    },
     resolveId(id, importer, options) {
-      if (options?.ssr || !FARM_SERVER_ONLY_ENTRIES.has(id)) return null;
-      this.error(
-        `${id} is server-only and cannot be imported into client code${
-          importer ? ` (imported by ${importer})` : ""
-        }. Use it from an API route or another server module.`,
-      );
+      if (!FARM_SERVER_ONLY_ENTRIES.has(id)) return null;
+      const importedBy = importer ? ` (imported by ${importer})` : "";
+      if (!options?.ssr) {
+        this.error(
+          `${id} is server-only and cannot be imported into client code${importedBy}. Use it from an API route or another server module.`,
+        );
+      }
+      vercelOgInstalled ||= isOptionalPeerInstalled(root, "@vercel/og");
+      if (!vercelOgInstalled) {
+        this.error(
+          `${id} needs @vercel/og, which is not installed${importedBy}. ${VERCEL_OG_INSTALL_HINT}`,
+        );
+      }
+      return null;
     },
   };
 }

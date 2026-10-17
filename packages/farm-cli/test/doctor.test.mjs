@@ -367,6 +367,42 @@ test("reports an optional feature package the app uses but has not installed", a
   }
 });
 
+test("fails when the app renders OG images without @vercel/og", async () => {
+  for (const [file, source, use] of [
+    [
+      "src/app/opengraph-image.tsx",
+      "export default () => <div>card</div>;\n",
+      /src\/app\/opengraph-image\.tsx renders a metadata image/,
+    ],
+    [
+      "src/app/api/card/route.tsx",
+      'import { ImageResponse } from "@farm.js/core/og";\nexport const GET = () => new ImageResponse(<div />);\n',
+      /src\/app\/api\/card\/route\.tsx imports @farm\.js\/core\/og/,
+    ],
+  ]) {
+    const root = await createTempProject();
+    try {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), source);
+
+      const report = await runFarmDoctor({ root, offline: true });
+      const check = report.checks.find(
+        (entry) =>
+          entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("@vercel/og"),
+      );
+      assert.equal(check?.status, "fail");
+      assert.match(check?.message || "", use);
+      assert.equal(
+        check?.action,
+        'Install "@vercel/og" to render OG and metadata images: pnpm add @vercel/og',
+      );
+      assert.equal(report.health, "error");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("skips optional feature packages the app does not use", async () => {
   const root = await createTempProject();
 

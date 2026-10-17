@@ -102,6 +102,7 @@ import {
 import type { TransformOptions } from "esbuild";
 import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
 import { loadTailwindVitePlugin } from "../build/tailwind";
+import { VERCEL_OG_INSTALL_HINT } from "../optional-peer";
 import { mergeFarmFontCss } from "../font-vite";
 import type { FarmIslandStrategy } from "../island";
 import { createFarmSourceAlias, mergeFarmProductionViteConfig } from "../server/vite-config";
@@ -4189,7 +4190,7 @@ async function buildSSRInMemory(
   configuredHeaderRoutes: UniversalConfiguredHeaderRoute[];
 }> {
   const viteBuild = productionVite.build;
-  const { farmPlugin } = await import("../vite");
+  const { farmPlugin, farmServerOnlyEntriesPlugin } = await import("../vite");
   const { PluginManager } = await import("../plugin");
   const fs = await import("fs/promises");
 
@@ -4252,6 +4253,7 @@ async function buildSSRInMemory(
       modulePath: entry.modulePath,
     });
   }
+  assertMetadataImageRuntimeInstalled(root, metadataImageRoutes);
 
   const applicationMetadataRoutes: UniversalApplicationMetadataRoute[] = Array.from(
     routeManager.getMetadataRoutes().values(),
@@ -4576,6 +4578,7 @@ async function buildSSRInMemory(
             };
           },
         },
+        farmServerOnlyEntriesPlugin(),
         farmPlugin({ ...config, isolatedClientBoundaryModules }, pluginManager),
         farmEnvironmentFunctionsPlugin(),
         {
@@ -10464,27 +10467,45 @@ async function mergeStagedDirectory(
   );
 }
 
+/**
+ * Generated `opengraph-image`/`twitter-image` modules render with @vercel/og,
+ * an optional peer. Fail the build before bundling when it is not installed.
+ */
+export function assertMetadataImageRuntimeInstalled(
+  root: string,
+  metadataImageRoutes: ReadonlyArray<
+    Pick<UniversalMetadataImageRoute, "sourceType" | "modulePath">
+  >,
+): void {
+  const generated = metadataImageRoutes.find((image) => image.sourceType === "module");
+  if (!generated || resolveMetadataImageRuntimePackageJson(root)) return;
+  const file = generated.modulePath ? toPosixPath(path.relative(root, generated.modulePath)) : "";
+  throw new Error(
+    `${file || "A generated metadata image"} renders with @vercel/og, which is not installed. ${VERCEL_OG_INSTALL_HINT}`,
+  );
+}
+
+/** @vercel/og is an optional peer: the app installs it, and core resolves it beside itself. */
+function resolveMetadataImageRuntimePackageJson(root: string): string | null {
+  const projectRequire = createRequire(path.join(root, "package.json"));
+  const packageJsonPath = resolvePackageJson(projectRequire, "@vercel/og");
+  if (packageJsonPath) return packageJsonPath;
+  try {
+    return resolvePackageJson(createRequire(projectRequire.resolve("@farm.js/core")), "@vercel/og");
+  } catch {
+    return null;
+  }
+}
+
 async function copyMetadataImageRuntime(
   root: string,
   nitroFuncDir: string,
   fs: typeof import("fs/promises"),
 ): Promise<void> {
-  const projectRequire = createRequire(path.join(root, "package.json"));
-  let runtimeRequire = projectRequire;
-  let packageJsonPath = resolvePackageJson(runtimeRequire, "@vercel/og");
-
-  if (!packageJsonPath) {
-    try {
-      runtimeRequire = createRequire(projectRequire.resolve("@farm.js/core"));
-      packageJsonPath = resolvePackageJson(runtimeRequire, "@vercel/og");
-    } catch {
-      // The missing-runtime diagnostic below remains authoritative.
-    }
-  }
-
+  const packageJsonPath = resolveMetadataImageRuntimePackageJson(root);
   if (!packageJsonPath) {
     throw new Error(
-      "Generated metadata images require @vercel/og. Reinstall @farm.js/core with production dependencies.",
+      `The server output imports @vercel/og, which is not installed. ${VERCEL_OG_INSTALL_HINT}`,
     );
   }
 

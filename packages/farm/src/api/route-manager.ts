@@ -4,6 +4,7 @@ import type { FarmPlugin } from "../plugin";
 import * as fs from "fs";
 import * as path from "path";
 import type { ViteDevServer } from "vite";
+import { explainMissingOptionalPeer } from "../optional-peer";
 import { logger } from "../utils";
 import { toFileModuleUrl } from "../utils/file-module";
 import type { ProgrammaticApiRoute } from "../routes";
@@ -276,7 +277,8 @@ export class APIRouteManager {
     }
   }
 
-  private handleLoadError(message: string, error: unknown): void {
+  private handleLoadError(message: string, loadError: unknown): void {
+    const error = explainMissingOptionalPeer(loadError, message.replace(/^Error loading /, ""));
     logger.error(`${message}: ${error}`);
     if (
       this.throwOnLoadError ||

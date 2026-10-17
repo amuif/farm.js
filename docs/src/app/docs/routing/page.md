@@ -1200,7 +1200,7 @@ Static images inside a dynamic segment are shared by every concrete route. Use a
 Generated JSX metadata images currently use the React image renderer. Every renderer can use static
 `opengraph-image.png`, `twitter-image.png`, and explicit metadata image URLs.
 
-Place `opengraph-image.tsx` or `twitter-image.tsx` next to a route segment when the image needs data or route params. Return ordinary stateless JSX: Farm owns the image endpoint and PNG renderer, so the component does not import `ImageResponse` or declare an API URL. Farm also adds the nearest matching image to the page head when `openGraph.images` or `twitter.images` is not already set.
+Place `opengraph-image.tsx` or `twitter-image.tsx` next to a route segment when the image needs data or route params. Return ordinary stateless JSX: Farm owns the image endpoint and PNG renderer, so the component does not import `ImageResponse` or declare an API URL. The renderer is `@vercel/og`, which the app installs with `pnpm add @vercel/og`; `farm build` fails with that command when a generated image exists and the package is missing. Farm also adds the nearest matching image to the page head when `openGraph.images` or `twitter.images` is not already set.
 
 **src/app/products/[id]/opengraph-image.tsx**
 
@@ -1255,7 +1255,7 @@ Keep only one implementation for each image kind in a segment. For example, defi
 
 ### Image responses in API routes
 
-When an image needs its own URL, such as a share card per record or a badge another site embeds, return `ImageResponse` from an API route. `@farm.js/core/og` exports the same `@vercel/og` renderer that generated metadata images use, so the app does not install it separately.
+When an image needs its own URL, such as a share card per record or a badge another site embeds, return `ImageResponse` from an API route. `@farm.js/core/og` exports the same `@vercel/og` renderer that generated metadata images use. Install it once for both with `pnpm add @vercel/og`.
 
 **src/app/api/og/route.tsx**
 
@@ -1289,7 +1289,7 @@ export async function GET(request: Request) {
 
 Outside development the response defaults to `cache-control: public, immutable, no-transform, max-age=31536000`. Pass a lowercase `cache-control` header when the image can change, for example `headers: { "cache-control": "public, max-age=300" }`.
 
-`@farm.js/core/og` is server-only. Importing it from a client component fails the build, and the development request, with an error that names the importing module. On Node presets, including `node-server` and Vercel Functions, Farm copies `@vercel/og` and its wasm and font files into the server output whenever the server bundle imports it. Edge and Cloudflare Worker presets are not supported yet.
+`@farm.js/core/og` is server-only. Importing it from a client component fails the build, and the development request, with an error that names the importing module. Importing it from server code without `@vercel/og` installed fails the same way and names the install command. On Node presets, including `node-server` and Vercel Functions, Farm copies `@vercel/og` and its wasm and font files into the server output whenever the server bundle imports it. Edge and Cloudflare Worker presets are not supported yet.
 
 ### Other meta tags
 
