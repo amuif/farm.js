@@ -75,11 +75,17 @@ describe("RSC package compatibility", () => {
     const server = {
       config: { root, mode: "development" },
       hot: undefined,
-      ssrLoadModule: vi.fn().mockResolvedValue({
-        default(context: { pathname: string }) {
-          seen.push(context.pathname);
+      environments: {
+        ssr: {
+          runner: {
+            import: vi.fn().mockResolvedValue({
+              default(context: { pathname: string }) {
+                seen.push(context.pathname);
+              },
+            }),
+          },
         },
-      }),
+      },
       moduleGraph: { invalidateModule: vi.fn() },
       ws: { send: vi.fn() },
     };

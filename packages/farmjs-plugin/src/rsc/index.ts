@@ -1,3 +1,4 @@
+import { loadFarmDevModule, FarmDevEnvironmentError } from "@farm.js/core/plugin";
 /**
  * Farm.js RSC Plugin
  *
@@ -1424,18 +1425,16 @@ if (document.readyState === 'loading') {
 
             try {
               const clientEntryUrl = "/.farm/rsc-entries/entry.browser.tsx";
-              const ssrEnv = (server as any).environments?.ssr;
+              const ssrEnv = server.environments.ssr;
               (globalThis as any).__VITE_RSC_LOAD_SSR__ = async () => {
                 if (ssrEnv) {
                   const ssrSource =
                     (ssrEnv.config?.build as any)?.rollupOptions?.input?.index ??
                     path.join(server.config.root, ".farm/rsc-entries/entry.ssr.tsx");
-                  const resolved = await ssrEnv.pluginContainer.resolveId(ssrSource, undefined, {
-                    ssr: true,
-                  });
-                  if (resolved?.id) return ssrEnv.runner.import(resolved.id);
+                  const resolved = await ssrEnv.pluginContainer.resolveId(ssrSource);
+                  if (resolved?.id) return loadFarmDevModule(server, resolved.id);
                 }
-                return server.ssrLoadModule("./.farm/rsc-entries/entry.ssr.tsx");
+                return loadFarmDevModule(server, "./.farm/rsc-entries/entry.ssr.tsx");
               };
               // When server actions are enabled, prepend an inline assignment so __viteRscCallServer
               // is always a function before any chunk runs (avoids "globalThis.__viteRscCallServer is not a function").
@@ -1481,8 +1480,13 @@ if (document.readyState === 'loading') {
               });
 
               // Load the RSC entry in the "rsc" environment so @vitejs/plugin-rsc transforms run with this.environment.name === "rsc".
-              // Fallback: when Farm dev server has no rsc environment, load via main server so streaming/loading still works.
-              const rscEnv = (server as any).environments?.rsc;
+              // Never evaluate an RSC entry with SSR conditions or share its module cache.
+              const rscEnv = server.environments.rsc;
+              if (!rscEnv) {
+                throw new FarmDevEnvironmentError(
+                  '[Farm.js] The "rsc" development environment is missing. Enable @vitejs/plugin-rsc before serving RSC requests.',
+                );
+              }
               let rscEntry: any = null;
               if (rscEnv) {
                 const rscSource =
@@ -1497,22 +1501,11 @@ if (document.readyState === 'loading') {
                   "entry.rsc.tsx",
                 );
                 const resolved =
-                  (await rscEnv.pluginContainer.resolveId(rscSource, importer, {
-                    ssr: true,
-                  })) ??
-                  (await rscEnv.pluginContainer.resolveId(rscSource, undefined, { ssr: true })) ??
-                  (await rscEnv.pluginContainer.resolveId(absoluteRscEntry, undefined, {
-                    ssr: true,
-                  }));
+                  (await rscEnv.pluginContainer.resolveId(rscSource, importer)) ??
+                  (await rscEnv.pluginContainer.resolveId(rscSource)) ??
+                  (await rscEnv.pluginContainer.resolveId(absoluteRscEntry));
                 const id = resolved?.id ?? pathToFileURL(absoluteRscEntry).href;
-                rscEntry = await rscEnv.runner.import(id);
-              }
-              if (!rscEntry?.default?.fetch) {
-                try {
-                  rscEntry = await server.ssrLoadModule("./.farm/rsc-entries/entry.rsc.tsx");
-                } catch (_) {
-                  // Ignore; will fall through to legacy handler
-                }
+                rscEntry = await loadFarmDevModule(server, id, "rsc");
               }
               if (!rscEntry?.default?.fetch)
                 throw new Error("[Farm.js] Could not load RSC entry in rsc environment");
@@ -1541,7 +1534,7 @@ if (document.readyState === 'loading') {
                 return;
               }
               // RSC pipeline failed; fall back to legacy SSR for GET only
-              if (method !== "GET") {
+              if (method !== "GET" || rscError instanceof FarmDevEnvironmentError) {
                 const duration = Date.now() - startTime;
                 logResponse(method, pathname, 500, duration);
                 console.error("[Farm.js] RSC dev handler error:", rscError);
@@ -1600,7 +1593,7 @@ if (document.readyState === 'loading') {
                     break;
                   }
 
-                  pageModule = await server.ssrLoadModule(actualPath);
+                  pageModule = await loadFarmDevModule(server, actualPath);
                   if (pageModule?.default) {
                     pageCache.set(pagePath, pageModule);
                     matchedPath = pagePath;
@@ -1618,7 +1611,7 @@ if (document.readyState === 'loading') {
 
               try {
                 const layoutPath = `./${srcDir}${appSegment ? `/${appSegment}` : ""}/layout.tsx`;
-                layoutModule = await server.ssrLoadModule(layoutPath);
+                layoutModule = await loadFarmDevModule(server, layoutPath);
               } catch {}
 
               const React = await import("react");

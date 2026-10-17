@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 /**
  * Farm.js API Routes Vite Plugin
  *
@@ -300,7 +301,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(filePath);
+            const routeModule = await loadFarmDevModule(server, filePath);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
@@ -338,7 +339,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
         for (const routesFile of routesFiles) {
           if (fs.existsSync(routesFile)) {
             try {
-              const routesModule = await server.ssrLoadModule(routesFile);
+              const routesModule = await loadFarmDevModule(server, routesFile);
 
               for (const [exportName, exportValue] of Object.entries(routesModule)) {
                 const endpoint = exportValue as any;
@@ -369,7 +370,8 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
 
         for (const routeFile of routeFiles) {
           try {
-            const routesModule = await server.ssrLoadModule(
+            const routesModule = await loadFarmDevModule(
+              server,
               toViteModuleId(routeFile, server.config.root),
             );
             const manifest = getProgrammaticRouteManifest(routesModule);
@@ -588,7 +590,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
         const previousState = snapshotRouteState();
 
         try {
-          const routesModule = await server.ssrLoadModule(file);
+          const routesModule = await loadFarmDevModule(server, file);
           removeEndpointsFromFile(file);
 
           for (const [exportName, exportValue] of Object.entries(routesModule)) {
@@ -654,7 +656,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             log(`API route file removed: ${routePath}`);
             return [];
           }
-          const routeModule = await server.ssrLoadModule(file);
+          const routeModule = await loadFarmDevModule(server, file);
 
           removeEndpointsFromFile(file);
           const availableMethods: string[] = [];

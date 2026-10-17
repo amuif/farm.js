@@ -1,4 +1,4 @@
-import { bench, describe, expect } from "vitest";
+import { test, expect } from "vitest";
 import { FarmClientDataCache } from "../client-cache";
 
 // Control: metadata sweep from f920c090. Fixture has no subscribers/in-flight
@@ -44,7 +44,9 @@ function workload(count: number, previous: boolean) {
 }
 
 for (const count of [100, 1_000])
-  describe(`${count} lazily expired entries`, () => {
-    bench("previous full alias sweep", workload(count, true));
-    bench("targeted reverse edges", workload(count, false));
+  test(`${count} lazily expired entries`, async ({ bench }) => {
+    await bench.compare(
+      bench("previous full alias sweep", workload(count, true)),
+      bench("targeted reverse edges", workload(count, false)),
+    );
   });

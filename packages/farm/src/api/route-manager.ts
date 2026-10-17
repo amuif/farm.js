@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 import { mergePluginAPIRoutes } from "./plugin-route-runtime";
 import type { FarmPlugin } from "../plugin";
 import * as fs from "fs";
@@ -311,7 +312,7 @@ export class APIRouteManager {
 
   private async loadModule(filePath: string): Promise<Record<string, unknown>> {
     if (this.viteServer) {
-      return await this.viteServer.ssrLoadModule(filePath);
+      return await loadFarmDevModule(this.viteServer, filePath);
     }
 
     return await import(/* @vite-ignore */ toFileModuleUrl(filePath));

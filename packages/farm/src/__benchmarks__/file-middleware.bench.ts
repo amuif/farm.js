@@ -1,6 +1,6 @@
 // @vitest-environment node
 import assert from "node:assert/strict";
-import { bench, describe } from "vitest";
+import { test } from "vitest";
 import { matchesMiddlewareRoute, compileMiddlewareRoute } from "../middleware/matcher";
 import { matchRoutePath } from "./controls/file-middleware";
 
@@ -11,12 +11,14 @@ for (const pathname of ["/missing", "/resource-99/value/nested", "/resource-99/%
   for (const entry of entries) {
     assert.deepEqual(matchesMiddlewareRoute(pathname, entry), matchRoutePath(pathname, entry.path));
   }
-  describe(`100 file middleware entries against ${pathname}`, () => {
-    bench("previous per-request compilation", () => {
-      for (const entry of entries) _sink = matchRoutePath(pathname, entry.path);
-    });
-    bench("reused compiled patterns", () => {
-      for (const entry of entries) _sink = matchesMiddlewareRoute(pathname, entry);
-    });
+  test(`100 file middleware entries against ${pathname}`, async ({ bench }) => {
+    await bench.compare(
+      bench("previous per-request compilation", () => {
+        for (const entry of entries) _sink = matchRoutePath(pathname, entry.path);
+      }),
+      bench("reused compiled patterns", () => {
+        for (const entry of entries) _sink = matchesMiddlewareRoute(pathname, entry);
+      }),
+    );
   });
 }

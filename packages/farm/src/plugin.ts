@@ -1,3 +1,4 @@
+export { loadFarmDevModule, FarmDevEnvironmentError, type FarmDevModuleServer } from "./dev-module";
 import type { PluginRoutes, PluginRoutesFactory } from "./api/route";
 // Plugin factories must emit declarations through public exports, never bundled
 // declaration chunk paths, even when they only import @farm.js/core/plugin.

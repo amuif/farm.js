@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { bench, describe } from "vitest";
+import { test } from "vitest";
 import { matchAPIRoute } from "../api/route-pattern";
 import { matchAPIRoute as matchPreviousAPIRoute } from "./controls/api-route-pattern";
 
@@ -15,11 +15,13 @@ for (const path of [pathname, "/api/resources-0/first", "/api/resources-250/a%2F
 }
 let _benchmarkSink: unknown;
 
-describe("API route matching", () => {
-  bench("cached route metadata", () => {
-    _benchmarkSink = matchAPIRoute(routes, pathname);
-  });
-  bench("previous API matcher control", () => {
-    _benchmarkSink = matchPreviousAPIRoute(routes, pathname);
-  });
+test("API route matching", async ({ bench }) => {
+  await bench.compare(
+    bench("cached route metadata", () => {
+      _benchmarkSink = matchAPIRoute(routes, pathname);
+    }),
+    bench("previous API matcher control", () => {
+      _benchmarkSink = matchPreviousAPIRoute(routes, pathname);
+    }),
+  );
 });

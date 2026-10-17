@@ -3,7 +3,9 @@ import solidPlugin from "vite-plugin-solid";
 
 export default defineConfig({
   // Hydratable DOM output, as production builds use (see src/vite.ts).
-  plugins: [solidPlugin({ ssr: true })],
+  // Fast Refresh is browser-only; its virtual module is not a Windows file URL
+  // for Vitest's module runner. These tests exercise hydration and route state.
+  plugins: [solidPlugin({ ssr: true, hot: false })],
   css: {
     postcss: {
       plugins: [],

@@ -1,3 +1,4 @@
+import { loadFarmDevModule, type FarmDevModuleServer } from "@farm.js/core/plugin";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -37,8 +38,7 @@ interface FarmModuleNode {
   importedModules?: Set<FarmModuleNode>;
 }
 
-interface FarmViteDevServer {
-  ssrLoadModule(id: string): Promise<Record<string, unknown>>;
+interface FarmViteDevServer extends FarmDevModuleServer {
   moduleGraph?: {
     getModulesByFile(file: string): Set<FarmModuleNode> | undefined;
   };
@@ -264,7 +264,7 @@ async function loadHandlers(
   cacheBust?: number,
 ): Promise<RequestHandler[]> {
   const id = `${toModuleId(handlersFile)}${cacheBust ? `?farm-msw=${cacheBust}` : ""}`;
-  const loaded = await server.ssrLoadModule(id);
+  const loaded = await loadFarmDevModule(server, id);
   const candidate = loaded.handlers ?? loaded.default;
   if (!Array.isArray(candidate)) throw new TypeError(invalidHandlersMessage(handlersFile));
   return candidate as RequestHandler[];

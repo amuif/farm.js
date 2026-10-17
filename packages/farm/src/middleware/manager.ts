@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 /**
  * Middleware Manager
  *
@@ -190,7 +191,7 @@ export class MiddlewareManager {
       // Load the module
       let module: any;
       if (this.viteServer) {
-        module = await this.viteServer.ssrLoadModule(filePath);
+        module = await loadFarmDevModule(this.viteServer, filePath);
       } else {
         module = await import(/* @vite-ignore */ toFileModuleUrl(filePath));
       }

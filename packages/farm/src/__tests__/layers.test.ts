@@ -290,7 +290,7 @@ describe("Farm layers", () => {
       GET: () => new Response(filePath.startsWith(path.join(root, "src")) ? "project" : "layer"),
       default: Object.assign(async () => undefined, { filePath }),
     });
-    const vite = { ssrLoadModule: loadModule } as any;
+    const vite = { environments: { ssr: { runner: { import: loadModule } } } } as any;
     const appDirs = getFarmAppDirectories(config);
 
     const apiManager = new APIRouteManager(appDirs, vite);
@@ -325,13 +325,19 @@ describe("Farm layers", () => {
     const projectRoutes = writeSource(root, "src/routes.ts");
     const component = () => null;
     const vite = {
-      async ssrLoadModule(filePath: string) {
-        return {
-          default: {
-            __farmRoutes: true,
-            routes: [{ kind: "page", path: "/reports", component, metadata: { filePath } }],
+      environments: {
+        ssr: {
+          runner: {
+            async import(filePath: string) {
+              return {
+                default: {
+                  __farmRoutes: true,
+                  routes: [{ kind: "page", path: "/reports", component, metadata: { filePath } }],
+                },
+              };
+            },
           },
-        };
+        },
       },
     } as any;
     const config = await resolveConfig({ root, extends: ["./layers/base"] }, "development");

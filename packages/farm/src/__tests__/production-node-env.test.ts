@@ -22,7 +22,7 @@ function restoreNodeEnv(value: string | undefined): void {
   }
 }
 
-describe.sequential("production NODE_ENV scopes", () => {
+describe("production NODE_ENV scopes", { concurrent: false }, () => {
   it("keeps production pinned until overlapping operations both settle", async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const firstStarted = deferred<void>();
