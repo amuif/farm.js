@@ -39,8 +39,8 @@
   },
   "dependencies": {
     "@farm.js/core": "workspace:*",
-    "vite-plugin-wasm": "^3.6.0",
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.0",
+    "vite-plugin-wasm": "^3.6.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.5",
