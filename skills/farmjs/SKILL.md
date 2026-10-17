@@ -518,6 +518,6 @@ run its client generation immediately before type checking or building.
 - In monorepos with pnpm and Prisma, generated clients can be stale or shared; run `prisma generate` immediately before builds.
 - Feature packages are optional peers of `@farm.js/core`; install the ones the app uses:
   `@tailwindcss/vite` for built-in Tailwind CSS, `@vercel/og` for generated metadata images and
-  `@farm.js/core/og`. `farm doctor` reports a missing one.
+  `@farm.js/core/og`, `sharp` for image optimization. `farm doctor` reports a missing one.
 - Run `pnpm format` before `pnpm lint` if `oxfmt --check` fails.
 - Existing lint warnings may be present; treat nonzero exit codes as failures.

@@ -102,6 +102,7 @@ import {
 import type { TransformOptions } from "esbuild";
 import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
 import { loadTailwindVitePlugin } from "../build/tailwind";
+import { SHARP_INSTALL_HINT } from "../image-runtime";
 import { VERCEL_OG_INSTALL_HINT } from "../optional-peer";
 import { mergeFarmFontCss } from "../font-vite";
 import type { FarmIslandStrategy } from "../island";
@@ -10314,9 +10315,8 @@ export async function stageSharpRuntime(
   let sharpRequire = projectRequire;
   if (!resolvePackageJson(projectRequire, "sharp")) {
     try {
-      // Applications are not required to depend on Sharp directly. Resolve
-      // Farm's optional dependency from the installed framework entry when the
-      // project dependency tree does not expose it.
+      // Sharp is an optional peer the app installs. Also resolve it beside
+      // the framework entry, where pnpm links an installed peer.
       sharpRequire = createRequire(projectRequire.resolve("@farm.js/core"));
     } catch {
       // The existing missing-Sharp diagnostic below remains authoritative.
@@ -10372,9 +10372,7 @@ export async function stageSharpRuntime(
   try {
     await copyPackage("sharp", sharpRequire);
     if (!copiedPackages.has("sharp")) {
-      throw new Error(
-        "Farm image optimization requires sharp. Reinstall dependencies without omitting optional packages.",
-      );
+      throw new Error(`Farm image optimization requires sharp. ${SHARP_INSTALL_HINT}`);
     }
   } catch (error) {
     await fs.rm(stageDir, { recursive: true, force: true });

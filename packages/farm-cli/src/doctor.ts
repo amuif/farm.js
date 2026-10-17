@@ -997,7 +997,7 @@ type OptionalFeaturePackage = {
   dev?: boolean;
   purpose: string;
   /** Whether core fails (`fail`) or keeps going without the feature (`warn`). */
-  missingStatus: "warn" | "fail";
+  missingStatus: "warn" | "fail" | ((config: ResolvedFarmConfig) => "warn" | "fail");
   /** Where the app uses the feature, or undefined when it does not. */
   findUse(config: ResolvedFarmConfig, root: string): string | undefined;
 };
@@ -1016,14 +1016,22 @@ const OPTIONAL_FEATURE_PACKAGES: readonly OptionalFeaturePackage[] = [
     missingStatus: "fail",
     findUse: findOgImageUse,
   },
+  {
+    name: "sharp",
+    purpose: "optimize images",
+    // `provider: "node"` fails without Sharp; `auto` serves original image URLs.
+    missingStatus: (config) => (config.images.provider === "node" ? "fail" : "warn"),
+    findUse: findImageOptimizationUse,
+  },
 ];
 
 const POSTCSS_CONFIG_FILE =
   /^(?:postcss\.config\.(?:[cm]?[jt]s|json)|\.postcssrc(?:\.(?:json|[cm]?[jt]s))?)$/;
 const TAILWIND_CSS_IMPORT = /@import\s+["']tailwindcss["']/;
 const GENERATED_METADATA_IMAGE_FILE = /^(?:opengraph|twitter)-image\.(?:[cm]?[jt]sx?|vue|svelte)$/;
-const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|vue|svelte)$/;
+const SOURCE_FILE = /(?<!\.d)\.(?:[cm]?[jt]sx?|vue|svelte)$/;
 const CORE_OG_IMPORT = /["']@farm\.js\/core\/og["']/;
+const CORE_IMAGE_IMPORT = /["']@farm\.js\/core\/image["']/;
 
 function collectOptionalPackageChecks(
   config: ResolvedFarmConfig,
@@ -1043,7 +1051,10 @@ function collectOptionalPackageChecks(
       continue;
     }
     checks.push({
-      status: feature.missingStatus,
+      status:
+        typeof feature.missingStatus === "function"
+          ? feature.missingStatus(config)
+          : feature.missingStatus,
       code: "OPTIONAL_PACKAGE_MISSING",
       title: `${feature.name} is not installed`,
       message: `${use}, but ${feature.name} does not resolve from ${toPosix(path.relative(root, config.root)) || "the app root"}.`,
@@ -1082,6 +1093,18 @@ function findOgImageUse(config: ResolvedFarmConfig, root: string): string | unde
   );
   return importer
     ? `${toPosix(path.relative(root, importer))} imports @farm.js/core/og`
+    : undefined;
+}
+
+function findImageOptimizationUse(config: ResolvedFarmConfig, root: string): string | undefined {
+  const provider = config.images.provider;
+  if (provider === "none") return undefined;
+  if (provider === "node") return 'images.provider is "node"';
+  const importer = findFile(path.join(config.root, config.srcDir), (file) =>
+    SOURCE_FILE.test(file) ? CORE_IMAGE_IMPORT.test(readFileSync(file, "utf8")) : false,
+  );
+  return importer
+    ? `${toPosix(path.relative(root, importer))} imports @farm.js/core/image, so optimized images fall back to their original URLs`
     : undefined;
 }
 

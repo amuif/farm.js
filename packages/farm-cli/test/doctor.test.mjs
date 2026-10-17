@@ -403,6 +403,44 @@ test("fails when the app renders OG images without @vercel/og", async () => {
   }
 });
 
+test("reports image optimization without sharp by provider", async () => {
+  const root = await createTempProject();
+  try {
+    await writeFile(
+      path.join(root, "src/app/hero.tsx"),
+      'import { Image } from "@farm.js/core/image";\nexport const Hero = () => <Image src="/a.png" width={10} height={10} alt="" />;\n',
+    );
+    const sharpCheck = (report) =>
+      report.checks.find(
+        (entry) => entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("sharp"),
+      );
+
+    const auto = await runFarmDoctor({ root, offline: true });
+    assert.equal(sharpCheck(auto)?.status, "warn");
+    assert.match(
+      sharpCheck(auto)?.message || "",
+      /src\/app\/hero\.tsx imports @farm\.js\/core\/image/,
+    );
+    assert.equal(sharpCheck(auto)?.action, 'Install "sharp" to optimize images: pnpm add sharp');
+
+    const configPath = path.join(root, "farm.config.mjs");
+    const source = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  images: { provider: 'node' },"),
+    );
+    assert.equal(sharpCheck(await runFarmDoctor({ root, offline: true }))?.status, "fail");
+
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  images: { provider: 'none' },"),
+    );
+    assert.equal(sharpCheck(await runFarmDoctor({ root, offline: true })), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("skips optional feature packages the app does not use", async () => {
   const root = await createTempProject();
 

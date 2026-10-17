@@ -13,6 +13,7 @@ import { createFarmApp } from "../app";
 import { APIRouteManager } from "../api/route-manager";
 import { resolveFarmAPIServerBasePath } from "../api/server-path";
 import { getFarmAppDirectories } from "../layers";
+import { resolveFarmImageProviderForRuntime } from "../image-runtime";
 import { buildUniversal } from "../nitro/universal-build";
 import { getFarmDocsRouteTypeEntries } from "../docs";
 import { generateFarmTypeArtifacts } from "../type-artifacts";
@@ -130,6 +131,13 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
         preset: targets.preset,
         outputDir: targets.outputDir,
       },
+    };
+    config = {
+      ...config,
+      images: resolveFarmImageProviderForRuntime(config.images, {
+        root: targets.root,
+        preset: targets.preset,
+      })!,
     };
     pluginManager.updateContext({ config });
     const { root, preset, srcDir, distDir, deployOutputDir } = targets;

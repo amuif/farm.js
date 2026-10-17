@@ -26,6 +26,7 @@ import { getFarmAppDirectories } from "../layers";
 import { createCliColors } from "../cli-colors";
 import { createFarmThemeCssPlugin } from "../theme/vite";
 import { loadTailwindVitePlugin } from "../build/tailwind";
+import { resolveFarmImageProviderForRuntime } from "../image-runtime";
 import {
   createFarmInstrumentationLifecycle,
   loadFarmInstrumentation,
@@ -244,6 +245,10 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     finalConfig = await pluginManager.runHookSerial("config", finalConfig);
     finalConfig.renderer = resolveFarmRenderer(finalConfig.renderer);
     const projectRoot = finalConfig.root || process.cwd();
+    finalConfig.images = resolveFarmImageProviderForRuntime(finalConfig.images, {
+      root: projectRoot,
+      dev: true,
+    });
     const rendererVitePlugins = await loadFarmRendererVitePlugins(
       finalConfig.renderer,
       projectRoot,

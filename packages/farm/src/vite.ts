@@ -14,6 +14,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { FarmApp } from "./app";
 import { logger, toPosixPath, toViteModuleId } from "./utils";
 import { loadTailwindVitePlugin } from "./build/tailwind";
+import { resolveFarmImageProviderForRuntime } from "./image-runtime";
 import { isOptionalPeerInstalled, VERCEL_OG_INSTALL_HINT } from "./optional-peer";
 import {
   FARM_NODE_RESPONSE_END_PENDING,
@@ -1194,6 +1195,11 @@ export function farmPlugin(
       }
       const apiServerBasePath = resolveFarmAPIServerBasePath(farmConfig.api);
       const serverConfig = resolveFarmServerConfig(farmConfig.server);
+      // Development SSR loads @farm.js/core/image untransformed, so the
+      // __FARM_IMAGE_CONFIG__ define never reaches it. Publish the same value
+      // as a global so server-rendered URLs match the client and the handler.
+      (globalThis as { __FARM_IMAGE_CONFIG__?: unknown }).__FARM_IMAGE_CONFIG__ =
+        getPublicFarmImageConfig(farmConfig.images);
       let imageHandler: FarmImageHandler | null = null;
       if (farmConfig.images.provider !== "none") {
         const { createNodeImageFetcher, createNodeImageUrlValidator, createSharpImageTransformer } =
@@ -5854,6 +5860,7 @@ export async function defineConfig(config: FarmVitePluginOptions = {}): Promise<
     config = layeredConfig;
   }
   config.renderer = resolveFarmRenderer(config.renderer);
+  config.images = resolveFarmImageProviderForRuntime(config.images, { root: appRoot, dev: true });
   const rendererVitePlugins = await loadFarmRendererVitePlugins(config.renderer, appRoot, {
     ssr: true,
   });
