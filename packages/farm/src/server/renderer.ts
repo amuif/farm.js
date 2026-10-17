@@ -125,6 +125,7 @@ import {
   getFarmRendererStreamingCapabilitiesForRuntime,
   isReactRenderer,
   readFarmRendererWebStream,
+  resolveFarmRendererAppSetup,
   resolveFarmRendererModule,
   type FarmServerRendererRuntime,
   resolveFarmComponentExtensions,
@@ -561,6 +562,7 @@ export class ServerRenderer {
   private i18nRuntime?: FarmI18nRuntime;
   private viteServer?: ViteDevServer;
   private rendererRuntime!: FarmServerRendererRuntime;
+  private appliedAppSetupModule: unknown;
   private security: ResolvedFarmSecurityConfig;
 
   constructor(
@@ -615,6 +617,32 @@ export class ServerRenderer {
 
     this.rendererRuntime = runtime as FarmServerRendererRuntime;
     this.routeManager.setRendererRuntime?.(this.rendererRuntime);
+    await this.applyRendererAppSetup();
+  }
+
+  /**
+   * Pass the app's renderer setup module (`renderer.appSetup`) to the renderer. In development
+   * the module runner returns the cached module until the file changes, so an edit is
+   * re-applied on the next request without restarting.
+   */
+  private async applyRendererAppSetup(): Promise<void> {
+    const appSetupPath = resolveFarmRendererAppSetup(
+      this.config.root || process.cwd(),
+      this.config.renderer,
+    );
+    if (!appSetupPath) return;
+    const configureApp = (this.rendererRuntime as { configureApp?: unknown }).configureApp;
+    if (typeof configureApp !== "function") {
+      throw new Error(
+        `Renderer \`${this.config.renderer.name}\` does not support \`appSetup\`: its server module must export configureApp().`,
+      );
+    }
+    const setupModule = this.viteServer
+      ? await loadFarmDevModule(this.viteServer, appSetupPath)
+      : await import(pathToFileURL(appSetupPath).href);
+    if (setupModule === this.appliedAppSetupModule) return;
+    this.appliedAppSetupModule = setupModule;
+    configureApp((setupModule as { default?: unknown }).default);
   }
 
   private createPageBoundary(
@@ -766,6 +794,7 @@ export class ServerRenderer {
    */
   async renderNavigationFragment(input: FarmNavigationFragmentInput): Promise<string> {
     await this.initialize();
+    if (this.viteServer) await this.applyRendererAppSetup();
     setFarmBasePath(this.config.basePath);
     setFarmTrailingSlashPreference(this.config.trailingSlash);
     let element = this.rendererRuntime.createElement(input.PageComponent, input.pageProps);
@@ -1177,6 +1206,7 @@ export class ServerRenderer {
 
   async renderPage(req: FarmRequest, res: FarmResponse): Promise<void> {
     await this.initialize();
+    if (this.viteServer) await this.applyRendererAppSetup();
     setFarmBasePath(this.config.basePath);
     setFarmTrailingSlashPreference(this.config.trailingSlash);
     const cspNonce = createFarmCspNonce(this.security);

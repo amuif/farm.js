@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -46,6 +47,12 @@ export interface FarmRenderer {
    * each option.
    */
   options?: Readonly<Record<string, unknown>>;
+  /**
+   * Module that configures each app instance the renderer creates, relative to the project
+   * root. Farm imports it in the server and client entries and passes its default export to
+   * the renderer's `configureApp()`, which both renderer runtime modules must export.
+   */
+  appSetup?: string;
 }
 
 export type FarmRendererRuntime = Exclude<FarmPresetRuntime, "unknown">;
@@ -390,6 +397,13 @@ export function resolveFarmRenderer(renderer?: FarmRenderer): FarmRenderer {
     }
   }
 
+  if (
+    resolved.appSetup !== undefined &&
+    (typeof resolved.appSetup !== "string" || resolved.appSetup.trim().length === 0)
+  ) {
+    throw new TypeError("Farm renderer `appSetup` must be a non-empty module path.");
+  }
+
   return {
     ...resolved,
     componentExtensions: [...(resolved.componentExtensions || [])],
@@ -419,6 +433,19 @@ export async function readFarmRendererWebStream(
 
 export function isReactRenderer(renderer: Pick<FarmRenderer, "name"> | undefined): boolean {
   return !renderer || renderer.name === "react";
+}
+
+/** Absolute path of the renderer's app setup module, or null when the app has none. */
+export function resolveFarmRendererAppSetup(
+  root: string,
+  renderer: Pick<FarmRenderer, "name" | "appSetup">,
+): string | null {
+  if (!renderer.appSetup) return null;
+  const filePath = path.resolve(root, renderer.appSetup);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Renderer \`${renderer.name}\` app setup module was not found: ${filePath}`);
+  }
+  return filePath;
 }
 
 /** Resolve an optional renderer module from the application's dependency graph. */

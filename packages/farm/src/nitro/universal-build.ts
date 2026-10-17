@@ -118,6 +118,7 @@ import {
   isReactRenderer,
   loadFarmRendererVitePlugins,
   REACT_RENDERER,
+  resolveFarmRendererAppSetup,
 } from "../renderer";
 import { appendMiddlewareRoutePath } from "../middleware/path";
 import type { FarmRenderer } from "../renderer";
@@ -2733,9 +2734,12 @@ function generateClientHydrationEntry(
     srcDir,
     publicRuntimeConfig,
   );
+  const appSetupPath = resolveFarmRendererAppSetup(root, renderer);
   const rendererClientImports = isReactRenderer(renderer)
     ? `import React from "react";\nimport { createRoot, hydrateRoot } from "react-dom/client";`
-    : `import React, { createRoot, hydrateRoot } from ${JSON.stringify(renderer.client)};`;
+    : appSetupPath
+      ? `import React, { createRoot, hydrateRoot, configureApp as __farmConfigureApp } from ${JSON.stringify(renderer.client)};\nimport __farmAppSetup from ${JSON.stringify(toPosixPath(appSetupPath))};\n__farmConfigureApp(__farmAppSetup);`
+      : `import React, { createRoot, hydrateRoot } from ${JSON.stringify(renderer.client)};`;
   const providerClientCode = generateFarmIntegrationProviderClientCode(
     integrationProviders,
     root,
@@ -5048,6 +5052,18 @@ async function applyFarmPreloadBudget(response, pathname, request) {
 `.trim();
 }
 
+/** Import the renderer's app setup module in the server entry and pass it to the renderer. */
+function generateFarmRendererAppSetupServerCode(config: ResolvedFarmConfig): string {
+  const appSetupPath = resolveFarmRendererAppSetup(config.root || process.cwd(), config.renderer);
+  if (!appSetupPath) return "";
+  return `
+import __farmAppSetup from ${JSON.stringify(toPosixPath(appSetupPath))};
+if (typeof ReactDOMServer.configureApp !== "function") {
+  throw new Error(${JSON.stringify(`Renderer \`${config.renderer.name}\` does not support \`appSetup\`: its server module must export configureApp().`)});
+}
+ReactDOMServer.configureApp(__farmAppSetup);`;
+}
+
 function generateVirtualEntryCode(
   apiRoutes: Array<{ path: string; filePath: string; methods: string[]; pluginMethods?: string[] }>,
   pageRoutes: UniversalPageRoute[],
@@ -5115,7 +5131,7 @@ function generateVirtualEntryCode(
           ? '\nimport { isolateFarmServerPageGraph, wrapFarmIsolatedClientGraph } from "@farm.js/core/internal/isolated-boundary";'
           : ""
       }`
-    : `import React, * as ReactDOMServer from ${JSON.stringify(config.renderer.server)};`;
+    : `import React, * as ReactDOMServer from ${JSON.stringify(config.renderer.server)};${generateFarmRendererAppSetupServerCode(config)}`;
   const routeClientGraphServerRuntime = hasIsolatedClientGraphRuntime
     ? `function wrapFarmRouteClientGraph(element) {
   return wrapFarmIsolatedClientGraph(React, element);

@@ -154,6 +154,7 @@ import {
   REACT_RENDERER,
   resolveFarmComponentExtensions,
   resolveFarmRenderer,
+  resolveFarmRendererAppSetup,
 } from "./renderer";
 import type { FarmRenderer } from "./renderer";
 import { generateFarmIntegrationProviderClientCode } from "./integration-provider-build";
@@ -4224,9 +4225,12 @@ function generateClientCode(
     srcDir,
     publicRuntimeConfig,
   );
+  const appSetupPath = resolveFarmRendererAppSetup(root, renderer);
   const rendererClientImports = isReactRenderer(renderer)
     ? `import React from 'react'\nimport { hydrateRoot, createRoot } from 'react-dom/client'`
-    : `import React, { hydrateRoot, createRoot } from ${JSON.stringify(renderer.client)}`;
+    : appSetupPath
+      ? `import React, { hydrateRoot, createRoot, configureApp as __farmConfigureApp } from ${JSON.stringify(renderer.client)}\nimport __farmAppSetup from ${JSON.stringify(toViteModuleId(appSetupPath, root))}\n__farmConfigureApp(__farmAppSetup)`
+      : `import React, { hydrateRoot, createRoot } from ${JSON.stringify(renderer.client)}`;
   const isolatedHydrationImport = isolatedHydrationEnabled
     ? `import { createFarmIsolatedHydrationRuntime, createFarmServerPageBoundary, wrapFarmIsolatedClientGraph } from '@farm.js/core/internal/isolated-boundary'`
     : "";
