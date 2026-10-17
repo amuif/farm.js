@@ -1,4 +1,4 @@
-import { bench, describe, expect } from "vitest";
+import { test, expect } from "vitest";
 import { FarmClientDataCache } from "../client-cache";
 
 // Include fixture creation and cleanup in both measurements. The only baseline
@@ -39,15 +39,12 @@ function cycle(count: number, kind: "subscription" | "request", previous: boolea
 
 for (const count of [100, 1000]) {
   for (const kind of ["subscription", "request"] as const) {
-    describe(`${count} expired entries released by ${kind}`, () => {
-      bench("previous global pending sweep", () => cycle(count, kind, true), {
-        time: 500,
-        iterations: 5,
-      });
-      bench("targeted pending sweep", () => cycle(count, kind, false), {
-        time: 500,
-        iterations: 5,
-      });
+    test(`${count} expired entries released by ${kind}`, async ({ bench }) => {
+      await bench.compare(
+        bench("previous global pending sweep", () => cycle(count, kind, true)),
+        bench("targeted pending sweep", () => cycle(count, kind, false)),
+        { time: 500, iterations: 5 },
+      );
     });
   }
 }

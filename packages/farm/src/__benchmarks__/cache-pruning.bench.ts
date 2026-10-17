@@ -1,6 +1,6 @@
 // @vitest-environment node
 import assert from "node:assert/strict";
-import { bench, describe } from "vitest";
+import { test } from "vitest";
 import { FarmDataCache } from "../cache";
 
 type Dependency = { tags: ReadonlySet<string>; createdVersion: number };
@@ -52,14 +52,18 @@ for (const [tags, dependencyLast] of [
   [100, false],
   [100, true],
 ] as const) {
-  describe(`write with 1,024 entries and ${tags} invalidated tags (dependency ${dependencyLast ? "late" : "first"})`, () => {
+  test(`write with 1,024 entries and ${tags} invalidated tags (dependency ${dependencyLast ? "late" : "first"})`, async ({
+    bench,
+  }) => {
     const previous = fixture(true, tags, dependencyLast);
     const current = fixture(false, tags, dependencyLast);
-    bench("previous array-copy pruning", () => {
-      previous.set("other-1023", 1_023);
-    });
-    bench("iterator pruning", () => {
-      current.set("other-1023", 1_023);
-    });
+    await bench.compare(
+      bench("previous array-copy pruning", () => {
+        previous.set("other-1023", 1_023);
+      }),
+      bench("iterator pruning", () => {
+        current.set("other-1023", 1_023);
+      }),
+    );
   });
 }

@@ -1,4 +1,4 @@
-import { bench, describe, expect } from "vitest";
+import { test, expect } from "vitest";
 import { FarmClientDataCache } from "../client-cache";
 
 function workload(count: number, previous: boolean) {
@@ -42,7 +42,9 @@ function workload(count: number, previous: boolean) {
 }
 
 for (const count of [100, 1_000])
-  describe(`${count} expired entries + ${count} unrelated subscriptions`, () => {
-    bench("previous global owner scan", workload(count, true));
-    bench("targeted owner check", workload(count, false));
+  test(`${count} expired entries + ${count} unrelated subscriptions`, async ({ bench }) => {
+    await bench.compare(
+      bench("previous global owner scan", workload(count, true)),
+      bench("targeted owner check", workload(count, false)),
+    );
   });

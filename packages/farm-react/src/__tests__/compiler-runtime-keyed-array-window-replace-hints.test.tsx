@@ -1,3 +1,4 @@
+import { observeWeakMapSets } from "./observe-weak-map-sets";
 import React, { StrictMode, useState } from "react";
 import { act } from "react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
@@ -666,12 +667,7 @@ describe("compiled keyed-array window replacement hints", () => {
             return originalKeys.call(this);
           },
         );
-        const originalSet = WeakMap.prototype.set;
-        vi.spyOn(WeakMap.prototype, "set").mockImplementation(function (
-          this: WeakMap<object, unknown>,
-          key: object,
-          value: unknown,
-        ) {
+        observeWeakMapSets((key, value) => {
           if (
             value !== null &&
             typeof value === "object" &&
@@ -680,7 +676,6 @@ describe("compiled keyed-array window replacement hints", () => {
           ) {
             indexWrites += 1;
           }
-          return originalSet.call(this, key, value);
         });
 
         let expected = initialItems;

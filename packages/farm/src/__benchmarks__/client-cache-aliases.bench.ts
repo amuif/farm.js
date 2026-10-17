@@ -1,6 +1,6 @@
 // @vitest-environment node
 import assert from "node:assert/strict";
-import { bench, describe } from "vitest";
+import { test } from "vitest";
 import { FarmClientDataCache } from "../client-cache";
 
 type NotificationState = {
@@ -33,14 +33,16 @@ function fixture(previous: boolean, subscribers: number) {
   return cache;
 }
 for (const subscribers of [0, 5, 1_000]) {
-  describe(`write with 1,000 aliases and ${subscribers} subscribers`, () => {
+  test(`write with 1,000 aliases and ${subscribers} subscribers`, async ({ bench }) => {
     const previous = fixture(true, subscribers);
     const current = fixture(false, subscribers);
-    bench("previous alias resolution", () => {
-      previous.set("target", entry);
-    });
-    bench("skip unobserved aliases", () => {
-      current.set("target", entry);
-    });
+    await bench.compare(
+      bench("previous alias resolution", () => {
+        previous.set("target", entry);
+      }),
+      bench("skip unobserved aliases", () => {
+        current.set("target", entry);
+      }),
+    );
   });
 }

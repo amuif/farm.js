@@ -115,3 +115,6 @@ Thumbs.db
 
 # Turbo
 .turbo/
+
+# Vitest reports and diagnostics
+.vitest/

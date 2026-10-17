@@ -28,7 +28,7 @@ function restoreEnvironment(): void {
 beforeEach(restoreEnvironment);
 afterEach(restoreEnvironment);
 
-describe.sequential("production Vite selection", () => {
+describe("production Vite selection", { concurrent: false }, () => {
   const rolldownRuntime = {
     build: viteMocks.build,
     createServer: viteMocks.createServer,
