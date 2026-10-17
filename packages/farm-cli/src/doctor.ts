@@ -1023,6 +1023,13 @@ const OPTIONAL_FEATURE_PACKAGES: readonly OptionalFeaturePackage[] = [
     missingStatus: (config) => (config.images.provider === "node" ? "fail" : "warn"),
     findUse: findImageOptimizationUse,
   },
+  {
+    name: "@farming-labs/docs",
+    purpose: "use the docs engine",
+    missingStatus: "fail",
+    findUse: (config) =>
+      config.docs?.enabled ? `docs is enabled at ${config.docs.entry || "/docs"}` : undefined,
+  },
 ];
 
 const POSTCSS_CONFIG_FILE =

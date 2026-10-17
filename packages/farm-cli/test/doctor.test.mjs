@@ -441,6 +441,32 @@ test("reports image optimization without sharp by provider", async () => {
   }
 });
 
+test("fails when docs are enabled without @farming-labs/docs", async () => {
+  const root = await createTempProject();
+  try {
+    const configPath = path.join(root, "farm.config.mjs");
+    const source = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  docs: true,"),
+    );
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const check = report.checks.find(
+      (entry) =>
+        entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("@farming-labs/docs"),
+    );
+    assert.equal(check?.status, "fail");
+    assert.match(check?.message || "", /docs is enabled at \/docs/);
+    assert.equal(
+      check?.action,
+      'Install "@farming-labs/docs" to use the docs engine: pnpm add @farming-labs/docs',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("skips optional feature packages the app does not use", async () => {
   const root = await createTempProject();
 

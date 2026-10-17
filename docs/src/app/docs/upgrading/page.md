@@ -66,13 +66,15 @@ An app that uses one of these features declares the package itself. New starters
 | Built-in Tailwind CSS (a stylesheet imports `tailwindcss`) | `pnpm add -D @tailwindcss/vite` |
 | `opengraph-image`/`twitter-image` JSX, `@farm.js/core/og`  | `pnpm add @vercel/og`           |
 | Image optimization on Node, Vercel, Netlify, and in dev    | `pnpm add sharp`                |
+| Docs engine (`docs` enabled, or a `docs.config.*` file)    | `pnpm add @farming-labs/docs`   |
 
 Without `@tailwindcss/vite`, Farm keeps building without Tailwind and logs the install command the
 first time a stylesheet imports `tailwindcss`. Without `@vercel/og`, `farm build` fails with the
 install command when the app has a generated metadata image or imports `@farm.js/core/og`; static
 `opengraph-image.png` files do not need it. Without `sharp`, `images.provider: "auto"` serves
 original image URLs (the documented `provider: "none"` behavior) and logs the install command, and
-`images.provider: "node"` fails.
+`images.provider: "node"` fails. Without `@farming-labs/docs`, `farm dev` and `farm build` fail
+with the install command when docs are enabled.
 
 ## Deprecated APIs to replace before 0.2
 

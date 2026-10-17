@@ -301,6 +301,9 @@ importers:
       '@farm.js/core':
         specifier: workspace:*
         version: link:../../packages/farm
+      '@farming-labs/docs':
+        specifier: ^0.2.118
+        version: 0.2.118(react@19.2.8)(supports-color@10.2.2)
       '@vercel/og':
         specifier: ^1.0.1
         version: 1.0.1(@types/node@22.20.5)
@@ -1972,9 +1975,6 @@ importers:
 
   packages/farm:
     dependencies:
-      '@farming-labs/docs':
-        specifier: ^0.2.118
-        version: 0.2.118(react@19.2.8)(supports-color@10.2.2)
       '@farming-labs/orm':
         specifier: 0.0.64
         version: 0.0.64
@@ -2058,6 +2058,9 @@ importers:
       '@farm.js/renderer-tests':
         specifier: workspace:*
         version: link:../farm-renderer-tests
+      '@farming-labs/docs':
+        specifier: ^0.2.118
+        version: 0.2.118(react@19.2.8)(supports-color@10.2.2)
       '@opentelemetry/sdk-node':
         specifier: 0.221.0
         version: 0.221.0(@opentelemetry/api@1.9.1)(supports-color@10.2.2)

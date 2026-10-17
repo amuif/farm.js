@@ -70,7 +70,8 @@ Offline mode checks:
 - Feature packages that Farm loads from the app are installed when the app uses the feature:
   `@tailwindcss/vite` for a stylesheet that imports `tailwindcss` (a warning), `@vercel/og` for
   a generated `opengraph-image`/`twitter-image` or an `@farm.js/core/og` import (a failure), and
-  `sharp` for an `@farm.js/core/image` import (a warning) or `images.provider: "node"` (a failure).
+  `sharp` for an `@farm.js/core/image` import (a warning) or `images.provider: "node"` (a failure),
+  and `@farming-labs/docs` when docs are enabled (a failure).
 - The app directory or programmatic router contains page routes.
 - A root layout is available from the app or an extended layer.
 - Deployment target, preset, and output directory resolve.

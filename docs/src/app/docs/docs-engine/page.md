@@ -15,6 +15,16 @@ agent-discovery routes without filesystem access.
 
 ## Enable docs
 
+The docs runtime renders with `@farming-labs/docs`, which the app installs:
+
+```bash
+pnpm add @farming-labs/docs
+```
+
+When docs are enabled (in `farm.config.ts`, or by a discovered `docs.config.*` or `docs.json`) and
+the package is missing, `farm dev` and `farm build` stop with that install command. The React
+starters already declare it.
+
 **farm.config.ts**
 
 ```ts

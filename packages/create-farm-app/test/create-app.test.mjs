@@ -1391,6 +1391,19 @@ const optionalCorePeers = [
       return stylesheets.some((source) => /@import\s+["']tailwindcss["']/.test(source));
     },
   },
+  {
+    name: "@farming-labs/docs",
+    section: "dependencies",
+    async isUsed(generatedDir) {
+      // Farm enables docs for an explicit config or a discovered docs.config.* / docs.json.
+      const [config] = await readGeneratedFiles(generatedDir, /^farm\.config\.[cm]?[jt]s$/);
+      const docsFiles = await readGeneratedFiles(
+        generatedDir,
+        /^docs\.(?:config\.[cm]?[jt]s|json)$/,
+      );
+      return docsFiles.length > 0 || /\bdocs:\s*(?:true|\{)/.test(config ?? "");
+    },
+  },
 ];
 
 async function readGeneratedFiles(directory, pattern) {

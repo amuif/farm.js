@@ -13,6 +13,7 @@ import { createFarmApp } from "../app";
 import { APIRouteManager } from "../api/route-manager";
 import { resolveFarmAPIServerBasePath } from "../api/server-path";
 import { getFarmAppDirectories } from "../layers";
+import { loadFarmDocsEngine } from "../docs/engine";
 import { resolveFarmImageProviderForRuntime } from "../image-runtime";
 import { buildUniversal } from "../nitro/universal-build";
 import { getFarmDocsRouteTypeEntries } from "../docs";
@@ -139,6 +140,7 @@ async function buildWithProductionNodeEnv(inputConfig: ResolvedFarmConfig, optio
         preset: targets.preset,
       })!,
     };
+    if (config.docs?.enabled) await loadFarmDocsEngine();
     pluginManager.updateContext({ config });
     const { root, preset, srcDir, distDir, deployOutputDir } = targets;
 
