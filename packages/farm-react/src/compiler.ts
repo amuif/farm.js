@@ -1065,6 +1065,7 @@ function keyedMapLookupTarget(
 }
 
 function collectReferencedLocals(expression: t.Expression, names: ReadonlySet<string>): string[] {
+  if (names.size === 0) return [];
   const references = new Set<string>();
   traverse(expressionFile(cloneExpression(expression)), {
     ReferencedIdentifier(path) {
@@ -1083,6 +1084,7 @@ function rewriteDerivedAccess<T extends t.Expression>(
   expression: T,
   derivedByName: ReadonlyMap<string, t.Expression>,
 ): T {
+  if (derivedByName.size === 0) return cloneExpression(expression);
   const file = expressionFile(cloneExpression(expression));
   traverse(file, {
     ReferencedIdentifier(path) {
