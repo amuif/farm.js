@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { createFarmRendererPlugin } from "../dist/vite.mjs";
+import { assertCoreRuntimeReduction } from "./runtime-size-budget.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureRoot = join(packageRoot, "fixtures/runtime-size");
@@ -135,6 +136,9 @@ const [
 ]);
 
 const forbiddenDirectMarkers = [
+  "Array.prototype",
+  "Set.prototype",
+  "Map.prototype",
   "FarmCompiledConditionalBlock",
   "FarmCompiledHostConditionalBlock",
   "FarmCompiledKeyedListBlock",
@@ -841,12 +845,7 @@ if (checkOnly) {
       );
     }
   }
-  if (
-    results.fixtures.isolatedRuntime.gzipReductionPercent <
-    reference.fixtures.isolatedRuntime.gzipReductionPercent - 1
-  ) {
-    throw new Error("Core-only runtime reduction regressed against the persisted result.");
-  }
+  assertCoreRuntimeReduction(results.fixtures.isolatedRuntime, reference.fixtures.isolatedRuntime);
 } else {
   await writeFile(resultFile, `${JSON.stringify(results, null, 2)}\n`, "utf8");
 }

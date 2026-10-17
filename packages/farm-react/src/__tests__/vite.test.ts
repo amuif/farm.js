@@ -98,7 +98,7 @@ describe("React renderer Vite integration", () => {
               write: false,
               ssr: ssr ? entry : false,
               lib: { entry, formats: ["es"] },
-              rollupOptions: { external: ["react", "@farm.js/react/compiler-runtime"] },
+              rollupOptions: { external: [/^react(?:\/|$)/, "@farm.js/react/compiler-runtime"] },
             },
           });
           const builds = Array.isArray(result) ? result : [result];
@@ -158,7 +158,7 @@ describe("React renderer Vite integration", () => {
           formats: ["es"],
         },
         rollupOptions: {
-          external: ["react", "@farm.js/react/compiler-runtime"],
+          external: [/^react(?:\/|$)/, "@farm.js/react/compiler-runtime"],
         },
       },
     });
@@ -209,7 +209,7 @@ describe("React renderer Vite integration", () => {
         write: false,
         ssr: entry,
         rollupOptions: {
-          external: ["react", "@farm.js/react/compiler-runtime"],
+          external: [/^react(?:\/|$)/, "@farm.js/react/compiler-runtime"],
         },
       },
     });

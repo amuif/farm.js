@@ -1,6 +1,6 @@
 const oneShotSnapshots = new WeakMap<object, readonly unknown[]>();
 
-const arrayIterator = Array.prototype[Symbol.iterator];
+const arrayIterator = /* @__PURE__ */ (() => Array.prototype[Symbol.iterator])();
 
 /** Materialize an iterable without consuming a one-shot iterator more than once. */
 export function materializeIterable<Item>(source: Iterable<Item> | null | undefined): Item[] {
