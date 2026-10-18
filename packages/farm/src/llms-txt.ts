@@ -400,16 +400,28 @@ export function createFarmLlmsFullRenderer(
 ): (
   origin: string,
   render: (shared: { incomplete: () => void }) => Promise<string>,
+  onSettled?: (complete: boolean) => void,
 ) => Promise<string> {
   const now = options.now ?? Date.now;
   const ttl = (options.revalidate ?? 0) * 1000;
   const maxEntries = options.maxEntries ?? 16;
-  const entries = new Map<string, { body: Promise<string>; expires: number }>();
+  const entries = new Map<
+    string,
+    { body: Promise<string>; expires: number; complete: () => boolean }
+  >();
   let queue: Promise<unknown> = Promise.resolve();
 
-  return (origin, render) => {
+  // Callers learn whether the body they get is complete, including callers
+  // that joined another request's render, so a partial body is not cached.
+  const settle = (
+    body: Promise<string>,
+    complete: () => boolean,
+    onSettled?: (c: boolean) => void,
+  ) => (onSettled ? body.then((value) => (onSettled(complete()), value)) : body);
+
+  return (origin, render, onSettled) => {
     const entry = entries.get(origin);
-    if (entry && entry.expires > now()) return entry.body;
+    if (entry && entry.expires > now()) return settle(entry.body, entry.complete, onSettled);
     entries.delete(origin);
 
     let complete = true;
@@ -421,7 +433,7 @@ export function createFarmLlmsFullRenderer(
       }),
     );
     queue = body.catch(() => {});
-    const pending = { body, expires: Number.POSITIVE_INFINITY };
+    const pending = { body, expires: Number.POSITIVE_INFINITY, complete: () => complete };
     entries.set(origin, pending);
     // Map order is insertion order, so the first key is the oldest entry.
     if (entries.size > maxEntries) entries.delete(entries.keys().next().value!);
@@ -435,7 +447,7 @@ export function createFarmLlmsFullRenderer(
         if (entries.get(origin) === pending) entries.delete(origin);
       },
     );
-    return body;
+    return settle(body, pending.complete, onSettled);
   };
 }
 

@@ -574,10 +574,17 @@ describe("createFarmLlmsFullRenderer", () => {
         });
 
       const settled: string[] = [];
-      const first = shared("https://a.test", render).then((body) => {
+      const completeness: Array<[string, boolean]> = [];
+      const first = shared("https://a.test", render, (complete) =>
+        completeness.push(["first", complete]),
+      ).then((body) => {
         settled.push("a");
         return body;
       });
+      // A request that joins the in-flight render learns it is partial too.
+      const joined = shared("https://a.test", render, (complete) =>
+        completeness.push(["joined", complete]),
+      );
       // Another origin waits behind the stuck render.
       const other = shared("https://b.test", async () => "b").then((body) => {
         settled.push("b");
@@ -589,17 +596,36 @@ describe("createFarmLlmsFullRenderer", () => {
       expect(settled).toEqual(["a", "b"]);
 
       const body = await first;
+      expect(await joined).toBe(body);
+      expect(completeness).toEqual([
+        ["first", false],
+        ["joined", false],
+      ]);
       expect(body).toContain("## Stuck\n\nURL: https://a.test/stuck.md\n\n---");
       expect(body).toContain("# Pricing");
       expect(await other).toBe("b");
 
       // The timed-out render is not reused: the next request reads the page again.
       stuck = false;
-      const second = await shared("https://a.test", render);
+      let secondComplete: boolean | undefined;
+      const second = await shared("https://a.test", render, (complete) => {
+        secondComplete = complete;
+      });
+      expect(secondComplete).toBe(true);
       expect(second).toContain("URL: https://a.test/stuck.md\n\n# Stuck");
       expect(readMarkdown.mock.calls.filter(([url]) => url.endsWith("/stuck.md"))).toHaveLength(2);
       // A complete render is reused for revalidate seconds.
-      expect(await shared("https://a.test", async () => "new")).toBe(second);
+      let cachedComplete: boolean | undefined;
+      expect(
+        await shared(
+          "https://a.test",
+          async () => "new",
+          (complete) => {
+            cachedComplete = complete;
+          },
+        ),
+      ).toBe(second);
+      expect(cachedComplete).toBe(true);
     } finally {
       vi.useRealTimers();
     }

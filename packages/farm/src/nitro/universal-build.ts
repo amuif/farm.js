@@ -7998,28 +7998,34 @@ async function handleFarmRequestInContext(
   if (farmGeneratedLlmsKind) {
     const llmsContext = createFarmLlmsTxtContext(request, farmGeneratedLlmsKind === "llms-full");
     const llmsOrigin = new URL(request.url).origin;
-    // A page that times out is left out, and the shared render is not reused.
+    // A page that times out is left out, the shared render is not reused, and
+    // the partial response is not cacheable.
+    let llmsComplete = true;
     const renderLlmsFull = (shared) =>
       renderFarmLlmsFullTxt(llmsContext.defaults, {
         origin: llmsOrigin,
         readMarkdown: llmsContext.markdown,
-        onIncomplete: shared && shared.incomplete,
+        onIncomplete: () => {
+          llmsComplete = false;
+          if (shared) shared.incomplete();
+        },
       });
     // HEAD reads no pages, so it neither waits for nor fills the shared render.
     const llmsBody = farmGeneratedLlmsKind !== "llms-full"
       ? llmsContext.defaults
       : request.method.toUpperCase() === "HEAD"
         ? await renderLlmsFull()
-        : await farmLlmsFullRenderer(llmsOrigin, renderLlmsFull);
-    return applyProductionMiddlewareHeaders(
-      createFarmMetadataRouteResponse(
-        farmGeneratedLlmsKind,
-        llmsBody,
-        { revalidate: farmLlmsTxtConfig.revalidate },
-        { method: request.method },
-      ),
-      middlewareHeaders,
+        : await farmLlmsFullRenderer(llmsOrigin, renderLlmsFull, (complete) => {
+            llmsComplete = complete;
+          });
+    const llmsResponse = createFarmMetadataRouteResponse(
+      farmGeneratedLlmsKind,
+      llmsBody,
+      { revalidate: llmsComplete ? farmLlmsTxtConfig.revalidate : 0 },
+      { method: request.method },
     );
+    if (!llmsComplete) llmsResponse.headers.set("cache-control", "no-store");
+    return applyProductionMiddlewareHeaders(llmsResponse, middlewareHeaders);
   }
   `
       : ""
