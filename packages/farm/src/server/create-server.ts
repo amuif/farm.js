@@ -49,13 +49,25 @@ type VitePendingRequest = {
   request: Promise<unknown>;
 };
 
-async function drainVitePendingRequests(server: ViteDevServer): Promise<void> {
+async function drainVitePendingWork(server: ViteDevServer): Promise<void> {
+  const environments = Object.values(server.environments ?? {});
+  // Vite 8 can cancel an optimizer without awaiting its active Rolldown write.
+  // Let discovery finish before collecting processing promises: the scan can
+  // add dependencies that have no pending transform in the registry below.
+  await Promise.allSettled(
+    environments.map(async ({ depsOptimizer }) => {
+      await depsOptimizer?.scanProcessing;
+      await Promise.allSettled(
+        Object.values(depsOptimizer?.metadata.discovered ?? {}).map((dep) => dep.processing),
+      );
+    }),
+  );
   // Each Vite environment waits for this registry while it closes its plugin
   // container and dependency optimizer. That order can strand
   // optimized-dependency loads: the optimizer is gone, but the plugin hook
   // still awaits its processing promise. Drain every registry first while the
   // optimizers can finish; a request in one environment can start another.
-  const registries = Object.values(server.environments ?? {}).map(
+  const registries = environments.map(
     (environment) =>
       (environment as { _pendingRequests?: Map<string, VitePendingRequest> })._pendingRequests,
   );
@@ -352,6 +364,10 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     let shutdownPromise: Promise<void> | undefined;
     const shutdownFarmDevRuntime = (): Promise<void> => {
       shutdownPromise ??= (async () => {
+        const closingEnvironments = server.environments;
+        const closingHttpServer = server.httpServer;
+        const closingWatcher = server.watcher;
+        const closingWebSocket = server.ws;
         const failures: Array<{ label: string; error: unknown }> = [];
         const step = async (label: string, run: () => Promise<unknown> | undefined) => {
           try {
@@ -361,9 +377,9 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
           }
         };
 
-        // Finish Vite's active transforms, stop serving, release what the
-        // plugins hold, then flush telemetry last so shutdown problems are
-        // still reported.
+        // Finish Vite's active optimizer and transforms, stop serving, release
+        // what the plugins hold, then flush telemetry last so shutdown problems
+        // are still reported.
         // Vite's close() can deadlock after the client entry has been
         // transformed: background pre-transforms of its bare imports wait in
         // the optimized-deps load hook for a dependency run that
@@ -382,8 +398,11 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
           try {
             const outcome = await Promise.race([
               (async () => {
-                await drainVitePendingRequests(server);
-                await closeViteServer();
+                await drainVitePendingWork(server);
+                // A restart closes the old HTTP server and replaces fields on
+                // this same object. Its close event must not close the new
+                // environments after our asynchronous drain finishes.
+                if (server.environments === closingEnvironments) await closeViteServer();
                 return "closed" as const;
               })(),
               timedOut,
@@ -397,11 +416,11 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
               // even though the container promise is stranded.
               await Promise.allSettled([
                 new Promise<void>((resolve) => {
-                  if (!server.httpServer || !server.httpServer.listening) return resolve();
-                  server.httpServer.close(() => resolve());
+                  if (!closingHttpServer || !closingHttpServer.listening) return resolve();
+                  closingHttpServer.close(() => resolve());
                 }),
-                Promise.resolve(server.watcher?.close?.()).catch(() => {}),
-                Promise.resolve((server as any).ws?.close?.()).catch(() => {}),
+                Promise.resolve(closingWatcher?.close?.()).catch(() => {}),
+                Promise.resolve(closingWebSocket?.close?.()).catch(() => {}),
               ]);
             }
           } finally {
