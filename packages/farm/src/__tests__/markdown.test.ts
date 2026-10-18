@@ -382,8 +382,84 @@ describe("htmlToMarkdown", () => {
       "<main><table><tr><th>Target</th><th>Status</th></tr><tr><td>node</td><td>ready</td></tr></table></main>",
       { includeMetadata: false },
     );
+    expect(table).toBe("| Target | Status |\n| --- | --- |\n| node | ready |\n");
+  });
+
+  it("renders tables as GFM tables", () => {
+    expect(
+      htmlToMarkdown(
+        [
+          "<main><p>Plans</p><table><thead><tr><th>Plan</th><th>Price</th><th>Notes</th></tr></thead>",
+          '<tbody><tr><td><a href="/pro">Pro</a></td><td>Q&amp;A | month</td><td><code>a&lt;b</code></td></tr>',
+          '<tr><td colspan="2">Enterprise</td><td>Talk<br>to us</td></tr>',
+          "<tr><td>Free</td></tr></tbody></table></main>",
+        ].join(""),
+        { includeMetadata: false },
+      ),
+    ).toBe(
+      [
+        "Plans",
+        "",
+        "| Plan | Price | Notes |",
+        "| --- | --- | --- |",
+        "| [Pro](/pro) | Q&A \\| month | `a<b` |",
+        "| Enterprise | | Talk to us |",
+        "| Free | | |",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps the plain-text fallback for tables with no GFM form", () => {
     // Rows stay separate paragraphs; a single newline would render as one line.
-    expect(table).toBe("Target Status\n\nnode ready\n");
+    expect(
+      htmlToMarkdown(
+        "<main><table><tr><td>outer</td><td><table><tr><td>inner</td></tr></table></td></tr></table></main>",
+        { includeMetadata: false },
+      ),
+    ).toBe("outer\n\ninner\n");
+    expect(
+      htmlToMarkdown(
+        "<main><table><tr><td><pre><code>run()</code></pre></td></tr></table></main>",
+        { includeMetadata: false },
+      ),
+    ).toBe("```\nrun()\n```\n");
+  });
+
+  it("quotes a table inside a blockquote", () => {
+    expect(
+      htmlToMarkdown(
+        "<main><blockquote><table><tr><th>A</th></tr><tr><td>1</td></tr></table></blockquote></main>",
+        { includeMetadata: false },
+      ),
+    ).toBe("> | A |\n> | --- |\n> | 1 |\n");
+  });
+
+  it("keeps the language of a highlighted code block", () => {
+    const convert = (html: string) =>
+      htmlToMarkdown(`<main>${html}</main>`, { includeMetadata: false });
+    expect(convert('<pre><code class="hljs language-ts">let a = 1;</code></pre>')).toBe(
+      "```ts\nlet a = 1;\n```\n",
+    );
+    expect(
+      convert('<pre class="shiki" data-language="tsx"><code><span>x</span></code></pre>'),
+    ).toBe("```tsx\nx\n```\n");
+    expect(convert('<pre class="lang-bash">pnpm dev</pre>')).toBe("```bash\npnpm dev\n```\n");
+    // An info string that could break out of the fence line is dropped.
+    expect(convert('<pre><code data-language="ts\nx">y</code></pre>')).toBe("```\ny\n```\n");
+  });
+
+  it("numbers ordered list items", () => {
+    const convert = (html: string) =>
+      htmlToMarkdown(`<main>${html}</main>`, { includeMetadata: false });
+    expect(convert("<ol><li>Install</li><li>Run <code>farm dev</code></li></ol>")).toBe(
+      "1. Install\n2. Run `farm dev`\n",
+    );
+    expect(convert('<ol start="3"><li>Deploy</li></ol><ul><li>Note</li></ul>')).toBe(
+      "3. Deploy\n\n- Note\n",
+    );
+    // A nested list keeps the bullet fallback rather than mixing up the numbering.
+    expect(convert("<ol><li>One<ul><li>a</li></ul></li></ol>")).toContain("- ");
   });
 
   it("keeps indentation inside code blocks while tidying spacing around them", () => {

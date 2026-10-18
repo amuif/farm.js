@@ -295,7 +295,7 @@ export function htmlToMarkdown(
   // touches them, and each gets a fence longer than any backtick run inside it,
   // so code that itself shows ``` fences cannot close the block early.
   const codeBlocks: string[] = [];
-  const setAsideCodeBlock = (_: string, code: string) => {
+  const setAsideCodeBlock = (code: string, attributes: string[]) => {
     const content = decodeHtml(stripTags(code)).trim();
     // A reduce, not Math.max(...runs): a large block can exceed the argument limit.
     const longestRun = (content.match(/`+/g) ?? []).reduce(
@@ -303,14 +303,32 @@ export function htmlToMarkdown(
       0,
     );
     const fence = "`".repeat(Math.max(3, longestRun + 1));
-    codeBlocks.push(`${fence}\n${content}\n${fence}`);
+    const language = readCodeLanguage(attributes) ?? "";
+    codeBlocks.push(`${fence}${language}\n${content}\n${fence}`);
     return `\n\n${CODE_BLOCK_MARK}${codeBlocks.length - 1}${CODE_BLOCK_MARK}\n\n`;
   };
   source = source.replace(
-    /<pre\b[^>]*><code\b[^>]*>([\s\S]*?)<\/code><\/pre>/gi,
-    setAsideCodeBlock,
+    /<pre\b([^>]*)><code\b([^>]*)>([\s\S]*?)<\/code><\/pre>/gi,
+    (_, preAttributes: string, codeAttributes: string, code: string) =>
+      setAsideCodeBlock(code, [codeAttributes, preAttributes]),
   );
-  source = source.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, setAsideCodeBlock);
+  source = source.replace(
+    /<pre\b([^>]*)>([\s\S]*?)<\/pre>/gi,
+    (_, attributes: string, code: string) => setAsideCodeBlock(code, [attributes]),
+  );
+  // Tables become GFM tables, set aside like code blocks so the tidying below
+  // keeps each row on its own line. A table nested in another, or one holding a
+  // code block, has no GFM form and keeps the plain-text fallback below.
+  source = source.replace(
+    /<table\b[^>]*>([\s\S]*?)<\/table>/gi,
+    (table: string, content: string) => {
+      if (/<table\b/i.test(content) || content.includes(CODE_BLOCK_MARK)) return table;
+      const rows = toMarkdownTableRows(content);
+      if (!rows) return table;
+      codeBlocks.push(rows);
+      return `\n\n${CODE_BLOCK_MARK}${codeBlocks.length - 1}${CODE_BLOCK_MARK}\n\n`;
+    },
+  );
   source = source.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => {
     return `\n\n${"#".repeat(Number(level))} ${toInlineMarkdown(content).trim()}\n\n`;
   });
@@ -343,6 +361,20 @@ export function htmlToMarkdown(
       .join("\n");
     return `\n\n${quote}\n\n`;
   });
+  // Ordered lists keep their numbers. A list holding another list is left to the
+  // bullet pass below, which cannot tell which items belong to which list.
+  source = source.replace(
+    /<ol\b([^>]*)>([\s\S]*?)<\/ol>/gi,
+    (list: string, attributes: string, content: string) => {
+      if (/<[ou]l\b/i.test(content)) return list;
+      const start = Number.parseInt(readHtmlAttribute(attributes, "start") ?? "1", 10);
+      let number = Number.isFinite(start) ? start : 1;
+      const items = content.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_, item: string) => {
+        return `\n${number++}. ${toInlineMarkdown(item).trim()}`;
+      });
+      return `\n${items}\n`;
+    },
+  );
   source = source.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_, content) => {
     return `\n- ${toInlineMarkdown(content).trim()}`;
   });
@@ -609,6 +641,49 @@ function readHtmlAttribute(attributes: string, name: string): string | undefined
  * Converts inline HTML to Markdown. The result keeps its HTML entities:
  * htmlToMarkdown decodes once, after every tag is gone.
  */
+/**
+ * Reads a code block's language from the class names or data attributes that
+ * highlighters put on `<code>` or `<pre>`: `language-ts`, `lang-ts`, or
+ * `data-language="ts"`.
+ */
+function readCodeLanguage(attributesList: string[]): string | undefined {
+  for (const attributes of attributesList) {
+    const language =
+      readHtmlAttribute(attributes, "data-language") ??
+      readHtmlAttribute(attributes, "data-lang") ??
+      readHtmlAttribute(attributes, "class")?.match(/(?:^|\s)lang(?:uage)?-(\S+)/)?.[1];
+    // Anything else after the fence would be read as part of the info string.
+    if (language && /^[\w#+.-]+$/.test(language)) return language;
+  }
+  return undefined;
+}
+
+/**
+ * Renders the rows of an HTML table as a GFM table, or returns undefined when
+ * it has no cells. The first row is the header, since GFM requires one; a
+ * spanning cell is followed by empty cells so the columns stay aligned.
+ */
+function toMarkdownTableRows(content: string): string | undefined {
+  const rows: string[][] = [];
+  for (const [, row] of content.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells: string[] = [];
+    for (const [, , attributes, cell] of row!.matchAll(/<(td|th)\b([^>]*)>([\s\S]*?)<\/\1>/gi)) {
+      cells.push(decodeHtml(toInlineMarkdown(cell!)).trim().replace(/\|/g, "\\|"));
+      const span = Number.parseInt(readHtmlAttribute(attributes!, "colspan") ?? "1", 10);
+      for (let extra = 1; extra < Math.min(span, 1000); extra++) cells.push("");
+    }
+    if (cells.length) rows.push(cells);
+  }
+  if (!rows.length) return undefined;
+  const columns = rows.reduce((widest, row) => Math.max(widest, row.length), 0);
+  const line = (cells: string[]) =>
+    `| ${Array.from({ length: columns }, (_, index) => cells[index] ?? "").join(" | ")} |`.replace(
+      / {2,}/g,
+      " ",
+    );
+  return [line(rows[0]!), line(Array(columns).fill("---")), ...rows.slice(1).map(line)].join("\n");
+}
+
 function toInlineMarkdown(html: string): string {
   let source = html
     .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, text) => {
