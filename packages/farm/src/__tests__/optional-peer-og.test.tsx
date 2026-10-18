@@ -52,6 +52,30 @@ describe("@vercel/og as an optional peer", () => {
     expect(explainMissingOptionalPeer(other, "route x")).toBe(other);
   });
 
+  it("skips copying @vercel/og into the server output when the app does not install it", async () => {
+    // Core's shared runtime keeps a lazy @vercel/og import, so the server output
+    // can reference it in apps that never render a JSX metadata image.
+    const { copyMetadataImageRuntime } = await import("../nitro/universal-build");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-og-copy-"));
+    const serverDir = path.join(root, ".farm/.output/server");
+
+    try {
+      await fs.writeFile(path.join(root, "package.json"), "{}");
+      await fs.mkdir(serverDir, { recursive: true });
+
+      await withoutNodePath(() => copyMetadataImageRuntime(root, serverDir, fs));
+      await expect(fs.stat(path.join(serverDir, "node_modules/@vercel/og"))).rejects.toThrow();
+
+      // With the package installed (core's own install), it is copied beside the server.
+      await copyMetadataImageRuntime(process.cwd(), serverDir, fs);
+      await expect(
+        fs.stat(path.join(serverDir, "node_modules/@vercel/og/package.json")),
+      ).resolves.toBeTruthy();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails the build before bundling a generated metadata image without @vercel/og", async () => {
     const { assertMetadataImageRuntimeInstalled } = await import("../nitro/universal-build");
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-og-build-"));

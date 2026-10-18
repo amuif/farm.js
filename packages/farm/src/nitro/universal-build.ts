@@ -10478,17 +10478,18 @@ function resolveMetadataImageRuntimePackageJson(root: string): string | null {
   }
 }
 
-async function copyMetadataImageRuntime(
+/** @internal Exported for tests. */
+export async function copyMetadataImageRuntime(
   root: string,
   nitroFuncDir: string,
   fs: typeof import("fs/promises"),
 ): Promise<void> {
   const packageJsonPath = resolveMetadataImageRuntimePackageJson(root);
-  if (!packageJsonPath) {
-    throw new Error(
-      `The server output imports @vercel/og, which is not installed. ${VERCEL_OG_INSTALL_HINT}`,
-    );
-  }
+  // Core's shared runtime keeps a lazy `import("@vercel/og")` for JSX metadata
+  // images, so the server output can reference it in apps that never render
+  // one. Generated metadata images and `@farm.js/core/og` imports already fail
+  // before bundling when the package is missing, so nothing here needs it.
+  if (!packageJsonPath) return;
 
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
   const packageDir = path.dirname(packageJsonPath);
