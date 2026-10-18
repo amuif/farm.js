@@ -190,6 +190,47 @@ HOST=0.0.0.0 PORT=3000 pnpm start
 
 For Docker, copy the app, install its dependencies including devDependencies (`farm build` needs the CLI), run `farm build`, expose the selected port, and start `node .output/server/index.mjs`. The generated server is self-contained, so the runtime image only needs the output directory, not `node_modules`. For a VPS, run the same start command behind nginx, Caddy, systemd, or a process manager such as PM2. Environment variables should be provided by the host at runtime, not committed into the bundle.
 
+### Coolify
+
+[Coolify](https://coolify.io) runs a Farm app as a Node.js server. Deploy it with the Nixpacks build strategy, or with a Dockerfile when you want more control over the build.
+
+**Nixpacks.** Set **Build strategy** to `nixpacks`. Nixpacks runs `npm run build` and starts the app with the `start` script, so make sure that script runs the server `farm build` writes:
+
+```json
+{
+  "scripts": {
+    "start": "node .farm/.output/server/index.mjs"
+  }
+}
+```
+
+`farm start` also works here, because Nixpacks keeps devDependencies installed. The server listens on port `3000`, which matches Coolify's default **Ports Exposes** value.
+
+If `farm.config.ts` sets `deploy.target` to another platform, such as `vercel`, remove it or set it to `node`. A platform target builds output that only that platform can serve, while the default builds a Node.js server.
+
+**Dockerfile.** Set **Ports Exposes** to `3000`, set **Build strategy** to `Dockerfile`, and add a `Dockerfile` to the root of the project:
+
+```dockerfile
+FROM node:22-slim AS build
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . ./
+RUN npm run build
+
+FROM node:22-slim
+
+WORKDIR /app
+COPY --from=build /app/.farm/.output ./.farm/.output
+
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["node", ".farm/.output/server/index.mjs"]
+```
+
+`farm build` writes a self-contained server to `.farm/.output`, so the final image only needs that directory and not `node_modules`.
+
 ## Nitro preset pass-through
 
 Farm can also build for any Nitro preset that Nitro can resolve. Use `deploy.preset` when the target is not one of Farm's first-class shortcuts, or pass `--preset` from the CLI for a one-off build.
