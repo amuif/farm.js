@@ -790,6 +790,17 @@ function collectStateDependencies(
 }
 
 function referencesIdentifier(expression: t.Expression, name: string): boolean {
+  // Only proven misses bypass scope analysis. Matching properties, bindings,
+  // and JSX names still need the existing reference/shadowing checks below.
+  let possible = false;
+  t.traverseFast(expression, (node) => {
+    if ((t.isIdentifier(node) || t.isJSXIdentifier(node)) && node.name === name) {
+      possible = true;
+      return t.traverseFast.stop;
+    }
+  });
+  if (!possible) return false;
+
   let referenced = false;
   traverse(expressionFile(cloneExpression(expression)), {
     ReferencedIdentifier(path) {
