@@ -111,6 +111,10 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
         }),
       ] as const;
     },
+    // Only an oauth endpoint has metadata to serve, so others add no request hook.
+    ...(normalized.oauth
+      ? { runtime: { before: ({ request }) => protectedResourceMetadata(request, normalized) } }
+      : {}),
   };
 }
 
@@ -228,7 +232,7 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
         }
         first ??= result;
       }
-      if (denied || inconsistent) return unauthorized();
+      if (denied || inconsistent) return unauthorized(request, options);
       authorization = first!;
     } else {
       authorization = { subject: "anonymous" };
@@ -911,9 +915,55 @@ function toMCPAuthInfo(
   };
 }
 
-function unauthorized(): Response {
+const PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+
+/**
+ * A 401 must say how to authenticate (RFC 9110). MCP clients use Bearer tokens,
+ * and with `oauth` configured the challenge links the endpoint's metadata so a
+ * client can find the authorization server.
+ */
+function unauthorized(request: Request, options: NormalizedOptions): Response {
+  const parameters: string[] = [];
+  if (options.oauth) {
+    const url = new URL(request.url);
+    parameters.push(
+      `resource_metadata="${url.origin}${PROTECTED_RESOURCE_METADATA_PATH}${url.pathname}"`,
+    );
+    if (options.oauth.scopes?.length) parameters.push(`scope="${options.oauth.scopes.join(" ")}"`);
+  }
   return new Response(JSON.stringify({ error: "Unauthorized" }), {
     status: 401,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "www-authenticate": parameters.length ? `Bearer ${parameters.join(", ")}` : "Bearer",
+    },
+  });
+}
+
+/**
+ * Serves RFC 9728 metadata at the path the 401 links, built from the request so
+ * it names the endpoint URL the client used, whatever `api.baseURL` maps it to.
+ * The resource path must end with the endpoint's own path below `/api`.
+ */
+function protectedResourceMetadata(request: Request, options: NormalizedOptions): Response | void {
+  const oauth = options.oauth!;
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith(`${PROTECTED_RESOURCE_METADATA_PATH}/`)) return;
+  const resourcePath = url.pathname.slice(PROTECTED_RESOURCE_METADATA_PATH.length);
+  if (!resourcePath.endsWith(options.path.slice("/api".length))) return;
+  const method = request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD") {
+    return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
+  }
+  const metadata = {
+    resource: `${url.origin}${resourcePath}`,
+    authorization_servers: oauth.authorizationServers,
+    ...(oauth.scopes?.length ? { scopes_supported: oauth.scopes } : {}),
+    bearer_methods_supported: ["header"],
+    resource_name: oauth.resourceName ?? options.name,
+  };
+  return new Response(method === "HEAD" ? null : JSON.stringify(metadata), {
     headers: { "content-type": "application/json", "cache-control": "no-store" },
   });
 }
@@ -928,6 +978,27 @@ interface NormalizedOptions extends Omit<APIMCPOptions, "path" | "name" | "versi
   version: string;
 }
 
+function validateOAuth(oauth: NonNullable<APIMCPOptions["oauth"]>): void {
+  const servers = oauth?.authorizationServers;
+  if (
+    !Array.isArray(servers) ||
+    servers.length === 0 ||
+    !servers.every((server) => typeof server === "string" && /^https?:\/\//i.test(server))
+  ) {
+    throw new TypeError("apiMcp oauth.authorizationServers must list absolute issuer URLs.");
+  }
+  // Scopes are quoted into the WWW-Authenticate header, so keep them to RFC 6749 scope tokens.
+  if (
+    oauth.scopes !== undefined &&
+    (!Array.isArray(oauth.scopes) ||
+      !oauth.scopes.every(
+        (scope) => typeof scope === "string" && /^[\x21\x23-\x5b\x5d-\x7e]+$/.test(scope),
+      ))
+  ) {
+    throw new TypeError("apiMcp oauth.scopes must be OAuth scope tokens.");
+  }
+}
+
 function validateOptions(options: APIMCPOptions): NormalizedOptions {
   if (!options || typeof options !== "object") throw new TypeError("apiMcp options are required.");
   if (options.tools !== undefined && !Array.isArray(options.tools)) {
@@ -940,6 +1011,7 @@ function validateOptions(options: APIMCPOptions): NormalizedOptions {
       "apiMcp requires authorize; set allowUnauthenticated: true only for a deliberately public server.",
     );
   }
+  if (options.oauth !== undefined) validateOAuth(options.oauth);
   const path = options.path ?? "/api/mcp";
   if (!/^\/api\/[^/?#]+(?:\/[^/?#]+)*$/.test(path)) {
     throw new TypeError("apiMcp path must be a canonical /api path.");

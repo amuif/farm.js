@@ -178,6 +178,79 @@ describe("apiMcp", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Unauthorized" });
     expect(response.headers.get("cache-control")).toBe("no-store");
+    // A 401 must carry a challenge (RFC 9110); MCP clients authenticate with Bearer tokens.
+    expect(response.headers.get("www-authenticate")).toBe("Bearer");
+  });
+
+  it("links OAuth protected resource metadata from the 401 when oauth is configured", async () => {
+    const oauth = {
+      authorizationServers: ["https://auth.example.com"],
+      scopes: ["projects:read", "projects:write"],
+    };
+    const authorize = () => false as const;
+    const { endpoint } = createFixture({ config: { authorize, oauth } });
+    const response = await sendMCP(endpoint, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {},
+    });
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe(
+      'Bearer resource_metadata="http://farm.test/.well-known/oauth-protected-resource/api/mcp", scope="projects:read projects:write"',
+    );
+
+    const before = apiMcp({ authorize, oauth, name: "acme" }).runtime!.before!;
+    const metadata = (await before({
+      request: new Request("http://farm.test/.well-known/oauth-protected-resource/api/mcp"),
+    } as never)) as Response;
+    expect(metadata.status).toBe(200);
+    expect(metadata.headers.get("content-type")).toBe("application/json");
+    expect(await metadata.json()).toEqual({
+      resource: "http://farm.test/api/mcp",
+      authorization_servers: ["https://auth.example.com"],
+      scopes_supported: ["projects:read", "projects:write"],
+      bearer_methods_supported: ["header"],
+      resource_name: "acme",
+    });
+
+    // The endpoint's public path can differ from /api/mcp through api.baseURL.
+    const mapped = (await before({
+      request: new Request("http://farm.test/.well-known/oauth-protected-resource/v1/mcp"),
+    } as never)) as Response;
+    expect((await mapped.json()).resource).toBe("http://farm.test/v1/mcp");
+
+    const post = (await before({
+      request: new Request("http://farm.test/.well-known/oauth-protected-resource/api/mcp", {
+        method: "POST",
+      }),
+    } as never)) as Response;
+    expect(post.status).toBe(405);
+    for (const pathname of ["/.well-known/oauth-protected-resource/api/other", "/api/mcp", "/"]) {
+      expect(
+        await before({ request: new Request(`http://farm.test${pathname}`) } as never),
+      ).toBeUndefined();
+    }
+  });
+
+  it("adds no request hook without oauth", () => {
+    expect(apiMcp({ authorize: () => false }).runtime).toBeUndefined();
+  });
+
+  it("rejects oauth config that cannot be advertised", () => {
+    const authorize = () => false as const;
+    expect(() => apiMcp({ authorize, oauth: { authorizationServers: [] } })).toThrow(
+      "absolute issuer URLs",
+    );
+    expect(() =>
+      apiMcp({ authorize, oauth: { authorizationServers: ["auth.example.com"] } }),
+    ).toThrow("absolute issuer URLs");
+    expect(() =>
+      apiMcp({
+        authorize,
+        oauth: { authorizationServers: ["https://auth.example.com"], scopes: ['a" b'] },
+      }),
+    ).toThrow("OAuth scope tokens");
   });
 
   it("authorizes every tool call in a JSON-RPC batch before dispatch", async () => {

@@ -313,6 +313,38 @@ returned principal as `authorization`; endpoint-backed tools continue to authent
 their existing middleware using forwarded credentials. The principal is not injected into an
 endpoint's context. This config does not implement an OAuth authorization server or issue tokens.
 
+### OAuth discovery
+
+A rejected request's 401 carries `WWW-Authenticate: Bearer`. When your tokens come from an OAuth
+authorization server, set `oauth` so MCP clients can find it and sign the user in, as the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+describes:
+
+```ts title="farm.config.ts"
+export default defineConfig({
+  mcp: {
+    authorize: verifyAccessToken,
+    oauth: {
+      authorizationServers: ["https://auth.example.com"],
+      scopes: ["projects:read", "projects:write"],
+    },
+  },
+});
+```
+
+The 401 then links the endpoint's
+[RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) metadata:
+
+```http
+WWW-Authenticate: Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/api/mcp", scope="projects:read projects:write"
+```
+
+Farm serves that metadata, naming the endpoint as the `resource` and listing the authorization
+servers and scopes. It is built from the request, so it names the endpoint URL the client used.
+`authorize` still validates every token, including its audience; `oauth` only advertises where
+tokens come from. With a `basePath`, the metadata URL sits at the origin root, as RFC 9728 places it,
+so the proxy in front of the app must forward `/.well-known/oauth-protected-resource/*` to it.
+
 ## Keep the API route authoritative
 
 Define validation and endpoint authorization on the route as usual:
@@ -471,6 +503,7 @@ bounded post-response work where the host requires it.
 | `authorize`            | required      | Receive the tool catalog and server identity; return a subject and optional allowed tool names. |
 | `tools`                | route opt-ins | Compose endpoint references, server functions, and standalone `defineTool()` definitions.       |
 | `allowUnauthenticated` | `false`       | Deliberately permit a public MCP endpoint instead of `authorize`.                               |
+| `oauth`                | none          | Advertise OAuth authorization servers and scopes through RFC 9728 metadata and the 401.         |
 | `path`                 | `/api/mcp`    | Canonical Farm API path for the Streamable HTTP endpoint.                                       |
 | `name`                 | `farm-api`    | MCP server name returned during initialization.                                                 |
 | `version`              | `1.0.0`       | Application server version returned during initialization.                                      |

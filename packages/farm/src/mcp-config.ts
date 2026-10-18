@@ -103,6 +103,22 @@ export interface FarmMCPConfig {
   ) => FarmMCPAuthorization | false | Promise<FarmMCPAuthorization | false>;
   /** Deliberate escape hatch for public servers. Authentication is required by default. */
   allowUnauthenticated?: boolean;
+  /**
+   * OAuth discovery for MCP clients. When set, a rejected request's 401 points at
+   * RFC 9728 Protected Resource Metadata naming these authorization servers, which
+   * Farm serves at `/.well-known/oauth-protected-resource/<endpoint path>`.
+   * Validating tokens stays in `authorize`.
+   */
+  oauth?: FarmMCPOAuthConfig;
+}
+
+export interface FarmMCPOAuthConfig {
+  /** Issuer URLs of the OAuth authorization servers that issue tokens for this endpoint. */
+  authorizationServers: readonly string[];
+  /** Scopes clients may request, advertised as `scopes_supported` and in the 401 challenge. */
+  scopes?: readonly string[];
+  /** Human-readable name for consent screens. @default the MCP server name */
+  resourceName?: string;
 }
 
 export type FarmMCPUserConfig = FarmMCPConfig | false;
