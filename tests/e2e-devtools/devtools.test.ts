@@ -504,7 +504,9 @@ test("production has no launcher, inspector endpoints, or UI assets", async ({
   for (const file of await readdir(output, { recursive: true })) {
     if (/\.(js|css)$/.test(file)) {
       const source = await readFile(path.join(output, file), "utf8");
-      expect(source, file).not.toMatch(/farm-devtools|farm:devtools:hmr|__FARM_DEVTOOLS__|--sh-keyword/);
+      expect(source, file).not.toMatch(
+        /farm-devtools|farm:devtools:hmr|__FARM_DEVTOOLS__|--sh-keyword/,
+      );
     }
   }
 });

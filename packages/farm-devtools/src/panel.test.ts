@@ -73,28 +73,26 @@ describe("Live Inspect", () => {
     vi.spyOn(window, "parent", "get").mockReturnValue(parent);
     window.history.replaceState(null, "", "#inspect");
     let source = "export const value = 1;";
-    window.fetch = vi
-      .fn()
-      .mockImplementation(async (url: string) => ({
-        ok: true,
-        json: async () =>
-          url.endsWith("/modules.json")
-            ? {
-                modules: [{ id: "chosen", path: "src/value.ts", url: "/src/value.ts" }],
-                limited: false,
-              }
-            : url.includes("/module.json?")
-              ? { id: "chosen", source, transformed: source, imports: [], importers: [] }
-              : {
-                  project: { name: "app" },
-                  counts: {},
-                  routes: [],
-                  apiRoutes: [],
-                  diagnostics: [],
-                  plugins: [],
-                  generatedAt: new Date().toISOString(),
-                },
-      }));
+    window.fetch = vi.fn().mockImplementation(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith("/modules.json")
+          ? {
+              modules: [{ id: "chosen", path: "src/value.ts", url: "/src/value.ts" }],
+              limited: false,
+            }
+          : url.includes("/module.json?")
+            ? { id: "chosen", source, transformed: source, imports: [], importers: [] }
+            : {
+                project: { name: "app" },
+                counts: {},
+                routes: [],
+                apiRoutes: [],
+                diagnostics: [],
+                plugins: [],
+                generatedAt: new Date().toISOString(),
+              },
+    }));
     const root = document.createElement("div");
     root.dataset.inspect = "true";
     document.body.append(root);
