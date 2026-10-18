@@ -1,3 +1,5 @@
+import { stripFarmBasePath } from "./base-path";
+import { _findFarmMCPEndpointTool, type FarmMCPEndpointTool } from "./mcp-catalog";
 import { createFarmMarkdownViewResponse, FARM_MARKDOWN_VIEW_PARAMS } from "./markdown-view";
 
 /** Content type for Markdown responses, including agent-facing error bodies. */
@@ -77,6 +79,8 @@ export interface CreateMarkdownMirrorResponseOptions {
   config?: FarmMarkdownResolvedConfig;
   routeExists?: (pathname: string) => boolean;
   renderPage: (request: Request) => Response | Promise<Response>;
+  /** The app's public API path, so a form posting to an API route can be matched to its MCP tool. */
+  apiServerBasePath?: string;
 }
 
 export interface ApplyMarkdownNegotiationHeadersOptions {
@@ -201,6 +205,15 @@ export async function createMarkdownMirrorResponse(
   const html = await pageResponse.text();
   const markdownPath = target.pathname === "/" ? "/index.md" : `${target.pathname}.md`;
   const actions = extractFarmPageActions(html, pageUrl);
+  for (const form of actions) {
+    // Only a same-origin target can be an endpoint of this app.
+    if (!form.action?.startsWith("/")) continue;
+    const pathname = new URL(form.action, pageUrl.origin).pathname;
+    const tool =
+      _findFarmMCPEndpointTool(form.method, pathname, options.apiServerBasePath) ??
+      _findFarmMCPEndpointTool(form.method, stripFarmBasePath(pathname), options.apiServerBasePath);
+    if (tool) form.tool = tool;
+  }
   const markdown = htmlToMarkdown(html, {
     title: target.route?.title,
     includeMetadata: options.config?.includeMetadata ?? true,
@@ -790,6 +803,12 @@ export interface FarmPageFormAction {
   submit: FarmPageFormSubmit[];
   /** A React server action form: the id React put in its hidden `$ACTION_` fields. */
   serverAction?: { id: string };
+  /**
+   * The MCP tool that runs the same API endpoint, when `@farm.js/mcp` exposes
+   * it: the tool `name` and the MCP `endpoint` to call it at. The caller's
+   * `authorize` policy still decides whether that tool is available to it.
+   */
+  tool?: FarmMCPEndpointTool;
 }
 
 const FORM_ENCTYPES = new Set([

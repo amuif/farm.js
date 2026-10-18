@@ -2055,6 +2055,7 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                 // Keep the page's own redirect (a sign-in gate, say) so the mirror
                 // answers with it, as production does, instead of the target page.
                 renderPage: async (request) => fetch(request, { redirect: "manual" }),
+                apiServerBasePath,
               });
           if (markdownResponse) {
             if (await runAppMiddlewareForContentRoute()) return;

@@ -233,8 +233,28 @@ describe("apiMcp", () => {
     }
   });
 
+  it("publishes its endpoint tools so core can name the tool behind a form, and removes them on close", async () => {
+    const { _findFarmMCPEndpointTool } = await import("@farm.js/core");
+    const create = route.post("/api/notes", {
+      mcp: { name: "create_note" },
+      input: { body: z.object({ text: z.string() }) },
+      handler: () => ({ ok: true }),
+    });
+    const plugin = apiMcp({ authorize: () => ({ subject: "x" }) });
+    mergePluginAPIRoutes(
+      [{ path: create.path, methods: [create.method], endpoints: { POST: create.endpoint } }],
+      [plugin],
+    );
+    expect(_findFarmMCPEndpointTool("POST", "/api/notes")).toEqual({
+      name: "create_note",
+      endpoint: "/api/mcp",
+    });
+    await (plugin.runtime!.close as () => void)();
+    expect(_findFarmMCPEndpointTool("POST", "/api/notes")).toBeUndefined();
+  });
+
   it("adds no request hook without oauth", () => {
-    expect(apiMcp({ authorize: () => false }).runtime).toBeUndefined();
+    expect(apiMcp({ authorize: () => false }).runtime?.before).toBeUndefined();
   });
 
   it("rejects oauth config that cannot be advertised", () => {

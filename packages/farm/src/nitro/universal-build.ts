@@ -7868,6 +7868,7 @@ async function handleFarmRequestInContext(
       routeExists: (targetPathname) =>
         Boolean(matchPageRoute(getFarmRoutePathname(targetPathname))),
       renderPage: (targetRequest) => handleFarmRequest(targetRequest, adapterContext),
+      apiServerBasePath: farmLocalAPIBasePath,
     });
     if (markdownResponse) {
       return applyProductionMiddlewareHeaders(markdownResponse, middlewareHeaders);
