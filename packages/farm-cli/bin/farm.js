@@ -331,6 +331,40 @@ program
     }
   });
 
+const agentCommand = program
+  .command("agent")
+  .description("Check how AI agents can read and use a Farm app");
+
+agentCommand
+  .command("check [url]")
+  .description("Probe a running app's agent surfaces: Markdown mirrors, llms.txt, APIs, and MCP")
+  .option("--path <path>", "Page to check, relative to the URL", "/")
+  .option("--mcp <path>", "Path of the MCP endpoint (default: from the API catalog, or /api/mcp)")
+  .option("--timeout <ms>", "Per-request timeout in milliseconds", "5000")
+  .option("--json", "Print machine-readable JSON")
+  .action(async (url, options) => {
+    try {
+      const { formatFarmAgentCheckReport, runFarmAgentCheck } = require("../dist/index.js");
+      const timeoutMs = Number.parseInt(options.timeout, 10);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new Error("--timeout must be a positive number of milliseconds.");
+      }
+      const report = await runFarmAgentCheck({
+        url,
+        path: options.path,
+        mcpPath: options.mcp,
+        timeoutMs,
+      });
+      console.log(
+        options.json ? JSON.stringify(report, null, 2) : formatFarmAgentCheckReport(report),
+      );
+      if (report.health === "error") process.exitCode = 1;
+    } catch (error) {
+      console.error("Failed to check the app:", error?.message ?? error);
+      process.exit(1);
+    }
+  });
+
 program
   .command("explain <path>")
   .description("Explain how a URL maps to a Farm route and deployment runtime")
