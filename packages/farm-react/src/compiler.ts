@@ -2682,7 +2682,7 @@ function rewriteQueuedKeyedArrayReorderMapHints(
   structuralSortIdentifier: t.Identifier,
   allowed: boolean,
 ): { root: t.JSXElement; mapCount: number } {
-  if (!allowed) return { root: t.cloneNode(root, true), mapCount: 0 };
+  if (!allowed) return { root, mapCount: 0 };
   const file = expressionFile(t.cloneNode(root, true));
   let mapCount = 0;
 
@@ -2841,7 +2841,7 @@ function rewriteQueuedKeyedArrayMappedStructuralHints(
 } {
   if (!allowed) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       mapCount: 0,
       structuralCount: 0,
       stateIndices: new Set(),
@@ -2989,7 +2989,7 @@ function rewriteQueuedKeyedArrayStructuralMapHints(
 } {
   if (!allowed) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       mapCount: 0,
       mappedStructuralAppendCount: 0,
       structuralAppendMapCount: 0,
@@ -3160,7 +3160,7 @@ function rewriteQueuedKeyedArrayStructuralPrependMapHints(
 } {
   if (!allowed) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       mapCount: 0,
       mappedStructuralPrependCount: 0,
       structuralPrependMapCount: 0,
@@ -3340,7 +3340,7 @@ function rewriteQueuedKeyedArrayRollingWindowMapHints(
     return {
       chainedMapCount: 0,
       chainedRollingWindowCount: 0,
-      root: t.cloneNode(root, true),
+      root,
       leadingMapCount: 0,
       mappedRollingWindowCount: 0,
       rollingWindowCount: 0,
@@ -3558,7 +3558,7 @@ function rewriteQueuedKeyedArrayStructuralReorderHints(
 } {
   if (!allowed) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       reorderCount: 0,
       sortCount: 0,
       replacedMapReorderCount: 0,
@@ -3738,7 +3738,7 @@ function rewriteQueuedKeyedArrayMapReorderHints(
 } {
   if (!allowed) {
     return {
-      root: t.cloneNode(root, true),
+      root,
       mapCount: 0,
       mapReorderCount: 0,
       mapSortCount: 0,
