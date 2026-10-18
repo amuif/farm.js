@@ -818,6 +818,18 @@ describe("Markdown mirrors of protected pages", () => {
     );
   });
 
+  it("answers a redirect that carries an HTML body with the redirect", async () => {
+    const response = await mirror(
+      new Response("<html><body>Redirecting</body></html>", {
+        status: 307,
+        headers: { Location: "/login", "Content-Type": "text/html; charset=utf-8" },
+      }),
+    );
+    expect(response?.status).toBe(307);
+    expect(response?.headers.get("location")).toBe("/login");
+    expect(await response?.text()).toContain("redirects to [https://acme.test/login]");
+  });
+
   it("explains 401 and 403 without a page body", async () => {
     const unauthorized = await mirror(
       new Response(null, { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="acme"' } }),

@@ -1299,12 +1299,21 @@ export default function Account() {
         path.join(root, "src", "app", "pricing", "page.tsx"),
         `export const dynamic = "force-static";\nexport default function Pricing() { return <main><h1>Pricing</h1><p>Plans.</p></main>; }`,
       );
+      await fs.mkdir(path.join(root, "src", "app", "about"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "about", "page.tsx"),
+        `export const dynamic = "force-static";\nexport default function About() { return <main><h1>About</h1></main>; }`,
+      );
       const config = await resolveConfig(
         {
           root,
           srcDir: "src",
           images: { provider: "none" },
           telemetry: false,
+          // A lowercase Link of the app's own sits next to the mirror's Link.
+          routeRules: {
+            "/about": { headers: { link: '</about.css>; rel="preload"; as="style"' } },
+          },
           generateBuildId: () => "production-prerender-markdown-link-test",
         },
         "production",
@@ -1329,6 +1338,16 @@ export default function Account() {
           );
         },
         "/pricing",
+      );
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toContain("text/html");
+          expect(response.headers.get("link")).toBe(
+            '</about.css>; rel="preload"; as="style", </about.md>; rel="alternate"; type="text/markdown"',
+          );
+        },
+        "/about",
       );
       await runProductionRequest(
         serverDir,

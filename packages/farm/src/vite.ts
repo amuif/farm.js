@@ -2049,7 +2049,9 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                 config: farmApp.getConfig().md,
                 routeExists: (pathname) =>
                   Boolean(farmApp.getRouteManager().matchRoute(pathname).route),
-                renderPage: async (request) => fetch(request),
+                // Keep the page's own redirect (a sign-in gate, say) so the mirror
+                // answers with it, as production does, instead of the target page.
+                renderPage: async (request) => fetch(request, { redirect: "manual" }),
               });
           if (markdownResponse) {
             if (await runAppMiddlewareForContentRoute()) return;

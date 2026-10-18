@@ -9875,13 +9875,18 @@ export default async function farmNitroEventHandler(event) {
       const alternatePath = getFarmMarkdownAlternatePath(config.md, route.route);
       if (!alternatePath) return;
       const routeRule = nitroInstance.options.routeRules[route.route] || {};
-      nitroInstance.options.routeRules[route.route] = {
-        ...routeRule,
-        headers: {
-          ...routeRule.headers,
-          Link: `<${alternatePath}>; rel="alternate"; type="text/markdown"`,
-        },
-      };
+      const alternate = `<${alternatePath}>; rel="alternate"; type="text/markdown"`;
+      // Append to a configured Link header, whatever its case, as dynamic pages
+      // do; two differently cased keys would leave only one on the response.
+      const headers: Record<string, string> = { ...routeRule.headers };
+      let link: string | undefined;
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() !== "link") continue;
+        link = link ? `${link}, ${headers[key]}` : headers[key];
+        delete headers[key];
+      }
+      headers.Link = !link ? alternate : link.includes(alternate) ? link : `${link}, ${alternate}`;
+      nitroInstance.options.routeRules[route.route] = { ...routeRule, headers };
     });
     nitroInstance.hooks.hook("prerender:done", () => {
       nitroInstance.routing.sync();

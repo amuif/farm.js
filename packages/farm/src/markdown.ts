@@ -182,7 +182,11 @@ export async function createMarkdownMirrorResponse(
     }),
   );
 
-  if (!isHtmlResponse(pageResponse)) {
+  // A redirect is answered as a redirect even when it carries an HTML body, as
+  // the development renderer's redirects do.
+  const redirects =
+    pageResponse.status >= 300 && pageResponse.status < 400 && pageResponse.headers.has("location");
+  if (redirects || !isHtmlResponse(pageResponse)) {
     // A page behind sign-in redirects or answers 401/403 without HTML. Say so in
     // Markdown with the same status, rather than falling through to a 404 that
     // tells the agent the page does not exist.
