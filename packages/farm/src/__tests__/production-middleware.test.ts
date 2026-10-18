@@ -358,6 +358,23 @@ describe("production middleware runtime", () => {
       expect(llmsFull).toContain(
         "## Explicit image\n\nURL: https://example.test/dashboard/explicit.md\n\n# Explicit image\n\nSource: /dashboard/explicit\n\nexplicit image page",
       );
+      // Concurrent requests share one render, and HEAD reads no pages.
+      const concurrent = await Promise.all(
+        [0, 1, 2].map(() =>
+          serverModule.default.fetch(new Request("https://example.test/llms-full.txt")),
+        ),
+      );
+      for (const response of concurrent) expect(await response.text()).toBe(llmsFull);
+      const llmsFullHead = await serverModule.default.fetch(
+        new Request("https://example.test/llms-full.txt", { method: "HEAD" }),
+      );
+      expect(llmsFullHead.status).toBe(200);
+      expect(await llmsFullHead.text()).toBe("");
+      expect(
+        await (
+          await serverModule.default.fetch(new Request("https://example.test/llms-full.txt"))
+        ).text(),
+      ).toBe(llmsFull);
       // /dashboard/private-notes answers 401 without credentials. Its block stays,
       // but the body is never read into a file anyone can fetch.
       expect(llmsFull).toContain(

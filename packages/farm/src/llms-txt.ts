@@ -68,8 +68,9 @@ export interface FarmLlmsTxtUserConfig {
    */
   full?: boolean;
   /**
-   * Seconds a CDN may cache the generated files. Rendering llms-full.txt renders
-   * every listed page, so cache it on busy sites. Defaults to no caching.
+   * Seconds a CDN may cache the generated files, and the production server may
+   * reuse an llms-full.txt render, which renders every listed page. Defaults to
+   * no caching; concurrent llms-full.txt requests still share one render.
    */
   revalidate?: number;
 }
@@ -353,6 +354,47 @@ export async function renderFarmLlmsFullTxt(
   });
   if (pages.length) blocks.push(pages.join("\n\n---\n\n"));
   return `${blocks.join("\n\n")}\n`;
+}
+
+/**
+ * Shares llms-full.txt renders, which read every listed page. Requests for the
+ * same origin while a render runs, or within `revalidate` seconds after it, get
+ * that result; renders run one at a time, so a burst of requests, even with
+ * varied Host headers, cannot multiply page renders. The content is the same for
+ * every caller: pages are read with fresh requests that carry no credentials.
+ */
+export function createFarmLlmsFullRenderer(
+  options: { revalidate?: number; now?: () => number; maxEntries?: number } = {},
+): (origin: string, render: () => Promise<string>) => Promise<string> {
+  const now = options.now ?? Date.now;
+  const ttl = (options.revalidate ?? 0) * 1000;
+  const maxEntries = options.maxEntries ?? 16;
+  const entries = new Map<string, { body: Promise<string>; expires: number }>();
+  let queue: Promise<unknown> = Promise.resolve();
+
+  return (origin, render) => {
+    const entry = entries.get(origin);
+    if (entry && entry.expires > now()) return entry.body;
+    entries.delete(origin);
+
+    const body = queue.then(render);
+    queue = body.catch(() => {});
+    const pending = { body, expires: Number.POSITIVE_INFINITY };
+    entries.set(origin, pending);
+    // Map order is insertion order, so the first key is the oldest entry.
+    if (entries.size > maxEntries) entries.delete(entries.keys().next().value!);
+    body.then(
+      () => {
+        if (entries.get(origin) !== pending) return;
+        if (ttl > 0) pending.expires = now() + ttl;
+        else entries.delete(origin);
+      },
+      () => {
+        if (entries.get(origin) === pending) entries.delete(origin);
+      },
+    );
+    return body;
+  };
 }
 
 // Markdown sources keep their YAML frontmatter, whose --- lines would read as page

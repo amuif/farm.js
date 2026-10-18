@@ -1,9 +1,10 @@
 // @vitest-environment node
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   collectFarmLlmsTxtPages,
   createFarmDefaultLlmsTxt,
+  createFarmLlmsFullRenderer,
   createFarmLlmsMarkdownReader,
   renderFarmLlmsFullTxt,
   resolveFarmLlmsTxtConfig,
@@ -476,5 +477,79 @@ describe("createFarmLlmsMarkdownReader", () => {
       expect(request.headers.get("authorization")).toBeNull();
       expect(request.headers.get("accept")).toBe("text/markdown");
     }
+  });
+});
+
+describe("createFarmLlmsFullRenderer", () => {
+  const deferred = () => {
+    let resolve!: (value: string) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<string>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it("shares an in-flight render between requests for the same origin", async () => {
+    const shared = createFarmLlmsFullRenderer();
+    const first = deferred();
+    const render = vi.fn(() => first.promise);
+    const a = shared("https://a.test", render);
+    const b = shared("https://a.test", render);
+    first.resolve("full");
+    expect(await a).toBe("full");
+    expect(await b).toBe("full");
+    expect(render).toHaveBeenCalledTimes(1);
+
+    // Without revalidate, a later request renders again.
+    await shared("https://a.test", async () => "fresh");
+    expect(await shared("https://a.test", async () => "again")).toBe("again");
+  });
+
+  it("reuses a result for revalidate seconds", async () => {
+    let time = 0;
+    const shared = createFarmLlmsFullRenderer({ revalidate: 60, now: () => time });
+    expect(await shared("https://a.test", async () => "one")).toBe("one");
+    time = 59_000;
+    expect(await shared("https://a.test", async () => "two")).toBe("one");
+    // Each origin has its own links, so it has its own entry.
+    expect(await shared("https://b.test", async () => "b")).toBe("b");
+    time = 60_001;
+    expect(await shared("https://a.test", async () => "three")).toBe("three");
+  });
+
+  it("runs renders one at a time across origins", async () => {
+    const shared = createFarmLlmsFullRenderer();
+    const first = deferred();
+    const second = vi.fn(async () => "b");
+    const a = shared("https://a.test", () => first.promise);
+    const b = shared("https://b.test", second);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(second).not.toHaveBeenCalled();
+    first.resolve("a");
+    expect(await a).toBe("a");
+    expect(await b).toBe("b");
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not keep a failed render, and keeps rendering after it", async () => {
+    const shared = createFarmLlmsFullRenderer({ revalidate: 60 });
+    await expect(
+      shared("https://a.test", async () => {
+        throw new Error("page failed");
+      }),
+    ).rejects.toThrow("page failed");
+    expect(await shared("https://a.test", async () => "ok")).toBe("ok");
+  });
+
+  it("keeps a bounded number of origins", async () => {
+    const shared = createFarmLlmsFullRenderer({ revalidate: 60, maxEntries: 2 });
+    await shared("https://a.test", async () => "a");
+    await shared("https://b.test", async () => "b");
+    await shared("https://c.test", async () => "c");
+    expect(await shared("https://a.test", async () => "a2")).toBe("a2");
+    expect(await shared("https://c.test", async () => "c2")).toBe("c");
   });
 });

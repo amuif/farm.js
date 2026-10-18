@@ -5508,6 +5508,7 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   createFarmDefaultLlmsTxt,
   createFarmLlmsMarkdownReader,
   renderFarmLlmsFullTxt,
+  createFarmLlmsFullRenderer,
   createFarmThemeDocumentParts,
   createFarmLocaleCookie,
   createFarmProductionLifecycle,
@@ -6000,7 +6001,11 @@ const farmImageHandler = ${
   };
 const farmMarkdownConfig = ${JSON.stringify(config.md)};
 const farmLlmsTxtConfig = ${JSON.stringify(config.agent?.llmsTxt ?? { enabled: false, include: [], exclude: [] })};
-${servesAgentRobotsTxt ? `const farmAgentCrawlers = ${JSON.stringify(config.agent.crawlers)};` : ""}
+${
+  config.agent?.llmsTxt?.enabled
+    ? "const farmLlmsFullRenderer = createFarmLlmsFullRenderer({ revalidate: farmLlmsTxtConfig.revalidate });\n"
+    : ""
+}${servesAgentRobotsTxt ? `const farmAgentCrawlers = ${JSON.stringify(config.agent.crawlers)};` : ""}
 const farmMdxConfig = ${JSON.stringify({
     ...config.mdx,
     components: typeof config.mdx?.components === "string" ? config.mdx.components : undefined,
@@ -7972,12 +7977,18 @@ async function handleFarmRequestInContext(
     : ${config.agent?.llmsTxt?.full ? `normalizeRuntimePath(routePathname) === "/llms-full.txt" ? "llms-full" : ` : ""}null;
   if (farmGeneratedLlmsKind) {
     const llmsContext = createFarmLlmsTxtContext(request, farmGeneratedLlmsKind === "llms-full");
-    const llmsBody = farmGeneratedLlmsKind === "llms-full"
-      ? await renderFarmLlmsFullTxt(llmsContext.defaults, {
-          origin: new URL(request.url).origin,
-          readMarkdown: llmsContext.markdown,
-        })
-      : llmsContext.defaults;
+    const llmsOrigin = new URL(request.url).origin;
+    const renderLlmsFull = () =>
+      renderFarmLlmsFullTxt(llmsContext.defaults, {
+        origin: llmsOrigin,
+        readMarkdown: llmsContext.markdown,
+      });
+    // HEAD reads no pages, so it neither waits for nor fills the shared render.
+    const llmsBody = farmGeneratedLlmsKind !== "llms-full"
+      ? llmsContext.defaults
+      : request.method.toUpperCase() === "HEAD"
+        ? await renderLlmsFull()
+        : await farmLlmsFullRenderer(llmsOrigin, renderLlmsFull);
     return applyProductionMiddlewareHeaders(
       createFarmMetadataRouteResponse(
         farmGeneratedLlmsKind,

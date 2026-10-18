@@ -445,8 +445,10 @@ and description, separated by `---`. Pages with an exposed Markdown mirror get i
 without one keeps its block but no body. Pages are read with a fresh request that carries no cookies
 or credentials, so a page behind auth is left out rather than copied into a file anyone can fetch.
 `full: false` turns off the generated `/llms-full.txt` (a `public/llms-full.txt` or `llms-full.ts`
-still serves that path). Rendering llms-full.txt renders every listed page, so set `revalidate`
-(seconds) to let a CDN cache both generated files on busy sites.
+still serves that path). Rendering llms-full.txt renders every listed page. The production server shares one
+render between concurrent requests and runs one at a time, so a burst of requests does not multiply
+page renders. Set `revalidate` (seconds) to reuse a render on the server for that long and let a CDN
+cache both generated files.
 
 Each file can be overridden on its own. A static `public/llms.txt` or `public/llms-full.txt` is
 served as-is. An [`llms.ts` or `llms-full.ts` metadata route](/docs/routing#application-metadata-routes)

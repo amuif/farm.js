@@ -56,6 +56,7 @@ export {
   createFarmDefaultLlmsTxt,
   createFarmLlmsMarkdownReader,
   renderFarmLlmsFullTxt,
+  createFarmLlmsFullRenderer,
 } from "../llms-txt";
 export {
   applyProductionMiddlewareHeaders,
