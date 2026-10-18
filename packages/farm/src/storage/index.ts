@@ -1,5 +1,5 @@
 import { createStorage, prefixStorage, builtinDrivers, type BuiltinDriverName } from "unstorage";
-import type { Driver, Storage } from "unstorage";
+import type { Driver, Storage, TransactionOptions } from "unstorage";
 import type { Database } from "db0";
 import memoryDriver from "unstorage/drivers/memory";
 import type {
@@ -231,12 +231,11 @@ async function loadDatabaseDriver(config: FarmStorageDatabaseConfig): Promise<Dr
     tableName: config.tableName,
   });
 
-  // The db0 driver has no dispose, so this connection is Farm's to close. Databases
-  // handed to `databaseStorage` stay owned by the caller and are left open.
+  // Farm created this connection, so it is Farm's to close, exactly once. Newer db0
+  // drivers dispose the database themselves; older ones have no dispose at all.
   return {
     ...driver,
     async dispose() {
-      await driver.dispose?.();
       await database.dispose();
     },
   };
@@ -368,10 +367,13 @@ export function databaseStorage(
   return defineStorageClient(async () => {
     const db0DriverModule =
       await loadModule<typeof import("unstorage/drivers/db0")>("unstorage/drivers/db0");
-    return db0DriverModule.default({
+    // The caller owns this database. Newer db0 drivers close their database on
+    // dispose, so drop that hook and leave the connection open.
+    const { dispose: _dispose, ...driver } = db0DriverModule.default({
       database,
       tableName: options.tableName,
     });
+    return driver;
   });
 }
 
@@ -568,11 +570,57 @@ export function getStorage(namespace?: string): Storage {
   }
 
   const namespaced = prefixStorage(globalStorage, base);
+  // prefixStorage re-prefixes the key methods, but copies dispose/watch/getMount(s)
+  // straight from the parent, so on a namespaced view they operate on the whole
+  // global store: dispose() tears down every namespace, watch() sees (and leaks
+  // the raw keys of) every other namespace's writes, getMounts() lists them all.
+  // Scope those too, so a handle handed out as "namespace X" stays confined to X.
+  const store = globalStorage;
+  const prefix = `${base}:`;
+  const stripPrefix = (key: string) => (key.startsWith(prefix) ? key.slice(prefix.length) : key);
+  const viewUnwatchers = new Set<Awaited<ReturnType<Storage["watch"]>>>();
+  const releaseViewWatchers = async () => {
+    const current = [...viewUnwatchers];
+    viewUnwatchers.clear();
+    await Promise.all(current.map((unwatch) => unwatch()));
+  };
+
   return {
     ...namespaced,
-    async clear() {
-      const keys = await namespaced.getKeys();
-      await Promise.all(keys.map((key) => namespaced.removeItem(key)));
+    // Scope the wipe to the namespace instead of the whole storage, and keep
+    // the caller's base so `clear("sessions")` cannot take unrelated keys with
+    // it. Dropping the argument silently widens a targeted clear into a
+    // namespace-wide delete.
+    async clear(base?: string, opts?: TransactionOptions) {
+      const keys = await namespaced.getKeys(base);
+      await Promise.all(keys.map((key) => namespaced.removeItem(key, opts)));
+    },
+    async watch(callback) {
+      const unwatch = await store.watch((event, key) => {
+        if (key.startsWith(prefix)) callback(event, stripPrefix(key));
+      });
+      viewUnwatchers.add(unwatch);
+      return async () => {
+        viewUnwatchers.delete(unwatch);
+        await unwatch();
+      };
+    },
+    async unwatch() {
+      await releaseViewWatchers();
+    },
+    async dispose() {
+      // A namespaced view shares the global store's lifecycle and owns no
+      // drivers, so disposing it must not tear down the global store (that is
+      // what disposeStorage is for). Release only this view's watchers.
+      await releaseViewWatchers();
+    },
+    getMount(key = "") {
+      return store.getMount(prefix + key);
+    },
+    getMounts(base = "", options) {
+      return store
+        .getMounts(prefix + base, options)
+        .map((mount) => ({ ...mount, base: stripPrefix(mount.base) }));
     },
   } as Storage;
 }

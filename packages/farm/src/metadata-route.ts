@@ -1,6 +1,14 @@
+import { emitFarmAgentRead } from "./agent-identity";
+import {
+  serializeFarmLlmsTxt,
+  type FarmLlmsTxt,
+  type FarmLlmsTxtLink,
+  type FarmLlmsTxtPage,
+  type FarmLlmsTxtSection,
+} from "./llms-txt";
 import { omitFarmResponseBody } from "./response-body";
 
-export type ApplicationMetadataRouteKind = "sitemap" | "robots" | "manifest";
+export type ApplicationMetadataRouteKind = "sitemap" | "robots" | "manifest" | "llms" | "llms-full";
 
 export namespace MetadataRoute {
   export type SitemapChangeFrequency =
@@ -61,6 +69,34 @@ export namespace MetadataRoute {
     icons?: ManifestIcon[];
     [key: string]: unknown;
   }
+
+  /**
+   * The object an `llms.ts` metadata route returns, rendered as llms.txt. An
+   * `llms.ts` can also return the complete file as a string, or a `Response`.
+   */
+  export type LlmsTxt = FarmLlmsTxt;
+  export type LlmsTxtSection = FarmLlmsTxtSection;
+  export type LlmsTxtLink = FarmLlmsTxtLink;
+  /** A static page of the app, usable directly as an llms.txt link. */
+  export type LlmsTxtPage = FarmLlmsTxtPage;
+
+  /** What an `llms.ts` default-export function receives. */
+  export interface LlmsTxtContext extends MetadataRouteContext {
+    /** The app's static pages, linking to their Markdown mirrors when exposed. */
+    pages: LlmsTxtPage[];
+    /** The llms.txt that `agent.llmsTxt` would serve, to extend instead of replace. */
+    defaults: LlmsTxt;
+  }
+
+  /**
+   * What an `llms-full.ts` default-export function receives. Returning an
+   * `LlmsTxt` object inlines each same-origin link's Markdown; returning a string
+   * serves it as the complete file.
+   */
+  export interface LlmsFullTxtContext extends LlmsTxtContext {
+    /** A page's Markdown mirror, read without the request's cookies; `null` if unavailable. */
+    markdown(url: string): Promise<string | null>;
+  }
 }
 
 export interface MetadataRouteContext {
@@ -77,6 +113,8 @@ export interface FarmMetadataRouteModule {
 
 export interface FarmMetadataRouteResponseOptions {
   method?: string;
+  /** The request being answered, so llms.txt reads can be reported as agent traffic. */
+  request?: Request;
 }
 
 function isResponse(value: unknown): value is Response {
@@ -219,6 +257,10 @@ export function createFarmMetadataRouteResponse(
     return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
   }
 
+  if ((kind === "llms" || kind === "llms-full") && options.request) {
+    emitFarmAgentRead(options.request, kind, isResponse(value) ? value.status : 200);
+  }
+
   if (isResponse(value)) {
     return method === "HEAD" ? omitFarmResponseBody(value) : value;
   }
@@ -228,11 +270,13 @@ export function createFarmMetadataRouteResponse(
       ? serializeSitemap(value)
       : kind === "robots"
         ? serializeRobots(value)
-        : serializeManifest(value);
+        : kind === "llms" || kind === "llms-full"
+          ? serializeFarmLlmsTxt(value)
+          : serializeManifest(value);
   const contentType =
     kind === "sitemap"
       ? "application/xml; charset=utf-8"
-      : kind === "robots"
+      : kind === "robots" || kind === "llms" || kind === "llms-full"
         ? "text/plain; charset=utf-8"
         : "application/manifest+json; charset=utf-8";
 

@@ -7,7 +7,43 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import { createPersistentPreviewRelay, startTypeScriptPreviewAgent } from "../dist/index.js";
 
+const RELAY_TOKEN = "relay-token-for-tests";
+
+test("localhost wildcard previews preserve their port for scripts and navigation", async () => {
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    publicDomain: "localhost",
+  });
+  const address = await relay.listen();
+  const target = createServer((request, response) => {
+    response.setHeader("content-type", "text/javascript");
+    response.end(request.url);
+  });
+  await listen(target);
+  const agent = await startTypeScriptPreviewAgent({
+    relayUrl: address.websocketUrl,
+    token: RELAY_TOKEN,
+    name: "interactive",
+    targetUrl: `http://127.0.0.1:${target.address().port}`,
+  });
+  try {
+    assert.equal(agent.publicUrl, `http://interactive.localhost:${address.port}`);
+    const response = await requestWithHost(
+      `${address.httpUrl}/@farm/client.js`,
+      new URL(agent.publicUrl).host,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.body, "/@farm/client.js");
+  } finally {
+    await agent.close();
+    await relay.close();
+    await close(target);
+  }
+});
+
 test("forwards requests over one persistent websocket and closes with the agent", async () => {
+  const activity = [];
+  const sessions = [];
   const target = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -24,10 +60,23 @@ test("forwards requests over one persistent websocket and closes with the agent"
   await listen(target);
   const targetAddress = target.address();
 
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    observer: {
+      session(event) {
+        sessions.push(event);
+      },
+      request(event) {
+        activity.push(event);
+        return Promise.reject(new Error("optional reporter failed"));
+      },
+    },
+  });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "typed-agent",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
     localProbeIntervalMs: 10,
@@ -46,12 +95,20 @@ test("forwards requests over one persistent websocket and closes with the agent"
       url: "/hello?from=test",
       body: "farm",
     });
+    assert.equal(activity.length, 1);
+    assert.equal(activity[0].path, "/hello");
+    assert.equal(activity[0].status, 201);
+    assert.equal(activity[0].headers, undefined);
+    assert.equal(activity[0].body, undefined);
+    assert.equal(sessions[0].state, "connected");
 
     await close(target);
     await expectInactive(agent.publicUrl);
   } finally {
     await agent.close();
     await relay.close();
+    assert.equal(sessions.at(-1).state, "disconnected");
+    assert.equal(sessions.at(-1).token, undefined);
     await close(target);
   }
 });
@@ -60,10 +117,12 @@ test("mounts public preview paths beneath the target URL pathname", async () => 
   const target = createServer((request, response) => response.end(request.url));
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "base-path",
     targetUrl: `http://127.0.0.1:${targetAddress.port}/console`,
   });
@@ -95,10 +154,12 @@ test("replaces client-supplied forwarding headers at the relay boundary", async 
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "forwarded-headers",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -133,10 +194,12 @@ test("removes headers nominated by Connection in both proxy directions", async (
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "connection-headers",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -168,10 +231,12 @@ test("preserves repeated cookies and removes encoding after decoding a response"
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "response-headers",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -198,10 +263,15 @@ test("stops buffering local responses that exceed the relay limit", async () => 
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay({ maxResponseBodyBytes: 8 });
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    maxResponseBodyBytes: 8,
+  });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "bounded-response",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -218,7 +288,7 @@ test("stops buffering local responses that exceed the relay limit", async () => 
 });
 
 test("rejects malformed and unauthenticated agent messages without crashing", async () => {
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const address = await relay.listen();
 
   try {
@@ -231,7 +301,9 @@ test("rejects malformed and unauthenticated agent messages without crashing", as
         headers: {},
       }),
     ]) {
-      const socket = new WebSocket(address.websocketUrl);
+      const socket = new WebSocket(
+        `${address.websocketUrl}?token=${encodeURIComponent(RELAY_TOKEN)}`,
+      );
       await once(socket, "open");
       const responseMessage = once(socket, "message");
       const closed = once(socket, "close");
@@ -290,6 +362,7 @@ test("closes the agent socket when the relay rejects registration", async () => 
 
 test("advertises explicit public HTTP and WebSocket endpoints", async () => {
   const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
     publicBaseUrl: "https://preview.example.com/",
     publicWebSocketUrl: "wss://preview.example.com/agent",
   });
@@ -299,6 +372,8 @@ test("advertises explicit public HTTP and WebSocket endpoints", async () => {
   const targetAddress = target.address();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: `ws://127.0.0.1:${address.port}/agent`,
+
+    token: RELAY_TOKEN,
     name: "public-address",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -315,6 +390,7 @@ test("advertises explicit public HTTP and WebSocket endpoints", async () => {
 
 test("routes wildcard preview hosts and advertises the matching public URL", async () => {
   const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
     publicBaseUrl: "https://preview.example.com",
     publicDomain: "preview.example.com",
   });
@@ -324,6 +400,8 @@ test("routes wildcard preview hosts and advertises the matching public URL", asy
   const targetAddress = target.address();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: `ws://127.0.0.1:${address.port}/agent`,
+
+    token: RELAY_TOKEN,
     name: "wildcard-agent",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -343,6 +421,56 @@ test("routes wildcard preview hosts and advertises the matching public URL", asy
   }
 });
 
+test("routes preview subdomains only by host, never by the path form", async () => {
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    publicBaseUrl: "https://preview.example.com",
+    publicDomain: "preview.example.com",
+  });
+  const address = await relay.listen();
+  const targets = [];
+  const agents = [];
+  for (const name of ["alice", "bob"]) {
+    const target = createServer((request, response) => response.end(`${name}:${request.url}`));
+    await listen(target);
+    targets.push(target);
+    agents.push(
+      await startTypeScriptPreviewAgent({
+        relayUrl: address.websocketUrl,
+        token: RELAY_TOKEN,
+        name,
+        targetUrl: `http://127.0.0.1:${target.address().port}`,
+      }),
+    );
+  }
+
+  try {
+    // A tenant origin must not reach another tenant through the path form.
+    const crossTenant = await requestWithHost(
+      `${address.httpUrl}/preview/bob/account`,
+      "alice.preview.example.com",
+    );
+    assert.equal(crossTenant.body, "alice:/preview/bob/account");
+
+    // Hostnames are case-insensitive.
+    const uppercase = await requestWithHost(`${address.httpUrl}/upper`, "BOB.Preview.Example.com");
+    assert.equal(uppercase.body, "bob:/upper");
+
+    // The apex domain and loopback hosts keep the path form.
+    const apex = await requestWithHost(
+      `${address.httpUrl}/preview/bob/apex`,
+      "preview.example.com",
+    );
+    assert.equal(apex.body, "bob:/apex");
+    const loopback = await fetch(`${address.httpUrl}/preview/bob/loopback`);
+    assert.equal(await loopback.text(), "bob:/loopback");
+  } finally {
+    for (const agent of agents) await agent.close();
+    await relay.close();
+    for (const target of targets) await close(target);
+  }
+});
+
 test("aborts the local request when the public visitor disconnects", async () => {
   let markLocalStarted;
   const localStarted = new Promise((resolve) => {
@@ -358,10 +486,15 @@ test("aborts the local request when the public visitor disconnects", async () =>
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay({ requestTimeoutMs: 2_000 });
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    requestTimeoutMs: 2_000,
+  });
   const relayAddress = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: relayAddress.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "visitor-disconnect",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
     requestTimeoutMs: 2_000,
@@ -391,6 +524,7 @@ test("aborts the local request when the public visitor disconnects", async () =>
 test("falls through to an existing HTTP gateway when no native session matches", async () => {
   const fallbackRequests = [];
   const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
     publicDomain: "preview.example.com",
     healthPath: "/api/tunnel/health",
     fallbackHandler(request, response) {
@@ -424,8 +558,12 @@ test("falls through to an existing HTTP gateway when no native session matches",
 });
 
 test("coordinates requests across separate relay instances", async () => {
+  let allowed = true;
+  let forwarded = 0;
   const coordinator = new MemoryRelayCoordinator();
   const relayA = createPersistentPreviewRelay({
+    authorizeSession: async () => allowed,
+    registrationToken: RELAY_TOKEN,
     publicBaseUrl: "https://preview.example.com",
     publicDomain: "preview.example.com",
     coordinator,
@@ -433,6 +571,7 @@ test("coordinates requests across separate relay instances", async () => {
     requestTimeoutMs: 2_000,
   });
   const relayB = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
     publicBaseUrl: "https://preview.example.com",
     publicDomain: "preview.example.com",
     coordinator,
@@ -440,11 +579,16 @@ test("coordinates requests across separate relay instances", async () => {
     requestTimeoutMs: 2_000,
   });
   const [addressA, addressB] = await Promise.all([relayA.listen(), relayB.listen()]);
-  const target = createServer((request, response) => response.end(`shared:${request.url}`));
+  const target = createServer((request, response) => {
+    forwarded++;
+    response.end(`shared:${request.url}`);
+  });
   await listen(target);
   const targetAddress = target.address();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: addressA.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "shared-agent",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -456,6 +600,14 @@ test("coordinates requests across separate relay instances", async () => {
     );
     assert.equal(response.status, 200);
     assert.equal(response.body, "shared:/from/another/instance?coordinated=true");
+    const before = forwarded;
+    allowed = false;
+    const denied = await requestWithHost(
+      `${addressB.httpUrl}/denied`,
+      "shared-agent.preview.example.com",
+    );
+    assert.notEqual(denied.status, 200);
+    assert.equal(forwarded, before);
   } finally {
     await agent.close();
     await Promise.all([relayA.close(), relayB.close()]);
@@ -473,10 +625,12 @@ test("rejects preview paths that could replace the local target authority", asyn
   await Promise.all([listen(sensitive), listen(target)]);
   const sensitiveAddress = sensitive.address();
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay();
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
   const address = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: address.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "safe-target",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -497,10 +651,15 @@ test("applies the relay deadline while a request body is still uploading", async
   const target = createServer((_request, response) => response.end("target"));
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay({ requestTimeoutMs: 50 });
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    requestTimeoutMs: 50,
+  });
   const address = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: address.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "upload-timeout",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
   });
@@ -525,10 +684,15 @@ test("cancels stalled local requests at the agent deadline", async () => {
   });
   await listen(target);
   const targetAddress = target.address();
-  const relay = createPersistentPreviewRelay({ requestTimeoutMs: 1_000 });
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    requestTimeoutMs: 1_000,
+  });
   const address = await relay.listen();
   const agent = await startTypeScriptPreviewAgent({
     relayUrl: address.websocketUrl,
+
+    token: RELAY_TOKEN,
     name: "local-timeout",
     targetUrl: `http://127.0.0.1:${targetAddress.port}`,
     requestTimeoutMs: 50,
@@ -583,6 +747,238 @@ test("survives an abrupt relay connection failure after startup", async () => {
   await closeWebSocketServer(websocketServer);
   await Promise.all([close(relayServer), close(target)]);
 });
+
+test("refuses an agent registration that does not present the relay credential", async () => {
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    publicDomain: "preview.example.com",
+  });
+  const address = await relay.listen();
+
+  try {
+    const missing = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "victim",
+    });
+    assert.match(missing.error.message, /rejected the agent credential/);
+    assert.equal(missing.code, 1008);
+
+    const wrong = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "victim",
+      token: `${RELAY_TOKEN}x`,
+    });
+    assert.match(wrong.error.message, /rejected the agent credential/);
+    assert.equal(wrong.code, 1008);
+
+    // A rejected claim must leave the public hostname unrouted.
+    const unrouted = await requestWithHost(`${address.httpUrl}/`, "victim.preview.example.com");
+    assert.equal(unrouted.status, 404);
+
+    const accepted = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "victim",
+      token: RELAY_TOKEN,
+    });
+    assert.equal(accepted.ready.publicUrl, `http://victim.preview.example.com:${address.port}`);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("accepts the relay credential from the agent upgrade query", async () => {
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
+  const address = await relay.listen();
+
+  try {
+    // The shipped native agent cannot add fields to the register message, so
+    // the credential has to be accepted from the relay URL as well.
+    const accepted = await attemptRegistration(
+      `${address.websocketUrl}?token=${encodeURIComponent(RELAY_TOKEN)}`,
+      { type: "register", name: "native-style" },
+    );
+    assert.equal(accepted.ready.publicUrl, `${address.httpUrl}/preview/native-style`);
+
+    const wrong = await attemptRegistration(`${address.websocketUrl}?token=nope`, {
+      type: "register",
+      name: "native-style-2",
+    });
+    assert.match(wrong.error.message, /rejected the agent credential/);
+    assert.equal(wrong.code, 1008);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("refuses every registration when no relay credential is configured", async () => {
+  const relay = createPersistentPreviewRelay();
+  const address = await relay.listen();
+
+  try {
+    const rejected = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "unconfigured",
+      token: RELAY_TOKEN,
+    });
+    assert.match(rejected.error.message, /no registrationToken configured/);
+    assert.equal(rejected.code, 1008);
+
+    const health = await fetch(`${address.httpUrl}/api/health`);
+    assert.equal((await health.json()).agents, 0);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("binds an authorized native relay session to its absolute expiry", async (t) => {
+  const ttlMs = 10_000;
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const seen = [];
+  const coordinator = new MemoryRelayCoordinator();
+  coordinator.takeRequest = () => new Promise(() => {});
+  const relay = createPersistentPreviewRelay({
+    coordinator,
+    authorizeAgent(input) {
+      seen.push(input);
+      if (input.token !== "session-grant" || input.name !== "expiring") return false;
+      return { expiresAt: Date.now() + ttlMs };
+    },
+  });
+  const address = await relay.listen();
+  const socket = new WebSocket(`${address.websocketUrl}?token=session-grant`);
+
+  try {
+    await once(socket, "open");
+    const readyMessage = once(socket, "message");
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "register", name: "expiring" }));
+    const [data] = await readyMessage;
+    const ready = JSON.parse(data.toString());
+    assert.equal(ready.type, "ready");
+    assert.equal(ready.expiresAt, Date.now() + ttlMs);
+    assert.deepEqual(seen, [{ token: "session-grant", name: "expiring" }]);
+    assert.ok(coordinator.claimTtlMs > 0 && coordinator.claimTtlMs <= ttlMs);
+    assert.ok(coordinator.touchTtlMs.length > 0);
+    assert.ok(coordinator.touchTtlMs.every((ttl) => ttl > 0 && ttl <= ttlMs));
+
+    t.mock.timers.tick(ttlMs);
+    const [code, reason] = await closed;
+    assert.equal(code, 1000);
+    assert.equal(reason.toString(), "Preview expired");
+    assert.equal(coordinator.releaseCalls, 1);
+    await expectInactive(ready.publicUrl);
+  } finally {
+    socket.close();
+    await relay.close();
+  }
+});
+
+test("rejects an invalid expiry returned by the relay authorizer", async () => {
+  const relay = createPersistentPreviewRelay({
+    authorizeAgent: () => ({ expiresAt: Number.NaN }),
+  });
+  const address = await relay.listen();
+  const socket = new WebSocket(`${address.websocketUrl}?token=session-grant`);
+
+  try {
+    await once(socket, "open");
+    const message = once(socket, "message");
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "register", name: "invalid-expiry" }));
+    const [data] = await message;
+    assert.match(JSON.parse(data.toString()).message, /expired or is invalid/);
+    assert.equal((await closed)[0], 1008);
+  } finally {
+    socket.close();
+    await relay.close();
+  }
+});
+
+test("keeps a name an authenticated gateway session owns out of relay claims", async () => {
+  const gatewayOwnedNames = new Set(["victim"]);
+  const relay = createPersistentPreviewRelay({
+    registrationToken: RELAY_TOKEN,
+    publicDomain: "preview.example.com",
+    isPreviewNameClaimed: (name) => gatewayOwnedNames.has(name),
+    fallbackHandler(_request, response) {
+      response.statusCode = 202;
+      response.end("polling gateway session");
+    },
+  });
+  const address = await relay.listen();
+
+  try {
+    // A relay route wins over the fallback gateway, so holding a valid relay
+    // credential must still not repoint a hostname the polling gateway serves.
+    const rejected = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "victim",
+      token: RELAY_TOKEN,
+    });
+    assert.match(rejected.error.message, /already active/);
+    assert.equal(rejected.code, 1008);
+
+    const owned = await requestWithHost(`${address.httpUrl}/`, "victim.preview.example.com");
+    assert.equal(owned.status, 202);
+    assert.equal(owned.body, "polling gateway session");
+
+    const accepted = await attemptRegistration(address.websocketUrl, {
+      type: "register",
+      name: "unclaimed",
+      token: RELAY_TOKEN,
+    });
+    assert.equal(accepted.ready.publicUrl, `http://unclaimed.preview.example.com:${address.port}`);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("rejects a cross-origin agent upgrade", async () => {
+  const relay = createPersistentPreviewRelay({ registrationToken: RELAY_TOKEN });
+  const address = await relay.listen();
+
+  try {
+    // WebSocket upgrades are not gated by CORS, so a drive-by page could
+    // otherwise register an agent from any visitor's browser.
+    await assert.rejects(
+      openSocket(address.websocketUrl, { origin: "https://evil.example" }),
+      /403/,
+    );
+    await assert.rejects(openSocket(address.websocketUrl, { origin: "null" }), /403/);
+
+    const sameOrigin = await openSocket(address.websocketUrl, {
+      origin: new URL(address.httpUrl).origin,
+    });
+    sameOrigin.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+function openSocket(url, headers) {
+  const socket = new WebSocket(url, { headers });
+  return new Promise((resolve, reject) => {
+    socket.once("open", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+async function attemptRegistration(url, message) {
+  const socket = new WebSocket(url);
+  await once(socket, "open");
+  const nextMessage = once(socket, "message");
+  const closed = once(socket, "close");
+  socket.send(JSON.stringify(message));
+  const [data] = await nextMessage;
+  const payload = JSON.parse(data.toString());
+  if (payload.type === "ready") {
+    socket.close();
+    await closed;
+    return { ready: payload };
+  }
+  const [code] = await closed;
+  return { error: payload, code };
+}
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -674,8 +1070,12 @@ class MemoryRelayCoordinator {
   sessions = new Map();
   requests = new Map();
   responses = new Map();
+  claimTtlMs = 0;
+  touchTtlMs = [];
+  releaseCalls = 0;
 
   async claimSession(session, ttlMs) {
+    this.claimTtlMs = ttlMs;
     const existing = await this.findSession(session.name);
     if (existing) return false;
     this.sessions.set(session.name, { ...session, expiresAt: Date.now() + ttlMs });
@@ -693,6 +1093,7 @@ class MemoryRelayCoordinator {
   }
 
   async touchSession(session, ttlMs) {
+    this.touchTtlMs.push(ttlMs);
     const existing = this.sessions.get(session.name);
     if (existing?.id !== session.id) return false;
     existing.expiresAt = Date.now() + ttlMs;
@@ -700,6 +1101,7 @@ class MemoryRelayCoordinator {
   }
 
   async releaseSession(session) {
+    this.releaseCalls += 1;
     if (this.sessions.get(session.name)?.id === session.id) this.sessions.delete(session.name);
   }
 

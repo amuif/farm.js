@@ -1,5 +1,5 @@
-import { logger } from "@farm.js/core";
-import type { PreviewAgentSession } from "@farm.js/tunnel";
+import { logger } from "@farm.js/core/internal/cli-runtime";
+import type { PreviewAgentExit, PreviewAgentSession } from "@farm.js/tunnel";
 import type { PreviewGatewayPlan } from "./preview-gateway";
 
 export interface NativeTunnelRuntime {
@@ -9,7 +9,7 @@ export interface NativeTunnelRuntime {
     targetUrl: string,
   ): Promise<PreviewAgentSession>;
   stopPreviewAgent(sessionId: string): Promise<boolean>;
-  waitPreviewAgent(sessionId: string): Promise<boolean>;
+  waitPreviewAgentExit(sessionId: string): Promise<PreviewAgentExit | null>;
 }
 
 export interface RunNativePreviewTunnelOptions {
@@ -22,7 +22,7 @@ export async function runNativePreviewTunnel(
 ): Promise<PreviewAgentSession> {
   const runtime = options.runtime || (await loadNativeTunnel());
   const session = await runtime.startPreviewAgent(
-    plan.relayUrl,
+    createNativeRelayUrl(plan.relayUrl, plan.relayToken),
     plan.requestedName,
     plan.target.localUrl,
   );
@@ -39,19 +39,46 @@ export async function runNativePreviewTunnel(
 
   logger.success("Preview URL ready.");
   logger.info(`Public: ${session.publicUrl}`);
+  if (plan.dashboardUrl)
+    logger.info(`Dashboard: ${plan.dashboardUrl}/${encodeURIComponent(session.sessionId)}`);
+  if (plan.expiresAt) {
+    logger.info(`Expires: ${new Date(plan.expiresAt).toLocaleString()}`);
+  }
   logger.info("Forwarding requests through the native tunnel until Ctrl+C.");
 
   try {
-    const waited = await runtime.waitPreviewAgent(session.sessionId);
-    if (!waited) {
+    const exit = await runtime.waitPreviewAgentExit(session.sessionId);
+    if (stopping) {
+      return session;
+    }
+    if (!exit) {
       throw new Error("The native preview tunnel stopped before its lifecycle could be observed.");
     }
-    return session;
+    if (isHostedPreviewExpiry(exit)) {
+      return session;
+    }
+    throw new Error("The native preview relay disconnected unexpectedly.");
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     await runtime.stopPreviewAgent(session.sessionId).catch(() => false);
   }
+}
+
+function isHostedPreviewExpiry(exit: PreviewAgentExit) {
+  return exit.closeCode === 1000 && exit.closeReason === "Preview expired";
+}
+
+/**
+ * The native agent takes only a relay URL, so a configured relay credential
+ * travels as a query parameter. `plan.relayUrl` stays clean because the CLI
+ * prints it.
+ */
+function createNativeRelayUrl(relayUrl: string, relayToken: string | undefined) {
+  if (!relayToken) return relayUrl;
+  const url = new URL(relayUrl);
+  url.searchParams.set("token", relayToken);
+  return url.toString();
 }
 
 async function loadNativeTunnel(): Promise<NativeTunnelRuntime> {

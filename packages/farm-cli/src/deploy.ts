@@ -11,7 +11,7 @@ import {
   resolveConfig,
   resolveDeployConfig,
   resolveDeployOutputPath,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
 import { buildFarm } from "./build";
 
 export interface DeployFarmOptions {
@@ -134,7 +134,7 @@ async function resolveFarmDeployContext(options: DeployFarmOptions) {
   const root = path.resolve(options.root || process.cwd());
   const mode = "production";
   const userConfig = await loadConfig(root, undefined, mode);
-  const config = await resolveConfig({ root, ...userConfig }, mode);
+  const config = await resolveConfig({ ...userConfig, root }, mode);
 
   // Determine platform and preset
   const cliTarget = options.vercel
@@ -237,10 +237,10 @@ function createDeployCommand(
     };
   }
   if (platform === "netlify") {
-    const args = createNetlifyDeployArgs(deployConfig.netlify?.site);
+    const args = createNetlifyDeployArgs(root, outputDir, deployConfig.netlify?.site);
     return {
       command: formatCommand("netlify", args),
-      cwd: outputDir,
+      cwd: path.resolve(root),
       executable: "netlify",
       args,
     };
@@ -270,8 +270,23 @@ function createDeployCommand(
   };
 }
 
-function createNetlifyDeployArgs(site?: string): string[] {
-  return ["deploy", "--prod", "--dir=.", ...(site ? [`--site=${site}`] : [])];
+function createNetlifyDeployArgs(root: string, outputDir: string, site?: string): string[] {
+  // The Netlify CLI always deploys its internal functions directory, Farm's default
+  // Netlify output. Only a custom output directory needs an explicit functions path.
+  const usesInternalFunctionsDir =
+    path.resolve(root, outputDir) === path.resolve(root, ".netlify", "functions-internal");
+  return [
+    "deploy",
+    "--prod",
+    "--no-build",
+    "--dir=dist",
+    ...(usesInternalFunctionsDir
+      ? []
+      : [
+          `--functions=${path.relative(root, path.join(outputDir, "server")).split(path.sep).join(path.posix.sep)}`,
+        ]),
+    ...(site ? [`--site=${site}`] : []),
+  ];
 }
 
 /**
@@ -308,7 +323,7 @@ async function deployVercel(root: string, outputDir: string, prod?: boolean) {
   logger.info("🚀 Deploying to Vercel...");
 
   try {
-    execFileSync("vercel", ["--version"], { stdio: "ignore", cwd: root });
+    runDeployCli("vercel", ["--version"], root, { stdio: "ignore", cwd: root });
   } catch (error) {
     throw new FarmDeployError(
       "CLI_NOT_INSTALLED",
@@ -319,7 +334,7 @@ async function deployVercel(root: string, outputDir: string, prod?: boolean) {
   }
 
   try {
-    execFileSync("vercel", ["whoami"], { stdio: "ignore", cwd: root });
+    runDeployCli("vercel", ["whoami"], root, { stdio: "ignore", cwd: root });
   } catch (error) {
     throw new FarmDeployError(
       "CLI_NOT_AUTHENTICATED",
@@ -489,7 +504,7 @@ async function deployVercel(root: string, outputDir: string, prod?: boolean) {
 
     // Deploy using --prebuilt flag so Vercel uses our build (required for monorepos;
     // building on Vercel would run pnpm install in the example folder and fail on workspace deps)
-    execFileSync("vercel", ["deploy", "--prebuilt", "--yes", ...(prod ? ["--prod"] : [])], {
+    runDeployCli("vercel", ["deploy", "--prebuilt", "--yes", ...(prod ? ["--prod"] : [])], root, {
       stdio: "inherit",
       cwd: root,
     });
@@ -514,7 +529,7 @@ async function deployCloudflare(root: string, outputDir: string, projectName?: s
     assertWranglerInstalled(root);
 
     try {
-      execFileSync(
+      runDeployCli(
         "wrangler",
         [
           "deploy",
@@ -522,6 +537,7 @@ async function deployCloudflare(root: string, outputDir: string, projectName?: s
           agentPlan.configPath,
           ...(agentPlan.environment ? ["--env", agentPlan.environment] : []),
         ],
+        root,
         {
           stdio: "inherit",
           cwd: root,
@@ -544,9 +560,10 @@ async function deployCloudflare(root: string, outputDir: string, projectName?: s
   assertWranglerInstalled(root);
 
   try {
-    execFileSync(
+    runDeployCli(
       "wrangler",
       ["pages", "deploy", ".", `--project-name=${projectName || "farm-app"}`],
+      root,
       {
         stdio: "inherit",
         cwd: outputDir,
@@ -666,7 +683,7 @@ function assertRealPathInsideProject(projectRoot: string, candidate: string, lab
 
 function assertWranglerInstalled(root: string): void {
   try {
-    execFileSync("wrangler", ["--version"], { stdio: "ignore", cwd: root });
+    runDeployCli("wrangler", ["--version"], root, { stdio: "ignore", cwd: root });
   } catch (error) {
     throw new FarmDeployError(
       "CLI_NOT_INSTALLED",
@@ -689,7 +706,7 @@ async function deployNetlify(root: string, outputDir: string, site?: string) {
 
   // Check if Netlify CLI is installed
   try {
-    execFileSync("netlify", ["--version"], { stdio: "ignore", cwd: root });
+    runDeployCli("netlify", ["--version"], root, { stdio: "ignore", cwd: root });
   } catch (error) {
     throw new FarmDeployError(
       "CLI_NOT_INSTALLED",
@@ -700,9 +717,9 @@ async function deployNetlify(root: string, outputDir: string, site?: string) {
   }
 
   try {
-    execFileSync("netlify", createNetlifyDeployArgs(site), {
+    runDeployCli("netlify", createNetlifyDeployArgs(root, outputDir, site), root, {
       stdio: "inherit",
-      cwd: outputDir,
+      cwd: root,
     });
     logger.success("✅ Deployed to Netlify successfully!");
   } catch (error: unknown) {
@@ -713,6 +730,28 @@ async function deployNetlify(root: string, outputDir: string, site?: string) {
       { cause: error },
     );
   }
+}
+
+export function resolveDeployCliExecutable(
+  command: string,
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const suffix = platform === "win32" ? ".cmd" : "";
+  const local = path.join(root, "node_modules", ".bin", `${command}${suffix}`);
+  return existsSync(local) ? local : `${command}${suffix}`;
+}
+
+function runDeployCli(
+  command: string,
+  args: string[],
+  root: string,
+  options: Parameters<typeof execFileSync>[2] = {},
+) {
+  return execFileSync(resolveDeployCliExecutable(command, root), args, {
+    ...options,
+    shell: process.platform === "win32",
+  });
 }
 
 function formatCommand(executable: string, args: string[]): string {

@@ -14,7 +14,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildRscNitro } from "./nitro-build";
+import { buildRscNitro, rewriteRscEntryImports } from "./nitro-build";
 
 const delay = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -49,6 +49,35 @@ async function stopProcess(child: ChildProcess): Promise<void> {
 }
 
 describe("RSC Nitro production build", () => {
+  it("rewrites Rolldown entry imports to the copied server bundles", () => {
+    const outputRoot = mkdtempSync(path.join(tmpdir(), "farm-rsc-rolldown-"));
+
+    try {
+      const serverDir = path.join(outputRoot, "server");
+      const serverDistDir = path.join(serverDir, "dist");
+      const entryDir = path.join(serverDir, "_build");
+      mkdirSync(path.join(serverDistDir, "rsc"), { recursive: true });
+      mkdirSync(path.join(serverDistDir, "ssr"), { recursive: true });
+      mkdirSync(entryDir, { recursive: true });
+
+      const entryPath = path.join(entryDir, "rsc-entry.mjs");
+      writeFileSync(
+        entryPath,
+        `import rsc from "/project/.nitro/vite/dist/rsc/index.js";
+globalThis.__VITE_RSC_LOAD_SSR__ = () => import("/project/.nitro/vite/dist/ssr/index.js");`,
+      );
+
+      rewriteRscEntryImports(serverDir, serverDistDir);
+
+      const entry = readFileSync(entryPath, "utf-8");
+      expect(entry).toContain('from "../dist/rsc/index.js"');
+      expect(entry).toContain('import("../dist/ssr/index.js")');
+      expect(entry).not.toContain(".nitro/vite");
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
+  });
+
   it("boots node-server output after the project and workspace dependencies are removed", async () => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "farm-rsc-build-"));
     const isolatedRoot = mkdtempSync(path.join(tmpdir(), "farm-rsc-output-"));
@@ -67,13 +96,15 @@ describe("RSC Nitro production build", () => {
         `import colors from "picocolors";
 import { render } from "@farming-labs/strata";
 export default {
-  async fetch() {
+  async fetch(request, context) {
     const ssr = await globalThis.__VITE_RSC_LOAD_SSR__();
     const fragment = render({
       type: "document",
       children: [{ type: "element", tag: "strong", children: [{ type: "text", value: "native" }] }],
     });
-    return new Response(colors.green(ssr.render()) + ":" + fragment.html);
+    return new Response(
+      colors.green(ssr.render()) + ":" + fragment.html + ":" + (context?.clientAddress ?? "missing"),
+    );
   },
 };`,
       );
@@ -152,7 +183,11 @@ export function render() {
       expect(response, logs).toBeDefined();
       expect(response?.status, logs).toBe(200);
       const body = await response?.text();
-      expect(body?.replace(/\u001b\[[0-9;]*m/g, "")).toBe("standalone-rsc:<strong>native</strong>");
+      // The handler rebuilds the Request, which has no socket, so it hands the
+      // connection's address to the entry for middleware to key on.
+      expect(body?.replace(/\u001b\[[0-9;]*m/g, "")).toMatch(
+        /^standalone-rsc:<strong>native<\/strong>:(::ffff:)?127\.0\.0\.1$/,
+      );
     } finally {
       if (child) await stopProcess(child);
       rmSync(fixtureRoot, { recursive: true, force: true });

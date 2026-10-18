@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import {
   createIntegrationOrm,
+  declareSchemaTables,
   defineIntegration,
   integrationRoute,
   type FarmIntegration,
@@ -60,6 +61,7 @@ import {
   prismaStorageAdapter,
   sqliteStorageAdapter,
   type StripeBillingArgs,
+  type StripeBillingCheckoutSessionClaim,
   type StripeBillingFeatures,
   type StripeBillingHookTools,
   type StripeBillingHooks,
@@ -128,6 +130,7 @@ export {
 } from "./storage.js";
 export type {
   StripeBillingArgs,
+  StripeBillingCheckoutSessionClaim,
   StripeBillingFeatures,
   StripeBillingHookTools,
   StripeBillingHooks,
@@ -775,6 +778,42 @@ export const stripeSchema = {
           name: "billing_account_owner_unique",
         },
       ],
+    },
+    billingCheckoutSession: {
+      name: "billing_checkout_session",
+      description: "Processed Stripe checkout sessions used to deduplicate billing hooks.",
+      fields: {
+        sessionId: {
+          type: "string",
+          name: "session_id",
+          primaryKey: true,
+        },
+        ownerId: {
+          type: "string",
+          name: "owner_id",
+          required: true,
+          index: true,
+        },
+        ownerKind: {
+          type: "enum",
+          name: "owner_kind",
+          required: true,
+          values: ["user", "organization"],
+          index: true,
+        },
+        stripeCustomerId: {
+          type: "string",
+          name: "stripe_customer_id",
+          nullable: true,
+          index: true,
+        },
+        processedAt: {
+          type: "datetime",
+          name: "processed_at",
+          required: true,
+          default: "now",
+        },
+      },
     },
   },
   meta: {
@@ -2854,8 +2893,8 @@ function getBillingMeter(
   return meter ?? null;
 }
 
-function hasConfiguredStorageRuntimeClient(context: FarmIntegrationHandlerContext): boolean {
-  const storage = (context.config as { storage?: unknown }).storage;
+function hasConfiguredStorageRuntimeClient(config: { storage?: unknown }): boolean {
+  const storage = config.storage;
   return (
     !!storage &&
     typeof storage === "object" &&
@@ -2864,14 +2903,15 @@ function hasConfiguredStorageRuntimeClient(context: FarmIntegrationHandlerContex
   );
 }
 
-async function resolveConfiguredStorageRuntimeClient(
-  context: FarmIntegrationHandlerContext,
-): Promise<unknown | undefined> {
-  if (!hasConfiguredStorageRuntimeClient(context)) {
+async function resolveConfiguredStorageRuntimeClient(config: {
+  storage?: unknown;
+}): Promise<unknown | undefined> {
+  // The guard is what establishes the shape, so narrowing happens after it.
+  if (!hasConfiguredStorageRuntimeClient(config)) {
     return undefined;
   }
 
-  const storage = (context.config as { storage?: { client?: unknown } }).storage;
+  const storage = config.storage as { client?: unknown };
   const client = storage?.client;
   return typeof client === "function"
     ? await (client as () => unknown | Promise<unknown>)()
@@ -2891,7 +2931,7 @@ function createBillingHookTools(
     stripe,
     storage: {
       getClient() {
-        clientPromise ??= resolveConfiguredStorageRuntimeClient(context);
+        clientPromise ??= resolveConfiguredStorageRuntimeClient(context.config);
         return clientPromise;
       },
       getOrm() {
@@ -2909,7 +2949,7 @@ function resolveConfiguredBillingStorage(
   context: FarmIntegrationHandlerContext,
   tools: StripeBillingHookTools,
 ): StripeBillingStorageAdapter | undefined {
-  if (!hasConfiguredStorageRuntimeClient(context)) {
+  if (!hasConfiguredStorageRuntimeClient(context.config)) {
     return undefined;
   }
 
@@ -2960,6 +3000,20 @@ function resolveBillingPersistence(
       ? (owner: StripeBillingOwner) => billing.hooks!.clearBillingSnapshot!(owner, tools)
       : storage?.clearBillingSnapshot
         ? (owner: StripeBillingOwner) => storage.clearBillingSnapshot(owner)
+        : undefined,
+    claimCheckoutSession: billing?.hooks?.claimCheckoutSession
+      ? (claim: StripeBillingCheckoutSessionClaim) =>
+          billing.hooks!.claimCheckoutSession!(claim, tools)
+      : storage?.claimCheckoutSession
+        ? (claim: StripeBillingCheckoutSessionClaim) => storage.claimCheckoutSession!(claim)
+        : undefined,
+    // Released by whichever side made the claim.
+    releaseCheckoutSession: billing?.hooks?.claimCheckoutSession
+      ? billing.hooks.releaseCheckoutSession
+        ? (sessionId: string) => billing.hooks!.releaseCheckoutSession!(sessionId, tools)
+        : undefined
+      : storage?.releaseCheckoutSession
+        ? (sessionId: string) => storage.releaseCheckoutSession!(sessionId)
         : undefined,
   };
 }
@@ -3248,13 +3302,38 @@ function createBillingSnapshotFromSubscriptionChange(
   };
 }
 
+/**
+ * Decide whether a checkout session belongs to the authenticated owner.
+ *
+ * Session ids travel through success-url query strings, browser history, and
+ * referrers, so holding one is not proof of ownership. Checkout stamps
+ * `ownerId`/`ownerKind` into session metadata, which is the authoritative
+ * binding; the owner's stored customer id is accepted as a fallback for
+ * sessions created before that metadata existed.
+ */
+function sessionBelongsToOwner(
+  session: StripeSessionResult,
+  owner: StripeBillingOwner,
+  ownerCustomerId: string | undefined,
+): boolean {
+  const sessionOwnerId = session.metadata?.ownerId;
+  const sessionOwnerKind = session.metadata?.ownerKind;
+  if (sessionOwnerId) {
+    return sessionOwnerId === owner.id && (!sessionOwnerKind || sessionOwnerKind === owner.kind);
+  }
+  return Boolean(ownerCustomerId) && session.customerId === ownerCustomerId;
+}
+
 async function resolveBillingSnapshotForSession(
   session: StripeSessionResult,
   products: readonly ResolvedStripeProduct[],
   billing: StripeBillingOptions | undefined,
   persistence: ReturnType<typeof resolveBillingPersistence>,
   context: FarmIntegrationHandlerContext,
-): Promise<StripeBillingSnapshot | null> {
+): Promise<{
+  snapshot: StripeBillingSnapshot;
+  previousSnapshot: StripeBillingSnapshot | null;
+} | null> {
   if (!billing) {
     return null;
   }
@@ -3269,6 +3348,8 @@ async function resolveBillingSnapshotForSession(
     );
     existingSnapshot = await getByCustomerId(session.customerId);
     if (!owner) {
+      // No signed-in caller (the webhook path): the session's customer is the
+      // only binding available.
       owner = existingSnapshot?.owner ?? null;
     }
   }
@@ -3277,14 +3358,173 @@ async function resolveBillingSnapshotForSession(
     return null;
   }
 
-  return createBillingSnapshot(
-    owner,
-    session,
-    billing,
-    products,
-    existingSnapshot?.planId ?? "free",
-    existingSnapshot,
+  if (!existingSnapshot && persistence.getBillingAccount) {
+    existingSnapshot = await persistence.getBillingAccount(owner);
+  }
+
+  // A signed-in caller must not be able to bind someone else's checkout to
+  // themselves by presenting its session id. Checkout stamps ownerId into the
+  // session metadata, and an already-persisted snapshot names the customer's
+  // real owner; either disagreeing with the caller means this session is not
+  // theirs.
+  const sessionOwnerId = session.metadata?.ownerId;
+  const sessionOwnerKind = session.metadata?.ownerKind;
+  const boundOwner = existingSnapshot?.owner;
+  const mismatchesCaller =
+    (sessionOwnerId !== undefined &&
+      (sessionOwnerId !== owner.id ||
+        (sessionOwnerKind !== undefined && sessionOwnerKind !== owner.kind))) ||
+    (boundOwner !== undefined &&
+      boundOwner !== null &&
+      (boundOwner.id !== owner.id || boundOwner.kind !== owner.kind));
+  if (mismatchesCaller) {
+    return null;
+  }
+
+  return {
+    snapshot: createBillingSnapshot(
+      owner,
+      session,
+      billing,
+      products,
+      existingSnapshot?.planId ?? "free",
+      existingSnapshot,
+    ),
+    previousSnapshot: existingSnapshot,
+  };
+}
+
+function billingSnapshotStateEquals(
+  left: StripeBillingSnapshot,
+  right: StripeBillingSnapshot | null,
+): boolean {
+  if (!right) {
+    return false;
+  }
+
+  const sameDate = (a: Date | null, b: Date | null) => a?.getTime() === b?.getTime();
+
+  return (
+    left.owner.id === right.owner.id &&
+    left.owner.kind === right.owner.kind &&
+    left.planId === right.planId &&
+    left.productId === right.productId &&
+    left.status === right.status &&
+    left.stripeCustomerId === right.stripeCustomerId &&
+    left.stripeSubscriptionId === right.stripeSubscriptionId &&
+    sameDate(left.currentPeriodEnd, right.currentPeriodEnd) &&
+    left.cancelAtPeriodEnd === right.cancelAtPeriodEnd &&
+    sameDate(left.trialEndsAt, right.trialEndsAt) &&
+    sameDate(left.trialUsedAt, right.trialUsedAt) &&
+    left.seatQuantity === right.seatQuantity &&
+    left.seatAllowanceOverride === right.seatAllowanceOverride
   );
+}
+
+/**
+ * Stripe's fulfilment rule: a Checkout Session grants what it sold only once it
+ * is complete and its payment has cleared, or needed none. A session exists and
+ * carries the plan in its metadata as soon as checkout starts, and a delayed
+ * payment method completes the session before the money arrives, which Stripe
+ * reports later as `checkout.session.async_payment_succeeded`.
+ */
+function isFulfilledCheckoutSession(session: StripeSessionResult): boolean {
+  return (
+    session.status === "complete" &&
+    (session.paymentStatus === "paid" || session.paymentStatus === "no_payment_required")
+  );
+}
+
+async function syncBillingCheckoutSession(
+  session: StripeSessionResult,
+  products: readonly ResolvedStripeProduct[],
+  billing: StripeBillingOptions,
+  persistence: ReturnType<typeof resolveBillingPersistence>,
+  context: FarmIntegrationHandlerContext,
+) {
+  // The success page can present the id of a session that is still open, so
+  // without this a caller could start checkout for a paid plan, never pay, and
+  // look the session up to be granted it.
+  if (!isFulfilledCheckoutSession(session)) {
+    return;
+  }
+
+  const resolved = await resolveBillingSnapshotForSession(
+    session,
+    products,
+    billing,
+    persistence,
+    context,
+  );
+
+  if (!resolved) {
+    return;
+  }
+
+  const claimResult = persistence.claimCheckoutSession
+    ? await persistence.claimCheckoutSession({
+        sessionId: session.id,
+        owner: resolved.snapshot.owner,
+        stripeCustomerId: resolved.snapshot.stripeCustomerId,
+      })
+    : null;
+
+  if (
+    claimResult === false ||
+    (claimResult === null &&
+      billingSnapshotStateEquals(resolved.snapshot, resolved.previousSnapshot))
+  ) {
+    return;
+  }
+
+  try {
+    await persistBillingSnapshot(
+      resolved.snapshot,
+      billing,
+      persistence,
+      resolved.previousSnapshot,
+    );
+    await billing.hooks?.onCheckoutCompleted?.(
+      {
+        ...resolved.snapshot,
+        sessionId: session.id,
+      },
+      persistence.tools,
+    );
+  } catch (error) {
+    // The claim went in first so duplicate deliveries skip the hooks. If the
+    // work it guarded failed, keep it and Stripe's retry finds the session
+    // already claimed and does nothing, so the customer never gets the plan.
+    if (claimResult === true && persistence.releaseCheckoutSession) {
+      try {
+        await persistence.releaseCheckoutSession(session.id);
+      } catch (releaseError) {
+        console.warn(
+          `[farm:stripe] Could not release checkout session ${session.id} after a failure:`,
+          releaseError,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+async function serializeBillingCheckoutSession(
+  inflight: Map<string, Promise<void>>,
+  sessionId: string,
+  task: () => Promise<void>,
+) {
+  const previous = inflight.get(sessionId);
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(task);
+  inflight.set(sessionId, current);
+
+  try {
+    await current;
+  } finally {
+    if (inflight.get(sessionId) === current) {
+      inflight.delete(sessionId);
+    }
+  }
 }
 
 async function persistBillingSnapshot(
@@ -3410,6 +3650,7 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
   >;
   const webhookPath = input.webhookPath ?? "/billing/webhook";
   const webhookDefinitions = resolveStripeWebhooks(input, env, webhookPath);
+  const billingCheckoutSessionSyncs = new Map<string, Promise<void>>();
   const successPath = resolvePath(input.successPath, "Stripe integration successPath", "/success");
   const cancelPath = resolvePath(input.cancelPath, "Stripe integration cancelPath", "/cancel");
   const webhookRoutes = webhookDefinitions.map((definition) =>
@@ -3452,40 +3693,23 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
             );
 
             if (
-              event.type === "checkout.session.completed" &&
+              (event.type === "checkout.session.completed" ||
+                event.type === "checkout.session.async_payment_succeeded") &&
               event.data &&
               typeof event.data === "object" &&
               "id" in event.data &&
               typeof event.data.id === "string"
             ) {
               const session = await instance.retrieveCheckoutSession(event.data.id);
-              const snapshot = await resolveBillingSnapshotForSession(
-                session,
-                configuredProducts,
-                input.billing,
-                persistence,
-                context,
-              );
-
-              if (snapshot) {
-                const previousSnapshot =
-                  session.customerId && persistence.getBillingAccountByStripeCustomerId
-                    ? await persistence.getBillingAccountByStripeCustomerId(session.customerId)
-                    : null;
-                await persistBillingSnapshot(
-                  snapshot,
-                  input.billing,
+              await serializeBillingCheckoutSession(billingCheckoutSessionSyncs, session.id, () =>
+                syncBillingCheckoutSession(
+                  session,
+                  configuredProducts,
+                  input.billing!,
                   persistence,
-                  previousSnapshot,
-                );
-                await input.billing.hooks?.onCheckoutCompleted?.(
-                  {
-                    ...snapshot,
-                    sessionId: session.id,
-                  },
-                  persistence.tools,
-                );
-              }
+                  context,
+                ),
+              );
             } else if (
               event.data &&
               typeof event.data === "object" &&
@@ -3600,7 +3824,7 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
     }),
   );
 
-  return defineIntegration({
+  const integration = defineIntegration({
     category: "payment",
     type: "stripe",
     instance: {
@@ -5221,7 +5445,11 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
         async handler(request, context) {
           const body = await readJsonObject(request);
           try {
-            let customerId = typeof body.customerId === "string" ? body.customerId : undefined;
+            const requestedCustomerId =
+              typeof body.customerId === "string" ? body.customerId : undefined;
+            const requestedSessionId =
+              typeof body.sessionId === "string" ? body.sessionId : undefined;
+            let customerId: string | undefined;
 
             const billingTools = input.billing
               ? createBillingHookTools(context, stripeSdk, integrationSchema)
@@ -5234,20 +5462,54 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
               billingTools,
             );
 
-            if (!customerId && typeof body.sessionId === "string") {
-              const session = await instance.retrieveCheckoutSession(body.sessionId);
-              customerId = session.customerId ?? undefined;
-            }
-
-            if (!customerId && input.billing) {
+            if (input.billing) {
+              // A portal session exposes invoices, payment methods, and
+              // cancellation, so the signed-in owner is the only identity we
+              // trust here. A customerId or sessionId from the request is
+              // treated as a claim to verify, never as the identity itself.
               const owner = await resolveBillingOwner(input.billing, context, persistence.tools);
-              if (owner) {
-                const getBillingAccount = requireBillingMethod(
-                  persistence.getBillingAccount,
-                  "getBillingAccount",
+              if (!owner) {
+                return Response.json(
+                  { error: "Stripe portal requires an authenticated billing owner." },
+                  { status: 401 },
                 );
-                const snapshot = await getBillingAccount(owner);
-                customerId = snapshot?.stripeCustomerId ?? undefined;
+              }
+
+              const getBillingAccount = requireBillingMethod(
+                persistence.getBillingAccount,
+                "getBillingAccount",
+              );
+              const snapshot = await getBillingAccount(owner);
+              customerId = snapshot?.stripeCustomerId ?? undefined;
+
+              if (requestedCustomerId && requestedCustomerId !== customerId) {
+                return Response.json(
+                  { error: "Stripe portal customerId does not belong to the billing owner." },
+                  { status: 403 },
+                );
+              }
+
+              if (requestedSessionId) {
+                const session = await instance.retrieveCheckoutSession(requestedSessionId);
+                // Checkout stamps the owner into session metadata, which lets a
+                // just-completed checkout open the portal before its snapshot
+                // has been persisted without trusting a bare session id.
+                if (!sessionBelongsToOwner(session, owner, customerId)) {
+                  return Response.json(
+                    { error: "Stripe portal sessionId does not belong to the billing owner." },
+                    { status: 403 },
+                  );
+                }
+                customerId = customerId ?? session.customerId ?? undefined;
+              }
+            } else {
+              // Without billing there is no owner to authenticate against, so
+              // the caller supplies the customer directly. This path is for
+              // server-side callers that already did their own authorization.
+              customerId = requestedCustomerId;
+              if (!customerId && requestedSessionId) {
+                const session = await instance.retrieveCheckoutSession(requestedSessionId);
+                customerId = session.customerId ?? undefined;
               }
             }
 
@@ -5329,33 +5591,15 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
                   stripeSdk,
                   integrationSchema,
                 );
-                const snapshot = await resolveBillingSnapshotForSession(
-                  session,
-                  configuredProducts,
-                  input.billing,
-                  persistence,
-                  context,
-                );
-
-                if (snapshot) {
-                  const previousSnapshot =
-                    session.customerId && persistence.getBillingAccountByStripeCustomerId
-                      ? await persistence.getBillingAccountByStripeCustomerId(session.customerId)
-                      : null;
-                  await persistBillingSnapshot(
-                    snapshot,
-                    input.billing,
+                await serializeBillingCheckoutSession(billingCheckoutSessionSyncs, session.id, () =>
+                  syncBillingCheckoutSession(
+                    session,
+                    configuredProducts,
+                    input.billing!,
                     persistence,
-                    previousSnapshot,
-                  );
-                  await input.billing.hooks?.onCheckoutCompleted?.(
-                    {
-                      ...snapshot,
-                      sessionId: session.id,
-                    },
-                    persistence.tools,
-                  );
-                }
+                    context,
+                  ),
+                );
               }
 
               return Response.json(session);
@@ -5374,5 +5618,14 @@ export function stripe<TInput extends StripeIntegrationInput = {}>(
       ),
       ...webhookRoutes,
     ],
+  });
+
+  // Declared so `farm stripe migrate` can create the billing tables, and
+  // `farm generate --orm` can include them in schema artifacts. The connection
+  // lives in the app's `storage.client`, not in this integration's options.
+  return declareSchemaTables(integration, {
+    name: "stripe",
+    schema: integrationSchema,
+    resolveClient: (config) => resolveConfiguredStorageRuntimeClient(config),
   });
 }

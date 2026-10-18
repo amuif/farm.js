@@ -12,7 +12,7 @@ try {
   }, 10_000).unref();
 } catch {}
 
-const { program } = require("commander");
+const { Command, program } = require("commander");
 const { version } = require("../package.json");
 
 const banner = `
@@ -154,12 +154,16 @@ authCommand
   .description("Create or update the Farm Auth database schema")
   .option("-r, --root <root>", "Root directory", process.cwd())
   .option("-c, --config <config>", "Path to farm config file")
+  .option("-w, --write <file>", "Write the statements to a file instead of running them")
+  .option("--dry-run", "Print the statements instead of running them")
   .action(async (options) => {
     try {
       const { migrateFarmAuth } = require("../dist/index.js");
       await migrateFarmAuth({
         root: options.root,
         configPath: options.config,
+        write: options.write,
+        dryRun: options.dryRun,
       });
     } catch (error) {
       console.error("Failed to migrate Farm Auth:", error);
@@ -229,6 +233,65 @@ program
     }
   });
 
+const schemaCommand = program
+  .command("schema")
+  .description("Inspect and create the database tables integrations and plugins declare");
+
+schemaCommand
+  .command("migrate")
+  .description("Create every plugin's tables, dependencies first")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option("-c, --config <config>", "Path to farm config file")
+  .option("-w, --write <file>", "Write the statements to one file instead of printing them")
+  .option("--apply", "Execute the statements against the database")
+  .option("--allow-destructive", "Also run migration steps that delete data")
+  .action(async (options) => {
+    try {
+      const { askToConfirm, migrateAllSchemas } = require("../dist/index.js");
+      await migrateAllSchemas({
+        root: options.root,
+        configPath: options.config,
+        write: options.write,
+        apply: options.apply,
+        allowDestructive: options.allowDestructive,
+        // Only a person at a terminal is asked; scripts and CI print and stop.
+        confirm: process.stdin.isTTY && process.stdout.isTTY ? askToConfirm : undefined,
+      });
+    } catch (error) {
+      console.error("Failed to migrate:", error?.message ?? error);
+      process.exit(1);
+    }
+    // Database clients can keep the event loop alive.
+    process.exit(0);
+  });
+
+schemaCommand
+  .command("check")
+  .description("Compare declared tables and their references with the live database")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option("-c, --config <config>", "Path to farm config file")
+  .option("--timeout <ms>", "How long connecting, and each query, may take", "10000")
+  .option("--json", "Print machine-readable JSON")
+  .action(async (options) => {
+    let report;
+    try {
+      const timeoutMs = Number(options.timeout);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new Error("--timeout must be a positive number of milliseconds.");
+      }
+      const { runSchemaCheck } = require("../dist/index.js");
+      report = await runSchemaCheck({ root: options.root, configPath: options.config, timeoutMs });
+    } catch (error) {
+      console.error("Failed to check the schema:", error?.message ?? error);
+      process.exit(1);
+    }
+    const { formatSchemaCheck } = require("../dist/index.js");
+    const output = options.json ? JSON.stringify(report, null, 2) : formatSchemaCheck(report);
+    // Database clients can keep the event loop alive, so exit once the
+    // report is flushed instead of waiting for them to close.
+    process.stdout.write(`${output}\n`, () => process.exit(report.ok ? 0 : 1));
+  });
+
 program
   .command("doctor")
   .description("Inspect project configuration and the running Farm runtime")
@@ -238,6 +301,7 @@ program
   .option("--host <host>", "Host of a running local app")
   .option("--url <url>", "Base URL of a running Farm app")
   .option("--offline", "Inspect project files without probing a running app")
+  .option("--registry", "Verify Farm beta dist-tags against the npm registry")
   .option("--fix", "Apply safe additive corrections without overwriting application files")
   .option("--timeout <ms>", "Live runtime probe timeout in milliseconds", "1200")
   .option("--json", "Print machine-readable JSON")
@@ -255,6 +319,7 @@ program
         host: options.host,
         url: options.url,
         offline: options.offline,
+        registry: options.registry,
         fix: options.fix,
         timeoutMs,
       });
@@ -262,6 +327,40 @@ program
       if (report.health === "error") process.exitCode = 1;
     } catch (error) {
       console.error("Failed to inspect Farm app:", error);
+      process.exit(1);
+    }
+  });
+
+const agentCommand = program
+  .command("agent")
+  .description("Check how AI agents can read and use a Farm app");
+
+agentCommand
+  .command("check [url]")
+  .description("Probe a running app's agent surfaces: Markdown mirrors, llms.txt, APIs, and MCP")
+  .option("--path <path>", "Page to check, relative to the URL", "/")
+  .option("--mcp <path>", "Path of the MCP endpoint (default: from the API catalog, or /api/mcp)")
+  .option("--timeout <ms>", "Per-request timeout in milliseconds", "5000")
+  .option("--json", "Print machine-readable JSON")
+  .action(async (url, options) => {
+    try {
+      const { formatFarmAgentCheckReport, runFarmAgentCheck } = require("../dist/index.js");
+      const timeoutMs = Number.parseInt(options.timeout, 10);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new Error("--timeout must be a positive number of milliseconds.");
+      }
+      const report = await runFarmAgentCheck({
+        url,
+        path: options.path,
+        mcpPath: options.mcp,
+        timeoutMs,
+      });
+      console.log(
+        options.json ? JSON.stringify(report, null, 2) : formatFarmAgentCheckReport(report),
+      );
+      if (report.health === "error") process.exitCode = 1;
+    } catch (error) {
+      console.error("Failed to check the app:", error?.message ?? error);
       process.exit(1);
     }
   });
@@ -296,7 +395,8 @@ program
   .option("-r, --root <root>", "Root directory", process.cwd())
   .option("-c, --config <config>", "Path to farm config file")
   .option("-p, --port <port>", "Port of the running local app")
-  .option("--host <host>", "Host of the running local app", "localhost")
+  // No default: an omitted --host falls back to FARM_PREVIEW_HOST, then localhost.
+  .option("--host <host>", "Host of the running local app (default: localhost)")
   .option("--url <url>", "Full local URL to expose")
   .option(
     "--gateway <url>",
@@ -309,6 +409,9 @@ program
     process.env.FARM_PREVIEW_PROVIDER,
   )
   .option("--name <name>", "Readable preview URL name")
+  .option("--project <slug>", "Dashboard project (defaults to the app package name)")
+  .option("--expires <duration>", "Preview lifetime, for example 30m, 2h, or 1d")
+  .option("--login", "Sign in again instead of reusing the saved Farm Preview account")
   .option("--dry-run", "Validate target detection and print the preview plan without opening it")
   .option("--no-probe", "Skip local reachability check when --port is provided")
   .action(async (options) => {
@@ -322,12 +425,70 @@ program
         url: options.url,
         gatewayUrl: options.gateway,
         name: options.name,
+        project: options.project,
+        expires: options.expires,
+        login: options.login,
         dryRun: options.dryRun,
-        noProbe: options.noProbe,
+        // Commander stores --no-probe as `probe: false`.
+        noProbe: options.probe === false,
         provider: options.provider,
       });
     } catch (error) {
       console.error("Failed to create preview:", error);
+      process.exit(1);
+    }
+  });
+
+const gatewayOption = [
+  "--gateway <url>",
+  "Advanced: override the hosted Farm Preview gateway URL",
+  process.env.FARM_PREVIEW_GATEWAY_URL,
+];
+
+program
+  .command("login")
+  .description("Sign in to Farm Preview without starting a preview")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { loginToFarmPreview } = require("../dist/index.js");
+      await loginToFarmPreview({ root: options.root, gatewayUrl: options.gateway });
+    } catch (error) {
+      console.error("Failed to sign in:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("logout")
+  .description("Sign out of Farm Preview on this machine")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { logoutOfFarmPreview } = require("../dist/index.js");
+      await logoutOfFarmPreview({ root: options.root, gatewayUrl: options.gateway });
+    } catch (error) {
+      console.error("Failed to sign out:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("whoami")
+  .description("Show which credential farm preview uses")
+  .option("-r, --root <root>", "Root directory", process.cwd())
+  .option(...gatewayOption)
+  .action(async (options) => {
+    try {
+      const { whoamiFarmPreview } = require("../dist/index.js");
+      // Exits 1 when farm preview would need a browser sign-in, for scripts.
+      if (!(await whoamiFarmPreview({ root: options.root, gatewayUrl: options.gateway }))) {
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error("Failed to check sign-in:", error instanceof Error ? error.message : error);
       process.exit(1);
     }
   });
@@ -584,7 +745,50 @@ telemetryCommand
     }
   });
 
-program.parseAsync().catch((error) => {
-  console.error("Farm CLI failed:", error);
-  process.exitCode = 1;
-});
+// `farm <plugin> migrate` — any plugin that declares tables gets this command,
+// so the name is only knowable once the app's config is loaded. Dispatch before
+// commander parses, which lets every statically registered command win first.
+async function dispatchSchemaMigrate() {
+  const [name, operation, ...rest] = process.argv.slice(2);
+  if (!name || operation !== "migrate" || name.startsWith("-")) return false;
+
+  const registered = new Set(
+    program.commands.flatMap((command) => [command.name(), ...command.aliases()]),
+  );
+  if (registered.has(name)) return false;
+
+  const dynamic = new Command()
+    .name(`farm ${name} migrate`)
+    .description(`Create the database tables the ${name} schema needs`)
+    .option("-r, --root <root>", "Root directory", process.cwd())
+    .option("-c, --config <config>", "Path to farm config file")
+    .option("-w, --write <file>", "Write the statements to a file instead of printing them")
+    .option("--apply", "Execute the statements against the database")
+    .option("--allow-destructive", "Also run migration steps that delete data")
+    .action(async (options) => {
+      const { askToConfirm, migrateSchema } = require("../dist/index.js");
+      await migrateSchema(name, {
+        root: options.root,
+        configPath: options.config,
+        write: options.write,
+        apply: options.apply,
+        allowDestructive: options.allowDestructive,
+        confirm: process.stdin.isTTY && process.stdout.isTTY ? askToConfirm : undefined,
+      });
+    });
+
+  try {
+    await dynamic.parseAsync(rest, { from: "user" });
+  } catch (error) {
+    console.error(`Failed to migrate the ${name} schema:`, error?.message ?? error);
+    process.exit(1);
+  }
+  return true;
+}
+
+dispatchSchemaMigrate()
+  .then((handled) => (handled ? undefined : program.parseAsync()))
+  .catch((error) => {
+    console.error("Farm CLI failed:", error);
+    process.exitCode = 1;
+  });

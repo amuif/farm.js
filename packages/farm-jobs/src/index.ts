@@ -35,6 +35,16 @@ export interface JobsRuntimeCapabilities {
   readonly idempotencyKey: boolean;
 }
 
+export type JobsRuntimeCapability = keyof JobsRuntimeCapabilities;
+
+/** Narrows runtime metadata after checking a provider-dependent capability. */
+export function supportsJobsRuntimeCapability<TCapability extends JobsRuntimeCapability>(
+  capabilities: JobsRuntimeCapabilities,
+  capability: TCapability,
+): capabilities is JobsRuntimeCapabilities & Record<TCapability, true> {
+  return capabilities[capability];
+}
+
 export interface JobsTaskQueueDefinition {
   name: string;
   concurrencyLimit?: number;
@@ -89,17 +99,32 @@ export type InferJobsTaskInput<TTask> =
 export type InferJobsTaskOutput<TTask> =
   TTask extends JobsTaskDefinition<any, infer TOutput> ? TOutput : never;
 
+/**
+ * An unambiguous input envelope for object payloads that collide with the
+ * legacy `{ input, options }` trigger form.
+ */
+export type JobsExplicitInputBody<TInput> = [TInput] extends [void]
+  ? {
+      $input?: undefined;
+      $options?: JobsTriggerOptions;
+    }
+  : {
+      $input: TInput;
+      $options?: JobsTriggerOptions;
+    };
+
 export type JobsTriggerBody<TInput> = [TInput] extends [void]
   ? {
       $options?: JobsTriggerOptions;
     }
   :
+      | JobsExplicitInputBody<TInput>
       | (TInput extends object
           ? TInput & {
               $options?: JobsTriggerOptions;
             }
           : {
-              value: TInput;
+              $value: TInput;
               $options?: JobsTriggerOptions;
             })
       | JobsLegacyTriggerBody<TInput>;
@@ -130,12 +155,15 @@ export type JobsScheduleBody<TInput> = [TInput] extends [void]
       $schedule: JobsScheduleConfig;
     }
   :
+      | (JobsExplicitInputBody<TInput> & {
+          $schedule: JobsScheduleConfig;
+        })
       | (TInput extends object
           ? TInput & {
               $schedule: JobsScheduleConfig;
             }
           : {
-              value: TInput;
+              $value: TInput;
               $schedule: JobsScheduleConfig;
             })
       | JobsLegacyScheduleBody<TInput>;
@@ -381,6 +409,7 @@ type JobsResolvedLaunchOptions = {
   idempotencyKey?: string;
   tags?: string[];
   delay?: string | number;
+  delayMode?: "at" | "after";
   debounce?: {
     key: string;
     delay: string | number;
@@ -443,8 +472,8 @@ const TRIGGER_CAPABILITIES: JobsRuntimeCapabilities = {
 };
 
 const INNGEST_CAPABILITIES: JobsRuntimeCapabilities = {
-  delay: false,
-  schedule: false,
+  delay: true,
+  schedule: true,
   debounce: false,
   tags: false,
   cancel: false,
@@ -534,6 +563,11 @@ function readJsonBody(value: unknown) {
   throw new JobsRuntimeError("Jobs request body must be a JSON object.", 400);
 }
 
+function readTriggerJsonBody(value: unknown) {
+  // A bare array is the task payload itself: it cannot carry reserved keys.
+  return Array.isArray(value) ? (value as unknown[]) : readJsonBody(value);
+}
+
 function hasOwn(value: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -568,21 +602,23 @@ function isLegacyScheduleBody(value: Record<string, unknown>) {
 }
 
 function readInlinePayload(value: Record<string, unknown>, reservedKeys: readonly string[]) {
+  // Scalar task inputs are wrapped as { $value: TInput } so run() receives the
+  // scalar itself. The marker is reserved and $-prefixed like $options and
+  // $schedule, which keeps it distinguishable from payload data: an object
+  // input that happens to carry a "value" key used to be indistinguishable
+  // from the wrapper and was silently unwrapped into its own property. It is
+  // only the wrapper when it is the sole payload key; an object input that
+  // also carries "$value" is delivered whole.
   const payload = stripReservedKeys(value, reservedKeys);
   const keys = Object.keys(payload);
-  if (keys.length === 0) {
-    return undefined;
+  if (keys.length === 1 && keys[0] === "$value") {
+    return payload.$value;
   }
-  // Scalar task inputs are declared as { value: TInput } in the typed body;
-  // unwrap that encoding so run() receives the scalar itself, matching the
-  // legacy { input } form. Object inputs spread inline and keep their shape.
-  if (keys.length === 1 && keys[0] === "value") {
-    return payload.value;
-  }
+  // An object body is an object payload, including an empty one.
   return payload;
 }
 
-async function parseRequestBody(request: Request) {
+async function parseRequestBody(request: Request): Promise<unknown> {
   let source: string;
   try {
     source = await request.text();
@@ -597,7 +633,7 @@ async function parseRequestBody(request: Request) {
   } catch {
     throw new JobsRuntimeError("Jobs request body must contain valid JSON.", 400);
   }
-  return readJsonBody(body);
+  return body;
 }
 
 function normalizeQueue(queue: JobsTaskDefaults<any>["queue"]) {
@@ -731,14 +767,17 @@ function resolveScheduleLaunchOptions(
     throw new JobsRuntimeError("Schedule requests must include exactly one of at or after.", 400);
   }
 
+  const launch = resolveLaunchOptions(task, payload, {
+    delay: scheduledFor,
+    debounce: body.options?.debounce,
+    idempotencyKey: body.options?.idempotencyKey,
+    tags: body.options?.tags,
+  });
+  launch.delayMode = hasAt ? "at" : "after";
+
   return {
     scheduledFor,
-    launch: resolveLaunchOptions(task, payload, {
-      delay: scheduledFor,
-      debounce: body.options?.debounce,
-      idempotencyKey: body.options?.idempotencyKey,
-      tags: body.options?.tags,
-    }),
+    launch,
   };
 }
 
@@ -865,6 +904,126 @@ async function requestJSON(url: string, init: RequestInit) {
   }
 
   return data;
+}
+
+const INNGEST_DURATION_UNITS = {
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+} as const;
+const INNGEST_MAX_TIMESTAMP = 8_640_000_000_000_000;
+
+function inngestScheduleError(message: string, value: string | number) {
+  return new JobsRuntimeError(message, 400, {
+    code: "JOBS_INVALID_SCHEDULE",
+    runtime: "inngest",
+    value,
+  });
+}
+
+function inngestCapabilityError(
+  capability: JobsRuntimeCapability,
+  message: string,
+): JobsRuntimeError {
+  return new JobsRuntimeError(message, 400, {
+    code: "JOBS_RUNTIME_CAPABILITY_UNSUPPORTED",
+    runtime: "inngest",
+    capability,
+  });
+}
+
+function parseInngestDuration(value: string | number): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.ceil(value) : undefined;
+  }
+
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/i.exec(value);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase() as keyof typeof INNGEST_DURATION_UNITS;
+  const duration = Math.ceil(amount * INNGEST_DURATION_UNITS[unit]);
+  return Number.isFinite(duration) && duration > 0 ? duration : undefined;
+}
+
+function parseInngestAbsoluteTime(value: string | number): number | undefined {
+  if (typeof value !== "string") return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function resolveInngestEventTimestamp(
+  options: JobsResolvedLaunchOptions,
+  now = Date.now(),
+): number | undefined {
+  if (options.delay == null) return undefined;
+
+  const absolute =
+    options.delayMode === "after" ? undefined : parseInngestAbsoluteTime(options.delay);
+  if (absolute != null) {
+    if (absolute <= now) {
+      throw inngestScheduleError(
+        "Inngest at/delay timestamps must be in the future.",
+        options.delay,
+      );
+    }
+    return absolute;
+  }
+
+  if (options.delayMode === "at") {
+    throw inngestScheduleError(
+      "Inngest at must be an ISO timestamp with an explicit Z or UTC offset.",
+      options.delay,
+    );
+  }
+
+  const duration = parseInngestDuration(options.delay);
+  if (duration == null) {
+    throw inngestScheduleError(
+      "Inngest after/delay must be positive milliseconds or a duration ending in ms, s, m, h, or d.",
+      options.delay,
+    );
+  }
+
+  const timestamp = now + duration;
+  if (!Number.isSafeInteger(timestamp) || timestamp > INNGEST_MAX_TIMESTAMP) {
+    throw inngestScheduleError(
+      "Inngest after/delay exceeds the supported date range.",
+      options.delay,
+    );
+  }
+  return timestamp;
+}
+
+function createInngestEvent(
+  task: JobsNormalizedTask,
+  input: unknown,
+  options: JobsResolvedLaunchOptions,
+  now = Date.now(),
+) {
+  if (options.debounce) {
+    throw inngestCapabilityError(
+      "debounce",
+      "Inngest does not support per-call debounce; configure debounce on the Inngest function and check task metadata capabilities before sending.",
+    );
+  }
+  if (options.tags?.length) {
+    throw inngestCapabilityError(
+      "tags",
+      "Inngest event sends do not support Farm tags; check task metadata capabilities before sending.",
+    );
+  }
+
+  const event: Record<string, unknown> = {
+    name: task.remoteId,
+    data: input ?? {},
+  };
+  if (options.idempotencyKey) event.id = options.idempotencyKey;
+  const timestamp = resolveInngestEventTimestamp(options, now);
+  if (timestamp != null) event.ts = timestamp;
+  return event;
 }
 
 function createTriggerRuntime(config: TriggerJobsRuntimeConfig): JobsRuntimeAdapter {
@@ -1110,27 +1269,12 @@ function createInngestRuntime(config: InngestJobsRuntimeConfig): JobsRuntimeAdap
     },
     async trigger(task, input, options) {
       const resolved = resolve();
+      const body = createInngestEvent(task, input, options);
       if (!resolved.eventKey) {
         throw new JobsRuntimeError(
           "Inngest runtime requires INNGEST_EVENT_KEY or inngest.eventKey.",
           500,
         );
-      }
-
-      if (options.delay != null || (options.tags && options.tags.length > 0) || options.debounce) {
-        throw new JobsRuntimeError(
-          "Inngest runtime does not support delay, debounce, or tags through this integration yet.",
-          400,
-        );
-      }
-
-      const body: Record<string, unknown> = {
-        name: task.remoteId,
-        data: input ?? {},
-      };
-
-      if (options.idempotencyKey) {
-        body.id = options.idempotencyKey;
       }
 
       const data = await requestJSON(
@@ -1161,36 +1305,14 @@ function createInngestRuntime(config: InngestJobsRuntimeConfig): JobsRuntimeAdap
     },
     async batchTrigger(task, items) {
       const resolved = resolve();
+      const now = Date.now();
+      const body = items.map((item) => createInngestEvent(task, item.input, item.options, now));
       if (!resolved.eventKey) {
         throw new JobsRuntimeError(
           "Inngest runtime requires INNGEST_EVENT_KEY or inngest.eventKey.",
           500,
         );
       }
-
-      const body = items.map((item) => {
-        if (
-          item.options.delay != null ||
-          (item.options.tags && item.options.tags.length > 0) ||
-          item.options.debounce
-        ) {
-          throw new JobsRuntimeError(
-            "Inngest runtime does not support delay, debounce, or tags through this integration yet.",
-            400,
-          );
-        }
-
-        const event: Record<string, unknown> = {
-          name: task.remoteId,
-          data: item.input ?? {},
-        };
-
-        if (item.options.idempotencyKey) {
-          event.id = item.options.idempotencyKey;
-        }
-
-        return event;
-      });
 
       const data = await requestJSON(
         `${resolved.eventBaseUrl}/e/${encodeURIComponent(resolved.eventKey)}`,
@@ -1504,9 +1626,46 @@ function errorResponse(error: unknown) {
   );
 }
 
-function normalizeTriggerInput(body: Record<string, unknown> | undefined) {
-  const value = body || {};
+const warnedLegacyEnvelopes = new Set<string>();
+
+/**
+ * Warn, in development only, that a request used the deprecated
+ * `{ input, options }` envelope.
+ *
+ * The envelope cannot be told apart from an object input that happens to carry
+ * one of its own keys: a payload of `{ input: "abc" }` is read as the envelope
+ * and silently unwrapped to `"abc"`. `$input` is collision-free because the
+ * `$` prefix is reserved.
+ *
+ * Deliberately logs no part of the body, not even its key names. The shape is
+ * already implied by taking this branch, and a job payload can carry user data.
+ * Warns once per operation so a busy dev server is not flooded.
+ */
+function warnDeprecatedLegacyEnvelope(operation: "trigger" | "schedule"): void {
+  if (process.env.NODE_ENV === "production") return;
+  if (warnedLegacyEnvelopes.has(operation)) return;
+  warnedLegacyEnvelopes.add(operation);
+  console.warn(
+    `[farm:jobs] A ${operation} request used the deprecated { input, options } envelope. ` +
+      `That shape is ambiguous with an object input carrying its own "input" key, which is ` +
+      `read as the envelope and unwrapped. Send { $input: ... } instead, which cannot ` +
+      `collide with payload data.`,
+  );
+}
+
+function normalizeTriggerInput(body: Record<string, unknown> | unknown[] | undefined) {
+  if (body === undefined) return { input: undefined, options: undefined };
+  if (Array.isArray(body)) return { input: body, options: undefined };
+  const value = body;
+  if (hasOwn(value, "$input")) {
+    return {
+      input: value.$input,
+      options: value.$options as JobsTriggerOptions | undefined,
+    };
+  }
+
   if (isLegacyTriggerBody(value)) {
+    warnDeprecatedLegacyEnvelope("trigger");
     return {
       input: value.input,
       options: value.options as JobsTriggerOptions | undefined,
@@ -1519,9 +1678,44 @@ function normalizeTriggerInput(body: Record<string, unknown> | undefined) {
   };
 }
 
+function mergeScheduleOptions(
+  options: unknown,
+  schedule: JobsScheduleConfig | undefined,
+): JobsScheduleOptions | undefined {
+  if (!options || typeof options !== "object") return schedule;
+  // $options carries the same launch options as on trigger; its timing is
+  // superseded by $schedule, and values set on $schedule win.
+  const launch = options as JobsTriggerOptions;
+  const tags = [
+    ...(Array.isArray(launch.tags) ? launch.tags : []),
+    ...(Array.isArray(schedule?.tags) ? schedule.tags : []),
+  ];
+  return {
+    debounce: schedule?.debounce ?? launch.debounce,
+    idempotencyKey: schedule?.idempotencyKey ?? launch.idempotencyKey,
+    ...(tags.length > 0 ? { tags } : {}),
+  };
+}
+
 function normalizeScheduleInput(body: Record<string, unknown> | undefined) {
-  const value = body || {};
+  if (body === undefined) return { input: undefined, at: undefined, after: undefined };
+  const value = body;
+  if (hasOwn(value, "$input")) {
+    const schedule =
+      value.$schedule && typeof value.$schedule === "object"
+        ? (value.$schedule as JobsScheduleConfig)
+        : undefined;
+
+    return {
+      input: value.$input,
+      at: schedule?.at,
+      after: schedule?.after,
+      options: mergeScheduleOptions(value.$options, schedule),
+    };
+  }
+
   if (isLegacyScheduleBody(value)) {
+    warnDeprecatedLegacyEnvelope("schedule");
     return {
       input: value.input,
       at: value.at as string | Date | undefined,
@@ -1536,27 +1730,27 @@ function normalizeScheduleInput(body: Record<string, unknown> | undefined) {
       : undefined;
 
   return {
-    input: readInlinePayload(value, ["$schedule"]),
+    input: readInlinePayload(value, ["$schedule", "$options"]),
     at: schedule?.at,
     after: schedule?.after,
-    options: schedule,
+    options: mergeScheduleOptions(value.$options, schedule),
   };
 }
 
-function normalizeBatchTriggerInput<TTask extends JobsTaskDefinition<any, any>>(
-  body: Record<string, unknown> | undefined,
-) {
-  return (body || {}) as unknown as JobsBatchTriggerBody<InferJobsTaskInput<TTask>>;
+function normalizeBatchTriggerInput<TTask extends JobsTaskDefinition<any, any>>(body: unknown) {
+  return (body === undefined ? {} : readJsonBody(body)) as unknown as JobsBatchTriggerBody<
+    InferJobsTaskInput<TTask>
+  >;
 }
 
 function normalizeBatchTriggerItem(item: unknown) {
   return normalizeTriggerInput(
-    item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
+    item && typeof item === "object" ? (item as Record<string, unknown> | unknown[]) : undefined,
   );
 }
 
-function normalizeCancelInput(body: Record<string, unknown> | undefined) {
-  return (body || {}) as unknown as JobsCancelBody;
+function normalizeCancelInput(body: unknown) {
+  return (body === undefined ? {} : readJsonBody(body)) as unknown as JobsCancelBody;
 }
 
 export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInput<TTasks>) {
@@ -1593,7 +1787,10 @@ export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInp
           responseFormat: "json",
           async handler(request) {
             try {
-              const body = normalizeTriggerInput(await parseRequestBody(request));
+              const parsed = await parseRequestBody(request);
+              const body = normalizeTriggerInput(
+                parsed === undefined ? undefined : readTriggerJsonBody(parsed),
+              );
               const launch = resolveLaunchOptions(task, body.input, body.options);
               const triggered = await runtime.trigger(task, body.input, launch);
               return Response.json({
@@ -1663,7 +1860,10 @@ export function jobs<const TTasks extends JobsTaskMap>(input: JobsIntegrationInp
           responseFormat: "json",
           async handler(request) {
             try {
-              const body = normalizeScheduleInput(await parseRequestBody(request));
+              const parsed = await parseRequestBody(request);
+              const body = normalizeScheduleInput(
+                parsed === undefined ? undefined : readJsonBody(parsed),
+              );
               const { scheduledFor, launch } = resolveScheduleLaunchOptions(task, body.input, body);
               const triggered = await runtime.trigger(task, body.input, launch);
               return Response.json({

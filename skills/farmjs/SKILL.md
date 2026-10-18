@@ -55,12 +55,12 @@ Use `"use client"` when a component uses React hooks, browser APIs, or client-on
 
 ## Create, Upgrade, and Renderers
 
-Follow the current beta channel for beta apps and use `pnpm create`, not `pnpm add`:
+Scaffold with `pnpm create`, not `pnpm add`:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-app --template basic --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-app --template basic --renderer vue --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta --list-templates
+pnpm create @farm.js/app my-app --template basic --typescript
+pnpm create @farm.js/app my-app --template basic --renderer vue --typescript
+pnpm create @farm.js/app --list-templates
 ```
 
 React is the default renderer. The Basic and Better Auth starters support `react`, `preact`,
@@ -114,6 +114,9 @@ Common config fields:
 - `experimental.serverComponents`: enables server component behavior
 - `integrations`: provider integrations object
 - `auth`: built-in email/password auth and sessions
+- `mcp`: authenticated MCP transport for opted-in typed API routes
+- `agent`: opt-in agent readiness: an `llmsTxt` index of static pages, schema.org `jsonLd`,
+  and AI `crawlers` robots.txt rules
 - `theme`: light, dark, and system behavior
 - `storage.mounts`: named storage instances
 - `migrations`: one-shot schema and provider commands
@@ -144,6 +147,8 @@ Read `docs/src/app/docs/configuration/page.md` before adding an unfamiliar optio
 - Farm writes typed `Link href` declarations into `src/farm.d.ts`
 - Typed `href` supports query strings and hashes, for example `/users/123?tab=profile`
 - File boundaries include `loading`, `error`, and `not-found`
+- Metadata route files `sitemap.ts`, `robots.ts`, `manifest.ts`, `llms.ts`, and `llms-full.ts`
+  serve `/sitemap.xml`, `/robots.txt`, `/manifest.webmanifest`, `/llms.txt`, and `/llms-full.txt`
 - Route exports or route rules select dynamic, static, ISR, PPR, runtime, and cache behavior
 
 Page shape:
@@ -413,7 +418,7 @@ export const GET = cronRoute(async () => {
 });
 ```
 
-Use `farm cron list`, `farm cron run dailyCleanup`, or the opt-in local scheduler `farm dev --cron`. `cronRoute()` verifies `CRON_SECRET` when configured and fails closed in production when it is missing.
+Use `farm cron list`, `farm cron run dailyCleanup`, or the opt-in local scheduler `farm dev --cron`. `cronRoute()` verifies `CRON_SECRET` when configured and fails closed outside development and test when it is missing.
 
 Builds always emit `.farm/cron-manifest.json`. Vercel compiles entries to Build Output API crons, Cloudflare Workers using `cloudflare-module` get Wrangler triggers, and Node/Bun/Deno targets use Nitro scheduling. Treat delivery as at least once: make handlers idempotent and use uniqueness keys or distributed locks where overlap matters. Use the Jobs integration for durable retries, steps, queues, status, or long-running work. The older `defineCron()` API is compatibility-only; new apps use config plus a route.
 
@@ -442,7 +447,19 @@ Built-in server plugins are imported from `@farm.js/core/plugin/server`, includi
 - Configure `theme` for no-flash light/dark/system rendering and typed client/server access.
 - Use Farm image helpers plus the `images` allowlist and format policy for optimization.
 - Use `docs` for human docs, shared search, markdown, `llms.txt`, sitemap, robots, and agent APIs.
+  A root `sitemap.ts`, `robots.ts`, `llms.ts`, or `llms-full.ts` (or the same file in `public/`)
+  takes its path from the docs engine.
+- Use `agent.llmsTxt` for an app's own `/llms.txt` and `/llms-full.txt` (`full: false` skips the
+  second). A static `public/llms.txt` or `public/llms-full.txt` overrides each, and so do
+  `src/app/llms.ts` and `src/app/llms-full.ts`, which return the whole file as a string or the
+  structured format and receive the generated `pages` and `defaults`.
+- Use `agent.crawlers: { search, training }` (`"allow"` or `"block"`, plus `rules` and `sitemap`)
+  for a generated `/robots.txt` naming AI search and training crawlers. `public/robots.txt`, then
+  `src/app/robots.ts`, win over it; it wins over the docs engine's robots.txt.
 - Use `md`/`mdx` for page mirrors and content routes; use `openapi` for API references.
+- Use `agent.noindexPreviews: true` to send `X-Robots-Tag: noindex, nofollow` on preview
+  deployments (`FARM_PREVIEW=1`, `VERCEL_ENV=preview`, Netlify deploy-preview/branch-deploy at
+  build time, Render PR previews). Test locally with `FARM_PREVIEW=1 farm dev`.
 - Use `after()` only for short post-response work and a jobs integration for durable work.
 - Configure OpenTelemetry and Farm runtime events for correlated traces.
 
@@ -499,5 +516,9 @@ run its client generation immediately before type checking or building.
 - Do not use compatibility `@farm.js/integrations/*` imports for new code when a dedicated adapter exists.
 - Cron is not a durable workflow engine; protect production routes with `CRON_SECRET` and design handlers for repeated or overlapping delivery.
 - In monorepos with pnpm and Prisma, generated clients can be stale or shared; run `prisma generate` immediately before builds.
+- Feature packages are optional peers of `@farm.js/core`; install the ones the app uses:
+  `@tailwindcss/vite` for built-in Tailwind CSS, `@vercel/og` for generated metadata images and
+  `@farm.js/core/og`, `sharp` for image optimization, `@farming-labs/docs` for the docs engine.
+  `farm doctor` reports a missing one.
 - Run `pnpm format` before `pnpm lint` if `oxfmt --check` fails.
 - Existing lint warnings may be present; treat nonzero exit codes as failures.

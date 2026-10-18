@@ -18,6 +18,11 @@ import {
   FARM_DOCS_LAST_MODIFIED_MANIFEST,
 } from "../docs/last-modified";
 import { resolveFarmDocsFontAssets } from "../docs/fonts";
+import {
+  addFarmCspNonceToScriptTags,
+  applyFarmCspHashesToPolicy,
+  createFarmCspScriptHashes,
+} from "../security";
 describe("getFarmDocsDocumentNavigationMatchers", () => {
   it("routes enabled docs trees through document navigation", () => {
     expect(
@@ -210,6 +215,62 @@ describe("createFarmDocsHandler", () => {
     const response = await handler(new Request("http://farm.test/docs/leak"));
 
     expect(response == null || response.status === 404).toBe(true);
+  });
+
+  it("omits headings inside code fences from the on-this-page TOC", async () => {
+    const { root, docs, docsDir } = await createDocsFixture();
+    await fs.mkdir(path.join(docsDir, "fenced"), { recursive: true });
+    await fs.writeFile(
+      path.join(docsDir, "fenced", "page.md"),
+      [
+        "# Fenced",
+        "",
+        "## Real Section",
+        "",
+        "```md",
+        "## Fake Heading In Code",
+        "```",
+        "",
+        "## Another Real",
+      ].join("\n"),
+    );
+
+    const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
+    const response = await handler(
+      new Request("http://farm.test/docs/fenced", { headers: { accept: "text/html" } }),
+    );
+
+    expect(response?.status).toBe(200);
+    const html = (await response?.text()) || "";
+    // Real headings are in the TOC (anchor id + toc link).
+    expect(html).toContain("real-section");
+    expect(html).toContain("another-real");
+    // The heading inside the code fence is not a real heading (marked renders it
+    // as code, no anchor), so its slug must not leak into the TOC.
+    expect(html).not.toContain("fake-heading-in-code");
+  });
+
+  it("keeps on-this-page links in sync when a section repeats the page title", async () => {
+    const { root, docs, docsDir } = await createDocsFixture();
+    await fs.mkdir(path.join(docsDir, "dup"), { recursive: true });
+    await fs.writeFile(
+      path.join(docsDir, "dup", "page.md"),
+      ["# Configuration", "", "Intro.", "", "## Configuration", "", "Details."].join("\n"),
+    );
+
+    const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
+    const response = await handler(
+      new Request("http://farm.test/docs/dup", { headers: { accept: "text/html" } }),
+    );
+
+    expect(response?.status).toBe(200);
+    const html = (await response?.text()) || "";
+    // The renderer disambiguates the repeated slug: h1 -> #configuration,
+    // h2 -> #configuration-2. The TOC must link to the h2's real id, not the h1.
+    expect(html).toContain('id="configuration-2"');
+    const tocSection = html.slice(html.indexOf('id="nd-toc"'));
+    expect(tocSection).toContain('href="#configuration-2"');
+    expect(tocSection).not.toContain('href="#configuration"');
   });
 
   it("serves docs markdown files as HTML", async () => {
@@ -681,9 +742,12 @@ describe("createFarmDocsHandler", () => {
     expect(html).not.toContain('<span class="code-block-title">tsx</span>');
     expect(html).toContain("sh__token--keyword");
     expect(html).toContain('aria-label="Copy code"');
+    expect(html).toContain("data-code-copy");
     expect(html).toContain('class="code-copy-check"');
     expect(html).toContain("4500");
-    expect(html).toContain("querySelector('code').innerText");
+    expect((html?.match(/<[a-z][^>]*>/gi) || []).some((tag) => /\son[a-z]+\s*=/i.test(tag))).toBe(
+      false,
+    );
     expect(html).toContain(
       'class="fd-table-wrapper table-wrap relative overflow-auto prose-no-margin my-6"',
     );
@@ -696,6 +760,31 @@ describe("createFarmDocsHandler", () => {
     expect(html).not.toContain('</span>\n<span class="sh__line"');
   });
 
+  it("keeps code-copy controls compatible with nonce and static-hash CSP", async () => {
+    const { root, docs } = await createDocsFixture();
+    const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
+    const response = await handler(
+      new Request("http://farm.test/docs/guide", { headers: { accept: "text/html" } }),
+    );
+    const html = (await response?.text()) || "";
+
+    expect(html).toContain("data-code-copy");
+    expect((html.match(/<[a-z][^>]*>/gi) || []).some((tag) => /\son[a-z]+\s*=/i.test(tag))).toBe(
+      false,
+    );
+
+    const nonceHtml = addFarmCspNonceToScriptTags(html, "docs-nonce");
+    const scriptTags = nonceHtml.match(/<script\b[^>]*>/gi) || [];
+    expect(scriptTags.length).toBeGreaterThan(0);
+    expect(scriptTags.every((tag) => tag.includes('nonce="docs-nonce"'))).toBe(true);
+
+    const hashes = await createFarmCspScriptHashes(html);
+    const policy = applyFarmCspHashesToPolicy("script-src 'self'", hashes);
+    expect(hashes.length).toBeGreaterThan(0);
+    expect(policy).not.toContain("'unsafe-inline'");
+    for (const hash of hashes) expect(policy).toContain(`'${hash}'`);
+  });
+
   it("serves markdown when requested by markdown URL", async () => {
     const { root, docs } = await createDocsFixture();
     const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
@@ -705,6 +794,26 @@ describe("createFarmDocsHandler", () => {
     expect(response?.status).toBe(200);
     expect(response?.headers.get("content-type")).toContain("text/markdown");
     await expect(response?.text()).resolves.toContain("Use `farm dev` to start.");
+  });
+
+  it("varies negotiated docs pages on Accept but not explicit markdown URLs", async () => {
+    const { root, docs } = await createDocsFixture();
+    const handler = createFarmDocsHandler(docs, { root, srcDir: "src" });
+
+    const html = await handler(new Request("http://farm.test/docs/guide"));
+    expect(html?.headers.get("content-type")).toContain("text/html");
+    expect(html?.headers.get("cache-control")).toContain("public");
+    expect(html?.headers.get("vary")).toBe("Accept");
+
+    const negotiated = await handler(
+      new Request("http://farm.test/docs/guide", { headers: { Accept: "text/markdown" } }),
+    );
+    expect(negotiated?.headers.get("content-type")).toContain("text/markdown");
+    expect(negotiated?.headers.get("vary")).toBe("Accept");
+
+    const explicit = await handler(new Request("http://farm.test/docs/guide.md"));
+    expect(explicit?.headers.get("content-type")).toContain("text/markdown");
+    expect(explicit?.headers.get("vary")).toBeNull();
   });
 
   it("serves public @farming-labs/docs discovery routes", async () => {

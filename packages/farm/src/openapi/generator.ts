@@ -1,6 +1,10 @@
 import type { OpenAPIConfig } from "../config";
 import type { APIRouteInfo } from "../type-generator";
-import * as z from "zod";
+import type {
+  EndpointOpenAPIMetadata,
+  EndpointOpenAPIResponseMetadata,
+  OpenAPISecurityMode,
+} from "./types";
 
 export interface OpenAPISpec {
   openapi: string;
@@ -29,33 +33,128 @@ export interface OpenAPISpec {
   };
 }
 
+export interface OpenAPIGeneratorContext {
+  mode?: "development" | "production";
+  /** Resolved Farm `api.baseURL`, including its API path. */
+  apiBaseURL?: string;
+}
+
 type AllowedType = "string" | "number" | "boolean" | "array" | "object";
 const allowedType = new Set(["string", "number", "boolean", "array", "object"]);
+const zodTypeNameKinds: Record<string, string> = {
+  ZodArray: "array",
+  ZodBoolean: "boolean",
+  ZodDefault: "default",
+  ZodEnum: "enum",
+  ZodLiteral: "literal",
+  ZodNullable: "nullable",
+  ZodNumber: "number",
+  ZodObject: "object",
+  ZodOptional: "optional",
+  ZodRecord: "record",
+  ZodString: "string",
+  ZodTuple: "tuple",
+  ZodUnion: "union",
+};
+
+function getZodKind(schema: unknown): string | undefined {
+  if (!schema || typeof schema !== "object") return undefined;
+  const definition = (schema as any)._def;
+  if (!definition || typeof definition !== "object") return undefined;
+  if (typeof definition.type === "string") return definition.type;
+  return typeof definition.typeName === "string"
+    ? zodTypeNameKinds[definition.typeName]
+    : undefined;
+}
+
+function getZodObjectShape(schema: unknown): Record<string, unknown> | undefined {
+  if (getZodKind(schema) !== "object") return undefined;
+  const candidate = (schema as any).shape ?? (schema as any)._def?.shape;
+  const shape = typeof candidate === "function" ? candidate() : candidate;
+  return shape && typeof shape === "object" ? shape : undefined;
+}
+
+function isStandardSchema(schema: unknown): boolean {
+  return (
+    !!schema &&
+    typeof schema === "object" &&
+    typeof (schema as any)["~standard"]?.validate === "function"
+  );
+}
+
+/**
+ * OpenAPI `type` for a literal's value(s). A single-type literal keeps its JS
+ * type; mixed-type literal sets fall back to string (the enum still carries the
+ * exact values). bigint maps to integer.
+ */
+function openAPITypeForLiteralValues(values: readonly unknown[]): AllowedType {
+  if (values.length === 0) return "string";
+  const jsType = typeof values[0];
+  if (!values.every((value) => typeof value === jsType)) return "string";
+  switch (jsType) {
+    case "number":
+      return "number";
+    case "bigint":
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      return "string";
+  }
+}
 
 export class OpenAPIGenerator {
   private config: OpenAPIConfig;
   private appDir: string;
+  private context: OpenAPIGeneratorContext;
 
-  constructor(appDir: string, config: OpenAPIConfig) {
+  constructor(appDir: string, config: OpenAPIConfig, context: OpenAPIGeneratorContext = {}) {
     this.appDir = appDir;
     this.config = config;
+    this.context = context;
   }
 
   /**
    * Get type from Zod type
    */
-  private getTypeFromZodType(zodType: z.ZodType<any>): AllowedType {
-    const tag = (zodType as any)._def?.type;
+  private getTypeFromZodType(zodType: unknown): AllowedType {
+    const tag = getZodKind(zodType);
     return typeof tag === "string" && allowedType.has(tag) ? (tag as AllowedType) : "string";
+  }
+
+  /**
+   * Whether a schema field must be supplied by the caller. A field with a
+   * default is supplied by the server when omitted, so — like an explicitly
+   * optional field — it is not required. Only ZodOptional was excluded before,
+   * which documented every `.default()` field as required.
+   */
+  private isRequiredField(value: unknown): boolean {
+    const kind = getZodKind(value);
+    return kind !== "optional" && kind !== "default";
   }
 
   /**
    * Process Zod type to OpenAPI schema
    */
-  private processZodType(zodType: z.ZodType<any>): any {
-    // Handle ZodOptional and ZodNullable
-    if (zodType instanceof z.ZodOptional || zodType instanceof z.ZodNullable) {
-      const innerType = (zodType as any)._def.innerType;
+  private processZodType(zodType: unknown): any {
+    const kind = getZodKind(zodType);
+    const definition = (zodType as any)?._def;
+
+    if (!kind) {
+      return isStandardSchema(zodType)
+        ? { description: "Schema metadata is unavailable for this Standard Schema validator." }
+        : { description: "Schema metadata is unavailable." };
+    }
+
+    // Optionality controls whether a value must be supplied; it does not make
+    // JSON null valid for the wrapped schema.
+    if (kind === "optional") {
+      return this.processZodType(definition.innerType);
+    }
+
+    // Nullable schemas explicitly accept JSON null.
+    if (kind === "nullable") {
+      const innerType = definition.innerType;
       const innerSchema = this.processZodType(innerType);
       return {
         ...innerSchema,
@@ -65,20 +164,20 @@ export class OpenAPIGenerator {
 
     // Handle ZodDefault. The value is always present after parsing, so the
     // documented type is the wrapped one.
-    if (zodType instanceof z.ZodDefault) {
-      return this.processZodType((zodType as any)._def.innerType);
+    if (kind === "default") {
+      return this.processZodType(definition.innerType);
     }
 
     // Handle ZodObject
-    if (zodType instanceof z.ZodObject) {
-      const shape = (zodType as any).shape;
+    if (kind === "object") {
+      const shape = getZodObjectShape(zodType);
       if (shape) {
         const properties: Record<string, any> = {};
         const required: string[] = [];
         Object.entries(shape).forEach(([key, value]) => {
-          if (value instanceof z.ZodType) {
-            properties[key] = this.processZodType(value as z.ZodType<any>);
-            if (!(value instanceof z.ZodOptional)) {
+          if (getZodKind(value) || isStandardSchema(value)) {
+            properties[key] = this.processZodType(value);
+            if (this.isRequiredField(value)) {
               required.push(key);
             }
           }
@@ -93,21 +192,78 @@ export class OpenAPIGenerator {
     }
 
     // Handle ZodArray
-    if (zodType instanceof z.ZodArray) {
+    if (kind === "array") {
       return {
         type: "array",
-        items: this.processZodType((zodType as any)._def.element),
+        items: this.processZodType(
+          definition.element ?? (typeof definition.type === "object" ? definition.type : undefined),
+        ),
         description: (zodType as any).description,
       };
     }
 
     // Handle ZodEnum
-    if (zodType instanceof z.ZodEnum) {
+    if (kind === "enum") {
+      const options =
+        (zodType as any).options ??
+        (definition.entries ? Object.values(definition.entries) : definition.values);
       return {
         type: "string",
-        enum: (zodType as any).options,
+        enum: options,
         description: (zodType as any).description,
       };
+    }
+
+    // Handle ZodLiteral: emit the concrete value(s) as an enum rather than
+    // dropping the constraint and documenting a bare string.
+    if (kind === "literal") {
+      const values =
+        (definition.values as unknown[]) ??
+        (Object.prototype.hasOwnProperty.call(definition, "value") ? [definition.value] : []);
+      return {
+        type: openAPITypeForLiteralValues(values),
+        ...(values.length > 0 ? { enum: [...values] } : {}),
+        description: (zodType as any).description,
+      };
+    }
+
+    // Handle ZodUnion (including discriminated unions): oneOf over the members.
+    if (kind === "union") {
+      const options = (definition.options as unknown[]) ?? [];
+      return {
+        oneOf: options.map((option) => this.processZodType(option)),
+        description: (zodType as any).description,
+      };
+    }
+
+    // Handle ZodRecord: an object whose values share a schema.
+    if (kind === "record") {
+      return {
+        type: "object",
+        additionalProperties: this.processZodType(definition.valueType),
+        description: (zodType as any).description,
+      };
+    }
+
+    // Handle ZodTuple: a fixed-length (unless variadic) array. OpenAPI 3.0 has no
+    // positional items, so the element schemas are unioned; the length is pinned
+    // when there is no rest element.
+    if (kind === "tuple") {
+      const items = (definition.items as unknown[]) ?? [];
+      const rest = definition.rest;
+      const itemSchemas = [...items, ...(rest ? [rest] : [])].map((item) =>
+        this.processZodType(item),
+      );
+      const tupleSchema: any = {
+        type: "array",
+        items: itemSchemas.length === 1 ? itemSchemas[0] : { oneOf: itemSchemas },
+        description: (zodType as any).description,
+      };
+      if (!rest) {
+        tupleSchema.minItems = items.length;
+        tupleSchema.maxItems = items.length;
+      }
+      return tupleSchema;
     }
 
     // For primitive types
@@ -126,6 +282,13 @@ export class OpenAPIGenerator {
       ["minimum", (zodType as any).minValue],
       ["maximum", (zodType as any).maxValue],
     ];
+    for (const check of definition.checks ?? []) {
+      if (check?.kind === "min") {
+        constraints.push([kind === "string" ? "minLength" : "minimum", check.value]);
+      } else if (check?.kind === "max") {
+        constraints.push([kind === "string" ? "maxLength" : "maximum", check.value]);
+      }
+    }
     for (const [key, value] of constraints) {
       // Zod 4's .int() implies bounds of +/-Number.MAX_SAFE_INTEGER; those are
       // implementation details of the safe-integer range, not author-declared
@@ -139,105 +302,50 @@ export class OpenAPIGenerator {
     return baseSchema;
   }
 
-  /**
-   * Generate standard error responses
-   */
-  private getStandardResponses(): Record<string, any> {
+  private getResponses(metadata: EndpointOpenAPIMetadata): Record<string, any> {
+    const responses = Object.entries(metadata.responses ?? {}).filter(
+      (entry): entry is [string, EndpointOpenAPIResponseMetadata] => entry[1] !== undefined,
+    );
+    if (responses.length === 0) {
+      return {
+        default: {
+          description: "Response metadata is unavailable.",
+        },
+      };
+    }
+
+    return Object.fromEntries(
+      responses.map(([status, response]) => [status, this.getResponse(response)]),
+    );
+  }
+
+  private getResponse(response: EndpointOpenAPIResponseMetadata): Record<string, any> {
+    if (response.body === "empty") {
+      return {
+        description: response.description ?? "Empty response",
+      };
+    }
+
+    if (response.body === "binary") {
+      return {
+        description: response.description ?? "Binary response",
+        content: {
+          [response.contentType ?? "application/octet-stream"]: {
+            schema: { type: "string", format: "binary" },
+          },
+        },
+      };
+    }
+
+    const contentType =
+      response.body === "json"
+        ? (response.contentType ?? "application/json")
+        : response.contentType;
     return {
-      "200": {
-        description: "Successful response",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              description: "Response data",
-            },
-          },
-        },
-      },
-      "400": {
-        description: "Bad Request. Usually due to missing parameters, or invalid parameters.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-                error: { type: "string" },
-              },
-              required: ["message"],
-            },
-          },
-        },
-      },
-      "401": {
-        description: "Unauthorized. Due to missing or invalid authentication.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-              },
-              required: ["message"],
-            },
-          },
-        },
-      },
-      "403": {
-        description:
-          "Forbidden. You do not have permission to access this resource or to perform this action.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-              },
-            },
-          },
-        },
-      },
-      "404": {
-        description: "Not Found. The requested resource was not found.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-              },
-            },
-          },
-        },
-      },
-      "429": {
-        description: "Too Many Requests. You have exceeded the rate limit. Try again later.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-              },
-            },
-          },
-        },
-      },
-      "500": {
-        description:
-          "Internal Server Error. This is a problem with the server that you cannot fix.",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                message: { type: "string" },
-                error: { type: "string" },
-              },
-            },
-          },
-        },
+      description:
+        response.description ?? (response.body === "json" ? "JSON response" : "Streaming response"),
+      content: {
+        [contentType]: response.schema ? { schema: response.schema } : {},
       },
     };
   }
@@ -245,7 +353,7 @@ export class OpenAPIGenerator {
   /**
    * Generate OpenAPI spec from API routes
    */
-  async generateSpec(routes: APIRouteInfo[]): Promise<OpenAPISpec> {
+  async generateSpec(routes: APIRouteInfo[], requestOrigin?: string): Promise<OpenAPISpec> {
     const spec: OpenAPISpec = {
       openapi: "3.0.3",
       info: {
@@ -255,9 +363,7 @@ export class OpenAPIGenerator {
         ...(this.config.contact && { contact: this.config.contact }),
         ...(this.config.license && { license: this.config.license }),
       },
-      servers: this.config.servers || [
-        { url: "http://localhost:3000", description: "Development server" },
-      ],
+      servers: this.resolveServers(requestOrigin),
       paths: {},
       components: {
         schemas: {},
@@ -289,19 +395,33 @@ export class OpenAPIGenerator {
 
     // Generate paths
     for (const [path, routeList] of routeGroups) {
-      const openAPIPath = this.convertToOpenAPIPath(path);
-      spec.paths[openAPIPath] = {};
+      for (const variant of this.getOpenAPIPathVariants(path)) {
+        spec.paths[variant.path] ??= {};
 
-      for (const route of routeList) {
-        for (const method of route.methods) {
-          const operation = await this.generateOperation(route, method);
-          if (method === "QUERY") {
-            const additionalOperations =
-              spec.paths[openAPIPath]["x-oai-additionalOperations"] ?? {};
-            additionalOperations.QUERY = operation;
-            spec.paths[openAPIPath]["x-oai-additionalOperations"] = additionalOperations;
-          } else {
-            spec.paths[openAPIPath][method.toLowerCase()] = operation;
+        for (const route of routeList) {
+          for (const method of route.methods) {
+            if (variant.operationIdSuffix === "base") {
+              const existingOperation =
+                method === "QUERY"
+                  ? spec.paths[variant.path]["x-oai-additionalOperations"]?.QUERY
+                  : spec.paths[variant.path][method.toLowerCase()];
+              if (existingOperation) continue;
+            }
+
+            const operation = await this.generateOperation(
+              route,
+              method,
+              variant.path,
+              variant.operationIdSuffix,
+            );
+            if (method === "QUERY") {
+              const additionalOperations =
+                spec.paths[variant.path]["x-oai-additionalOperations"] ?? {};
+              additionalOperations.QUERY = operation;
+              spec.paths[variant.path]["x-oai-additionalOperations"] = additionalOperations;
+            } else {
+              spec.paths[variant.path][method.toLowerCase()] = operation;
+            }
           }
         }
       }
@@ -311,11 +431,88 @@ export class OpenAPIGenerator {
   }
 
   /**
-   * Convert Farm.js API path to OpenAPI path format
+   * Resolve server entries in decreasing order of authority: explicit OpenAPI
+   * servers, Farm's public API base, the current development request origin,
+   * and finally a mode-appropriate default.
+   */
+  resolveServers(requestOrigin?: string): NonNullable<OpenAPISpec["servers"]> {
+    if (this.config.servers !== undefined) return this.config.servers;
+
+    const apiBaseURL = this.context.apiBaseURL || "/api";
+    if (/^https?:\/\//i.test(apiBaseURL)) {
+      return [{ url: apiBaseURL, description: "Farm API server" }];
+    }
+
+    if (requestOrigin) {
+      return [
+        {
+          url: new URL(apiBaseURL, `${requestOrigin.replace(/\/$/, "")}/`).toString(),
+          description: "Current development server",
+        },
+      ];
+    }
+
+    if (this.context.mode === "production") {
+      return [{ url: apiBaseURL, description: "Same-origin API server" }];
+    }
+
+    return [
+      {
+        url: new URL(apiBaseURL, "http://localhost:3000/").toString(),
+        description: "Development server",
+      },
+    ];
+  }
+
+  /**
+   * Convert a Farm.js API path to OpenAPI path format.
+   *
+   * Strips the `/api` prefix and rewrites dynamic segments to OpenAPI's
+   * `{name}` templating: `[id]` -> `{id}`, `[...slug]` -> `{slug}`, and
+   * `[[...slug]]` -> `{slug}`. Leaving the bracket form produces a path key that
+   * is invalid OpenAPI, which breaks "try it" and any generated client.
    */
   private convertToOpenAPIPath(path: string): string {
-    // Convert /api/auth/login to /auth/login
-    return path.replace(/^\/api/, "");
+    const converted = path
+      .replace(/^\/api/, "")
+      .replace(/\[\[\.\.\.([^\]]+)\]\]/g, "{$1}")
+      .replace(/\[\.\.\.([^\]]+)\]/g, "{$1}")
+      .replace(/\[([^\]]+)\]/g, "{$1}");
+    return converted || "/";
+  }
+
+  /**
+   * OpenAPI does not permit optional path parameters. An optional catch-all
+   * therefore becomes two concrete paths: the empty base path and the
+   * parameterized catch-all path.
+   */
+  private getOpenAPIPathVariants(path: string): Array<{
+    path: string;
+    operationIdSuffix?: string;
+  }> {
+    if (!/\/\[\[\.\.\.[^\]]+\]\]/.test(path)) {
+      return [{ path: this.convertToOpenAPIPath(path) }];
+    }
+
+    const basePath = path.replace(/\/\[\[\.\.\.[^\]]+\]\]/g, "") || "/api";
+    return [
+      { path: this.convertToOpenAPIPath(basePath), operationIdSuffix: "base" },
+      { path: this.convertToOpenAPIPath(path) },
+    ];
+  }
+
+  /**
+   * Path parameters implied by a Farm.js API path's dynamic segments. Every
+   * path parameter is `required: true` per the OpenAPI spec (a path parameter
+   * cannot be optional), including catch-all segments.
+   */
+  private getPathParameters(openAPIPath: string): any[] {
+    return [...openAPIPath.matchAll(/\{([^}]+)\}/g)].map((match) => ({
+      name: match[1],
+      in: "path",
+      required: true,
+      schema: { type: "string" },
+    }));
   }
 
   /**
@@ -334,91 +531,34 @@ export class OpenAPIGenerator {
       // Get the method handler (GET, POST, etc.)
       const handler = routeModule[method];
 
-      // Check for Farm.js endpoint format: handler.__types.body
-      if (handler && handler.__types && handler.__types.body) {
-        const bodySchema = handler.__types.body;
-
-        if (bodySchema instanceof z.ZodObject || bodySchema instanceof z.ZodOptional) {
-          const shape = (bodySchema as any).shape || (bodySchema as any)._def?.innerType?.shape;
-          if (shape) {
-            const properties: Record<string, any> = {};
-            const required: string[] = [];
-
-            Object.entries(shape).forEach(([key, value]) => {
-              if (value instanceof z.ZodType) {
-                properties[key] = this.processZodType(value as z.ZodType<any>);
-                if (!(value instanceof z.ZodOptional)) {
-                  required.push(key);
-                }
-              }
-            });
-            return {
-              required: bodySchema instanceof z.ZodOptional ? false : true,
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties,
-                    ...(required.length > 0 ? { required } : {}),
-                  },
-                },
-              },
-            };
-          }
-        }
+      const bodySchema = handler?.__types?.body ?? handler?._type?.body;
+      if (bodySchema) {
+        return {
+          required: this.isRequiredField(bodySchema),
+          content: {
+            "application/json": {
+              schema: this.processZodType(bodySchema),
+            },
+          },
+        };
       }
 
-      // Fallback: Check for better-call format: handler._type.body
-      if (handler && handler._type && handler._type.body) {
-        const bodySchema = handler._type.body;
-
-        if (bodySchema instanceof z.ZodObject || bodySchema instanceof z.ZodOptional) {
-          const shape = (bodySchema as any).shape || (bodySchema as any)._def?.innerType?.shape;
-          if (shape) {
-            const properties: Record<string, any> = {};
-            const required: string[] = [];
-
-            Object.entries(shape).forEach(([key, value]) => {
-              if (value instanceof z.ZodType) {
-                properties[key] = this.processZodType(value as z.ZodType<any>);
-                if (!(value instanceof z.ZodOptional)) {
-                  required.push(key);
-                }
-              }
-            });
-
-            return {
-              required: bodySchema instanceof z.ZodOptional ? false : true,
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties,
-                    ...(required.length > 0 ? { required } : {}),
-                  },
-                },
-              },
-            };
-          }
-        }
-      }
+      return undefined;
     } catch (error) {
-      // If we can't load the module, return generic schema
+      // Missing metadata must not make the runtime contract stricter.
       console.warn(`Could not extract schema from ${route.filePath}:`, error);
-    }
-
-    // Fallback to generic schema
-    return {
-      required: true,
-      content: {
-        "application/json": {
-          schema: {
-            type: "object",
-            description: "Request body",
+      return {
+        required: false,
+        content: {
+          "application/json": {
+            schema: {
+              type: "object",
+              description: "Request body",
+            },
           },
         },
-      },
-    };
+      };
+    }
   }
 
   /**
@@ -435,40 +575,19 @@ export class OpenAPIGenerator {
       // Get the method handler
       const handler = routeModule[method];
 
-      // Check for Farm.js endpoint format: handler.__types.query
-      if (handler && handler.__types && handler.__types.query) {
-        const querySchema = handler.__types.query;
-
-        if (querySchema instanceof z.ZodObject) {
-          Object.entries((querySchema as any).shape).forEach(([key, value]) => {
-            if (value instanceof z.ZodType) {
-              parameters.push({
-                name: key,
-                in: "query",
-                required: !(value instanceof z.ZodOptional),
-                schema: this.processZodType(value as z.ZodType<any>),
-              });
-            }
-          });
-        }
-      }
-
-      // Fallback: Check for better-call format: handler._type.query
-      if (handler && handler._type && handler._type.query) {
-        const querySchema = handler._type.query;
-
-        if (querySchema instanceof z.ZodObject) {
-          Object.entries((querySchema as any).shape).forEach(([key, value]) => {
-            if (value instanceof z.ZodType) {
-              parameters.push({
-                name: key,
-                in: "query",
-                required: !(value instanceof z.ZodOptional),
-                schema: this.processZodType(value as z.ZodType<any>),
-              });
-            }
-          });
-        }
+      const querySchema = handler?.__types?.query ?? handler?._type?.query;
+      const shape = getZodObjectShape(querySchema);
+      if (shape) {
+        Object.entries(shape).forEach(([key, value]) => {
+          if (getZodKind(value) || isStandardSchema(value)) {
+            parameters.push({
+              name: key,
+              in: "query",
+              required: this.isRequiredField(value),
+              schema: this.processZodType(value),
+            });
+          }
+        });
       }
     } catch (error) {
       console.warn(`Could not extract query params from ${route.filePath}:`, error);
@@ -480,28 +599,62 @@ export class OpenAPIGenerator {
   /**
    * Generate OpenAPI operation from route info
    */
-  private async generateOperation(route: APIRouteInfo, method: string): Promise<any> {
+  private async generateOperation(
+    route: APIRouteInfo,
+    method: string,
+    openAPIPath = this.convertToOpenAPIPath(route.path),
+    operationIdSuffix?: string,
+  ): Promise<any> {
+    const metadata = await this.getEndpointOpenAPIMetadata(route, method);
+    const security = this.getSecurityRequirements(
+      metadata.security ?? this.config.security ?? "public",
+    );
     const operation: any = {
       summary: this.generateSummary(route.path, method),
       description: this.generateDescription(route.path, method),
-      operationId: this.generateOperationId(route.path, method),
+      operationId: this.generateOperationId(route.path, method, operationIdSuffix),
       tags: this.generateTags(route.path),
-      security: [{ bearerAuth: [] }, { apiKeyCookie: [] }],
-      responses: this.getStandardResponses(),
+      ...(security ? { security } : {}),
+      responses: this.getResponses(metadata),
     };
 
-    // Add query parameters
-    const parameters = await this.getParameters(route, method);
+    // Path parameters (from dynamic route segments) precede query parameters.
+    const parameters = [
+      ...this.getPathParameters(openAPIPath),
+      ...(await this.getParameters(route, method)),
+    ];
     if (parameters.length > 0) {
       operation.parameters = parameters;
     }
 
     // QUERY and mutation methods can carry typed request content.
     if (["QUERY", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
-      operation.requestBody = await this.getRequestBody(route, method);
+      const requestBody = await this.getRequestBody(route, method);
+      if (requestBody) {
+        operation.requestBody = requestBody;
+      }
     }
 
     return operation;
+  }
+
+  private async getEndpointOpenAPIMetadata(
+    route: APIRouteInfo,
+    method: string,
+  ): Promise<EndpointOpenAPIMetadata> {
+    try {
+      const routeModule = await import(/* @vite-ignore */ route.filePath);
+      return routeModule[method]?.__openapi ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  private getSecurityRequirements(mode: OpenAPISecurityMode): any[] | undefined {
+    if (mode === "public") return undefined;
+    if (mode === "bearer") return [{ bearerAuth: [] }];
+    if (mode === "cookie") return [{ apiKeyCookie: [] }];
+    return [{ bearerAuth: [] }, { apiKeyCookie: [] }];
   }
 
   /**
@@ -541,9 +694,9 @@ export class OpenAPIGenerator {
   /**
    * Generate operation ID
    */
-  private generateOperationId(path: string, method: string): string {
+  private generateOperationId(path: string, method: string, suffix?: string): string {
     const cleanPath = path.replace(/^\/api\//, "").replace(/\//g, "_");
-    return `${method.toLowerCase()}_${cleanPath}`;
+    return `${method.toLowerCase()}_${cleanPath}${suffix ? `_${suffix}` : ""}`;
   }
 
   /**

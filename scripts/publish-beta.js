@@ -1,6 +1,11 @@
 /**
- * Publish every public workspace package to the beta dist-tag, verify each
- * version is actually visible on the registry, and only then promote betas.
+ * Publish every public workspace package, verify each version is actually
+ * visible on the registry, and only then promote betas.
+ *
+ * Each package is published under the dist-tag its own version implies:
+ * `0.1.0` goes to `latest`, `0.1.1-beta.0` to `beta`. That lets a stable
+ * release of the shared group ship next to independently versioned packages
+ * that are still in beta.
  *
  * The npm registry occasionally leaves a publish in a "staged" state: the
  * publish command reports success, but the version is not installable and
@@ -9,9 +14,11 @@
  * trailing packages during v0.1.0-beta.52/53). This script absorbs that by
  * polling for visibility and retrying stragglers before promotion.
  *
- * Usage: node scripts/publish-beta.js [--verify-only] [--help]
+ * Usage: node scripts/publish-beta.js [--verify-only|--dry-run] [--help]
  *   --verify-only  Skip the initial bulk publish and only verify, retry
  *                  stragglers, and promote. Useful to resume after a failure.
+ *   --dry-run      Pack every public package with pnpm's publish dry run and
+ *                  stop before contacting the registry or changing tags.
  */
 const { execFileSync } = require("node:child_process");
 const path = require("node:path");
@@ -22,21 +29,27 @@ const workspaceRoot = path.resolve(__dirname, "..");
 const VERIFY_ATTEMPTS = 30;
 const VERIFY_DELAY_MS = 30_000;
 
-const supportedFlags = new Set(["--help", "--verify-only"]);
-const helpText = `Usage: node scripts/publish-beta.js [--verify-only]
+const supportedFlags = new Set(["--help", "--verify-only", "--dry-run"]);
+const helpText = `Usage: node scripts/publish-beta.js [--verify-only|--dry-run]
 
 Options:
   --verify-only  Skip the bulk publish; verify registry visibility, retry
-                 staged packages, and promote betas.`;
+                 staged packages, and promote betas.
+  --dry-run      Pack every public package without publishing or promoting
+                 any package.`;
 
 function parsePublishBetaArgs(args) {
   const unknownFlags = args.filter((arg) => !supportedFlags.has(arg));
   if (unknownFlags.length > 0) {
     throw new Error(`Unknown publish:beta option(s): ${unknownFlags.join(", ")}`);
   }
+  if (args.includes("--verify-only") && args.includes("--dry-run")) {
+    throw new Error("publish:beta cannot combine --verify-only and --dry-run");
+  }
   return {
     help: args.includes("--help"),
     verifyOnly: args.includes("--verify-only"),
+    dryRun: args.includes("--dry-run"),
   };
 }
 
@@ -49,6 +62,35 @@ function parsePublishBetaArgs(args) {
  */
 function isRetryableStagedPublishError(output) {
   return /previously staged version|previously published versions|E409|409 Conflict/i.test(output);
+}
+
+function distTagForVersion(version) {
+  const prerelease = /^\d+\.\d+\.\d+-([0-9A-Za-z-]+)/.exec(version);
+  return prerelease ? prerelease[1] : "latest";
+}
+
+function groupPackagesByDistTag(packages) {
+  const groups = new Map();
+  for (const pkg of packages) {
+    const tag = distTagForVersion(pkg.version);
+    groups.set(tag, [...(groups.get(tag) ?? []), pkg]);
+  }
+  return groups;
+}
+
+function publishArgs(packages, tag, extraArgs = []) {
+  return [
+    "-r",
+    ...packages.flatMap((pkg) => ["--filter", pkg.name]),
+    "publish",
+    "--access",
+    "public",
+    "--tag",
+    tag,
+    "--publish-branch",
+    "main",
+    ...extraArgs,
+  ];
 }
 
 function run(command, commandArgs, options = {}) {
@@ -71,11 +113,104 @@ function isVersionVisible(name, version) {
   }
 }
 
+function isMissingRegistryVersion(error) {
+  const output = `${error?.stdout ?? ""}${error?.stderr ?? ""}${error?.message ?? ""}`;
+  return /E404|404 Not Found|No match found/i.test(output);
+}
+
+function readRegistryManifest(name, version, localManifest) {
+  const spec = `${name}@${version}`;
+  try {
+    execFileSync("npm", ["view", spec, "version", "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    if (localManifest && isMissingRegistryVersion(error)) {
+      return {
+        dependencies: localManifest.dependencies,
+        peerDependencies: localManifest.peerDependencies,
+      };
+    }
+    throw error;
+  }
+  const readField = (field) => {
+    const value = execFileSync("npm", ["view", spec, field, "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return value ? JSON.parse(value) : undefined;
+  };
+  return {
+    dependencies: readField("dependencies"),
+    peerDependencies: readField("peerDependencies"),
+  };
+}
+
+function findStableCoreDependencyMismatches(
+  packages,
+  getManifest = readRegistryManifest,
+  coreName = "@farm.js/core",
+) {
+  const stableCore = packages.find((pkg) => pkg.name === coreName && !pkg.version.includes("-"));
+  if (!stableCore) return [];
+
+  const mismatches = [];
+  for (const pkg of packages) {
+    if (!pkg.version.includes("-beta.") || pkg.name === coreName) continue;
+    let manifest;
+    try {
+      manifest = getManifest(pkg.name, pkg.version, pkg.manifest);
+    } catch {
+      mismatches.push({
+        package: `${pkg.name}@${pkg.version}`,
+        reason: "registry manifest unavailable",
+      });
+      continue;
+    }
+    for (const dependency of [
+      manifest?.dependencies?.[coreName],
+      manifest?.peerDependencies?.[coreName],
+    ]) {
+      if (typeof dependency === "string" && dependency.includes("-")) {
+        mismatches.push({
+          package: `${pkg.name}@${pkg.version}`,
+          dependency,
+          stableCore: stableCore.version,
+        });
+      }
+    }
+  }
+  return mismatches;
+}
+
+function assertStableCoreDependencies(packages, getManifest = readRegistryManifest) {
+  const mismatches = findStableCoreDependencyMismatches(packages, getManifest);
+  if (mismatches.length === 0) return;
+  throw new Error(
+    [
+      "Refusing stable publication while beta packages resolve a prerelease @farm.js/core:",
+      ...mismatches.map(({ package: name, dependency, reason }) =>
+        reason ? `- ${name}: ${reason}` : `- ${name}: ${dependency}`,
+      ),
+      "Republish those packages against the stable core before promoting latest.",
+    ].join("\n"),
+  );
+}
+
 function tryPublishPackage(pkg) {
   try {
     execFileSync(
       "pnpm",
-      ["publish", "--access", "public", "--tag", "beta", "--publish-branch", "main"],
+      [
+        "publish",
+        "--access",
+        "public",
+        "--tag",
+        distTagForVersion(pkg.version),
+        "--publish-branch",
+        "main",
+      ],
       { cwd: pkg.dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
     console.log(`Republished ${pkg.name}@${pkg.version}.`);
@@ -134,24 +269,28 @@ async function main(args = process.argv.slice(2)) {
     throw new Error("No public packages found under packages/.");
   }
 
+  if (!options.dryRun) assertStableCoreDependencies(packages);
+
+  const groups = groupPackagesByDistTag(packages);
+
+  if (options.dryRun) {
+    for (const [tag, group] of groups) {
+      run("pnpm", publishArgs(group, tag, ["--dry-run", "--no-git-checks"]));
+    }
+    return;
+  }
+
   if (!options.verifyOnly) {
-    try {
-      run("pnpm", [
-        "-r",
-        "--filter",
-        "./packages/*",
-        "publish",
-        "--access",
-        "public",
-        "--tag",
-        "beta",
-        "--publish-branch",
-        "main",
-      ]);
-    } catch {
-      // A partial bulk publish is recoverable: verification below finds the
-      // gaps and retries them individually.
-      console.warn("Bulk publish exited with an error; verifying per-package state.");
+    for (const [tag, group] of groups) {
+      try {
+        run("pnpm", publishArgs(group, tag));
+      } catch {
+        // A partial bulk publish is recoverable: verification below finds the
+        // gaps and retries them individually.
+        console.warn(
+          `Bulk publish for the ${tag} tag exited with an error; verifying per-package state.`,
+        );
+      }
     }
   }
 
@@ -166,4 +305,13 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parsePublishBetaArgs, isRetryableStagedPublishError };
+module.exports = {
+  distTagForVersion,
+  groupPackagesByDistTag,
+  findStableCoreDependencyMismatches,
+  assertStableCoreDependencies,
+  isMissingRegistryVersion,
+  isRetryableStagedPublishError,
+  parsePublishBetaArgs,
+  publishArgs,
+};

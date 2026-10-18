@@ -71,7 +71,7 @@ dedicated [React](/docs/renderers/react), [Preact](/docs/renderers/preact),
 Install Preact and its FARMJS renderer adapter:
 
 ```bash
-pnpm add @farm.js/preact@beta preact
+pnpm add @farm.js/preact preact
 ```
 
 ```ts
@@ -90,7 +90,7 @@ aliases, server rendering and streaming, and browser hydration. See the
 Create a ready-to-run Preact application from the CLI:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-preact-app --template basic --renderer preact --typescript
+pnpm create @farm.js/app my-preact-app --template basic --renderer preact --typescript
 ```
 
 ### Svelte
@@ -98,7 +98,7 @@ pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-preact-app --templ
 Install the Svelte adapter and runtime:
 
 ```bash
-pnpm add @farm.js/svelte@beta svelte
+pnpm add @farm.js/svelte svelte
 ```
 
 ```ts
@@ -124,7 +124,7 @@ typed server calls, and current compatibility boundaries.
 Create a ready-to-run Svelte application from the CLI:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-svelte-app --template basic --renderer svelte --typescript
+pnpm create @farm.js/app my-svelte-app --template basic --renderer svelte --typescript
 ```
 
 ### Vue
@@ -132,7 +132,7 @@ pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-svelte-app --templ
 Install Vue and its FARMJS renderer adapter:
 
 ```bash
-pnpm add @farm.js/vue@beta vue
+pnpm add @farm.js/vue vue
 ```
 
 ```ts
@@ -163,7 +163,7 @@ current compatibility boundaries.
 Create a ready-to-run Vue application from the CLI:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-vue-app --template basic --renderer vue --typescript
+pnpm create @farm.js/app my-vue-app --template basic --renderer vue --typescript
 ```
 
 ### Solid
@@ -171,7 +171,7 @@ pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-vue-app --template
 Install the Solid adapter and runtime:
 
 ```bash
-pnpm add @farm.js/solid@beta solid-js
+pnpm add @farm.js/solid solid-js
 ```
 
 ```ts
@@ -194,7 +194,7 @@ calls, and current compatibility boundaries.
 Create a ready-to-run Solid application directly from the CLI:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-solid-app --template basic --renderer solid --typescript
+pnpm create @farm.js/app my-solid-app --template basic --renderer solid --typescript
 ```
 
 Omitting `renderer` selects React. The renderer option is currently available for the Basic starter;
@@ -245,33 +245,66 @@ mount, and shortcut together.
 
 ## Important options
 
-| Option        | Use it for                                                                        |
-| ------------- | --------------------------------------------------------------------------------- |
-| extends       | Composing local or package Farm layers with project-first overrides.              |
-| srcDir        | Changing the app source folder from the default src.                              |
-| renderer      | Selecting React (default) or an adapter such as Preact, Svelte, Vue, or Solid.    |
-| api           | Configuring the public root used by Farm's typed browser API client.              |
-| integrations  | Registering built-in or custom integrations.                                      |
-| auth          | Enabling Farm's built-in email/password auth, sessions, helpers, and hooks.       |
-| theme         | Enabling light, dark, and system modes with client and server APIs.               |
-| storage       | Configuring KV drivers/mounts and, in the current beta, an integration DB client. |
-| migrations    | Running one-shot schema/provider commands with `farm migrate`.                    |
-| cron          | Mapping portable UTC schedules to ordinary GET API routes.                        |
-| i18n          | Configuring locale routes, detection, message catalogs, typing, and direction.    |
-| docs          | Serving the built-in docs runtime and docs API.                                   |
-| md            | Restricting or disabling automatic markdown mirrors like /pricing.md.             |
-| mdx           | Rendering `page.md` and `page.mdx` app routes, plus MDX components.               |
-| telemetry     | Controlling automatic production-site reporting to Farm's usage dashboard.        |
-| deploy        | Selecting a target, preset, and output directory.                                 |
-| deploymentId  | Detecting stale browser requests during rolling deployments.                      |
-| trailingSlash | Choosing the canonical URL shape for application page routes and links.           |
-| routeRules    | Applying rendering, cache, redirect, CORS, and header behavior to route patterns. |
-| security      | Applying an app-wide CSP with an enforcing or report-only response header.        |
-| serverActions | Restricting trusted action origins and request body size.                         |
-| images        | Configuring responsive widths, remote allowlists, formats, and optimizer limits.  |
-| performance   | Budgeting image and font preload hints without changing the rendered resources.   |
-| experimental  | Auditing or enabling opt-in rendering experiments such as isolated hydration.     |
-| openapi       | Publishing API reference docs.                                                    |
+| Option        | Use it for                                                                             |
+| ------------- | -------------------------------------------------------------------------------------- |
+| extends       | Composing local or package Farm layers with project-first overrides.                   |
+| srcDir        | Changing the app source folder from the default src.                                   |
+| renderer      | Selecting React (default) or an adapter such as Preact, Svelte, Vue, or Solid.         |
+| api           | Configuring the public root used by Farm's typed browser API client.                   |
+| integrations  | Registering built-in or custom integrations.                                           |
+| auth          | Enabling Farm's built-in email/password auth, sessions, helpers, and hooks.            |
+| mcp           | Composing API routes and standalone tools in one authenticated MCP server.             |
+| agent         | Opt-in agent readiness: llms.txt, JSON-LD, AI crawler rules, and an API catalog.       |
+| theme         | Enabling light, dark, and system modes with client and server APIs.                    |
+| storage       | Configuring KV drivers/mounts and, in the current beta, an integration DB client.      |
+| migrations    | Running one-shot schema/provider commands with `farm migrate`.                         |
+| schema        | Allowing plugins to add columns (`allowExtend`) and foreign keys (`allowForeignKeys`). |
+| cron          | Mapping portable UTC schedules to ordinary GET API routes.                             |
+| i18n          | Configuring locale routes, detection, message catalogs, typing, and direction.         |
+| docs          | Serving the built-in docs runtime and docs API.                                        |
+| md            | Restricting or disabling automatic markdown mirrors like /pricing.md.                  |
+| mdx           | Rendering `page.md` and `page.mdx` app routes, plus MDX components.                    |
+| telemetry     | Controlling automatic production-site reporting to Farm's usage dashboard.             |
+| analytics     | Turning off request and MCP analytics for an app linked to a Farm Infra project.       |
+| deploy        | Selecting a target, preset, and output directory.                                      |
+| deploymentId  | Detecting stale browser requests during rolling deployments.                           |
+| trailingSlash | Choosing the canonical URL shape for application page routes and links.                |
+| routeRules    | Applying rendering, cache, redirect, CORS, and header behavior to route patterns.      |
+| security      | Applying an app-wide CSP with an enforcing or report-only response header.             |
+| serverActions | Restricting trusted action origins and request body size.                              |
+| images        | Configuring responsive widths, remote allowlists, formats, and optimizer limits.       |
+| performance   | Budgeting image and font preload hints without changing the rendered resources.        |
+| experimental  | Auditing or enabling opt-in rendering experiments such as isolated hydration and PPR.  |
+| openapi       | Publishing API reference docs.                                                         |
+| vite          | Passing extra Vite options such as plugins, `define`, `resolve.alias`, and `css`.      |
+
+## Vite config
+
+The `vite` field applies to `farm dev` and to both production builds in `farm build` (client and
+server). Plugins, `define`, `resolve`, `css`, `ssr`, and other Vite options merge with Farm's own
+config the same way in each.
+
+```ts
+export default defineConfig({
+  vite: {
+    define: { __APP_VERSION__: JSON.stringify(process.env.APP_VERSION) },
+    css: { modules: { localsConvention: "camelCase" } },
+  },
+});
+```
+
+Farm keeps the options it needs to produce its production output: `root`, `base`, `mode`,
+`appType`, `publicDir`, the build's entries and output (`build.outDir`, `build.emptyOutDir`,
+`build.ssr`, `build.ssrEmitAssets`, `build.write`, `build.lib`, `build.watch`,
+`build.rollupOptions.input`, and `build.rollupOptions.output`), and any `build`, `define`, or
+`esbuild` value Farm sets for that build. Use `basePath` and `publicDir` in Farm's config instead.
+
+During development, Farm loads server modules through Vite's `ssr` environment runner. With
+React Server Components enabled, RSC entries use a separate `rsc` runner and resolution conditions;
+the browser uses `client`. Vite owns runner caching, hot updates, and cleanup when the server closes.
+Custom server environments must expose an in-process module runner. A fetch-only remote runtime
+needs a request/response adapter; selecting the Cloudflare deployment target does not yet run
+`farm dev` inside workerd.
 
 ## Application base path
 
@@ -345,6 +378,215 @@ This also applies to RSC builds and their Nitro servers, including apps configur
 pipeline rather than being decoded as server actions. The canonical `/api` routes remain available;
 an external API URL changes the client destination only, not the local server mount.
 
+## MCP transport
+
+Install `@farm.js/mcp`, then configure one authenticated transport directly—no plugin array is
+needed:
+
+```ts title="farm.config.ts"
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  mcp: {
+    authorize: async ({ request }) => {
+      const session = await getSession(request);
+      return session ? { subject: session.user.id } : false;
+    },
+  },
+});
+```
+
+This mounts `/api/mcp`. Typed API routes are not exposed as MCP tools unless their endpoint config sets
+`mcp: true` or supplies MCP metadata, or you explicitly select endpoint instances in `mcp.tools`.
+`authorize` receives `{ request, tool, tools, server }`; return `{ subject, tools: ["tool_name"] }`
+to limit both discovery and invocation for that caller. You can also add standalone `defineTool()`
+definitions from `@farm.js/mcp` to the same list; these validate their own input and receive the
+authorized principal without creating separate HTTP routes. Optional `outputSchema` validates
+standalone results; endpoint-backed tools reuse a route factory's `output` validator. Both advertise
+the validated result shape to MCP clients. See [API MCP](/docs/plugins/mcp) for
+mixed declarations, the resolved catalog, and permission checks.
+
+## Agent readiness
+
+`agent` holds opt-in features that help AI agents and crawlers understand a public site, and decide
+which of them may use it. All of them are off by default, so internal tools and private dashboards
+are unaffected.
+
+```ts title="farm.config.ts"
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  agent: {
+    llmsTxt: {
+      title: "Acme",
+      summary: "Billing for small teams.",
+      exclude: ["/admin/[...path]"],
+    },
+    noindexPreviews: true,
+    jsonLd: true,
+    crawlers: { search: "allow", training: "block" },
+    apiCatalog: true,
+  },
+});
+```
+
+`noindexPreviews: true` adds `X-Robots-Tag: noindex, nofollow` to every response from Farm's server
+on a preview deployment; [Preview deployments](/docs/deployment#preview-deployments) covers how
+Farm detects one.
+
+`llmsTxt: true` serves [`/llms.txt`](https://llmstxt.org): a Markdown index of every static page,
+with each page's metadata title and description, linking to its [Markdown mirror](/docs/markdown)
+when one is exposed. An options object sets the `title` and `summary` (the root layout's metadata by
+default), adds `details` Markdown, and narrows the list with `include` and `exclude` route patterns,
+which use the same syntax as `md.expose`. Dynamic routes are left out because they have no single
+URL.
+
+It also serves `/llms-full.txt`: the same header, then a block per listed page with its title, URL,
+and description, separated by `---`. Pages with an exposed Markdown mirror get it inlined; a page
+without one keeps its block but no body. Pages are read with a fresh request that carries no cookies
+or credentials, so a page behind auth is left out rather than copied into a file anyone can fetch.
+`full: false` turns off the generated `/llms-full.txt` (a `public/llms-full.txt` or `llms-full.ts`
+still serves that path). Rendering llms-full.txt renders every listed page. The production server shares one
+render between concurrent requests and runs one at a time, so a burst of requests does not multiply
+page renders. Set `revalidate` (seconds) to reuse a render on the server for that long and let a CDN
+cache both generated files. A page whose Markdown takes longer than 30 seconds keeps its block
+without a body, and that render is not reused, so the next request reads the page again.
+
+Each file can be overridden on its own. A static `public/llms.txt` or `public/llms-full.txt` is
+served as-is. An [`llms.ts` or `llms-full.ts` metadata route](/docs/routing#application-metadata-routes)
+replaces the generated file with whatever it returns, either the complete file as a string or the
+structured format, and receives the generated pages and defaults to build on. When the
+[docs engine](/docs/docs-engine) is enabled too, the app's own files take `/llms.txt` and
+`/llms-full.txt`.
+
+`jsonLd: true` adds a schema.org `Organization` to page heads, built from the site's metadata: the
+site name or title, `metadataBase`, and description. A page with none of those gets no JSON-LD. An
+object sets the `type` (emitted as `@type`) and fields such as `name`, `url`, `logo`, and `sameAs`.
+
+Pages and layouts add their own structured data with `metadata.jsonLd`, an object or an array of
+objects. It works without `agent.jsonLd`; when both are set, the site script comes first.
+
+```tsx title="src/app/blog/[slug]/page.tsx"
+import type { MetadataProps } from "@farm.js/core";
+
+export async function generateMetadata({ params }: MetadataProps<"/blog/[slug]">) {
+  const post = await getPost(params.slug);
+
+  return {
+    title: post.title,
+    jsonLd: {
+      "@context": "https://schema.org",
+      "@type": "BlogPosting",
+      headline: post.title,
+      datePublished: post.publishedAt,
+    },
+  };
+}
+```
+
+Each object renders its own `<script type="application/ld+json">` with `<` escaped, so values
+cannot close the tag. Entries from layouts render first and accumulate with the page's instead of
+replacing them. Client navigation swaps page and layout JSON-LD for the next route's and leaves
+the site script and any `ld+json` script the app renders itself in place.
+
+Instead of writing those objects by hand, use the typed builders in `@farm.js/core/json-ld`:
+`article`, `breadcrumbList`, `faqPage`, `product`, and `softwareApplication`. Each returns a plain
+object with `@context` and `@type` set and unset fields left out. Pass one, or an array of them, as
+`metadata.jsonLd`:
+
+```tsx title="src/app/docs/[slug]/page.tsx"
+import type { Metadata } from "@farm.js/core";
+import * as jsonLd from "@farm.js/core/json-ld";
+
+export const metadata: Metadata = {
+  jsonLd: [
+    jsonLd.article({
+      type: "TechArticle",
+      headline: "Routing",
+      datePublished: new Date("2026-10-01"),
+      author: { name: "Acme", type: "Organization" },
+    }),
+    jsonLd.breadcrumbList([{ name: "Docs", url: "https://acme.test/docs" }, { name: "Routing" }]),
+  ],
+};
+```
+
+Values are passed through as written, so use absolute URLs. Spread a result to add schema.org
+properties the builder does not model, for example `{ ...jsonLd.product(input), gtin13: "..." }`.
+
+### AI crawlers
+
+`crawlers` serves a generated `/robots.txt` with a group per category you set:
+
+| Option     | User agents                                                                                                |
+| ---------- | ---------------------------------------------------------------------------------------------------------- |
+| `search`   | `OAI-SearchBot`, `ChatGPT-User`, `Claude-SearchBot`, `Claude-User`, `PerplexityBot`, `Perplexity-User`     |
+| `training` | `GPTBot`, `ClaudeBot`, `Google-Extended`, `CCBot`, `Applebot-Extended`, `Meta-ExternalAgent`, `Bytespider` |
+
+`"allow"` writes `Allow: /` for that group and `"block"` writes `Disallow: /`. A category you leave
+out gets no group, so those agents follow the `User-agent: *` rules. `search` covers agents that
+fetch pages to cite or link them in answers, including ones acting on a user's request, which some
+vendors say may not follow robots.txt. `training` covers crawlers and tokens that decide whether
+content trains models; blocking them does not affect search engines such as Googlebot.
+
+The file ends with `User-agent: *` / `Allow: /`, then a `Sitemap:` line when the app has a
+`sitemap.ts` and the root layout sets `metadataBase`. Farm does not build that URL from the request's
+`Host` header, since CDNs cache robots.txt. `crawlers: true` serves only those default lines.
+
+```ts title="farm.config.ts"
+export default defineConfig({
+  agent: {
+    crawlers: {
+      search: "allow",
+      training: "block",
+      // Written after the generated groups. A `*` rule replaces the default allow-all group.
+      rules: [{ userAgent: "*", allow: "/", disallow: ["/admin/", "/api/"] }],
+      // Absolute URLs. Replaces the sitemap.ts default; [] leaves the line out.
+      sitemap: ["https://acme.test/sitemap.xml"],
+    },
+  },
+});
+```
+
+Crawlers combine groups that name the same agent, so a rule for `GPTBot` with `allow: "/blog/"`
+next to `training: "block"` lets GPTBot read `/blog/` only. A named group replaces the `*` group for
+that agent, so the `*` rule's `disallow` paths do not apply to agents in an `"allow"` group.
+
+The app's own file wins. Farm serves `/robots.txt` from, in order:
+
+1. `public/robots.txt`, served as-is.
+2. A root [`robots.ts` metadata route](/docs/routing#application-metadata-routes) in `src/app`.
+3. The generated file from `agent.crawlers`.
+4. The [docs engine](/docs/docs-engine)'s robots.txt, when the docs engine is enabled.
+
+### API catalog
+
+`apiCatalog: true` serves `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727)),
+so an agent that knows only your origin can find your APIs. It is a Linkset
+(`application/linkset+json`) listing:
+
+- the HTTP API, with its OpenAPI spec as `service-desc` and the API reference as `service-doc`,
+  when [`openapi`](/docs/openapi) is enabled;
+- the MCP endpoint, when the top-level [`mcp`](/docs/plugins/mcp) config is enabled.
+
+```json title="/.well-known/api-catalog"
+{
+  "linkset": [
+    { "anchor": "/.well-known/api-catalog", "item": [{ "href": "/api" }, { "href": "/api/mcp" }] },
+    {
+      "anchor": "/api",
+      "service-desc": [{ "href": "/openapi.json", "type": "application/vnd.oai.openapi+json" }],
+      "service-doc": [{ "href": "/docs/reference", "type": "text/html" }]
+    }
+  ]
+}
+```
+
+Links are root-relative, so they resolve against the catalog URL and follow the `basePath`. A `HEAD`
+request returns the `Link: </.well-known/api-catalog>; rel="api-catalog"` header the RFC requires.
+Listing the MCP endpoint does not open it: its `authorize` check still applies. An MCP server added
+through `apiMcp()` in `plugins` is not listed; use the top-level `mcp` config.
+
 ## Isolated client hydration
 
 React applications can keep using `"use client"` without enabling React Server Components. By
@@ -369,6 +611,10 @@ The option has three modes:
 | `"off"`     | Keeps route-wide hydration. This is the default.                             |
 | `"analyze"` | Reports eligible boundaries without changing emitted code or runtime work.   |
 | `"enabled"` | Hydrates safe client leaves independently and keeps unsupported routes safe. |
+
+The mode applies to synchronous pages and layouts, which have a route-wide alternative. An `async`
+page or layout has none, so its eligible client components always hydrate as islands, in every
+mode. See [Async pages and client components](/docs/server-rendering#async-pages-and-client-components).
 
 An eligible boundary is a local, statically analyzable `"use client"` module with a default or
 named capitalized component export and serializable props. Farm preserves its server-rendered HTML,
@@ -411,6 +657,26 @@ option and measure the route's client JavaScript and interaction cost before ado
 The maintained benchmark includes equivalent RSC controls rather than assuming the non-RSC path is
 faster.
 
+## Partial Prerendering
+
+Partial Prerendering (static-shell caching) is experimental and disabled by default. Enable it
+app-wide with `experimental.ppr`, then opt individual routes in with `export const ppr = true`,
+the Next-compatible `export const experimental_ppr = true`, or a `"use ppr"` directive. Route
+declarations are inert while the flag is off, and those routes render fully dynamically.
+
+```ts
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  experimental: {
+    ppr: true,
+  },
+});
+```
+
+See [Cache and PPR](/docs/cache-ppr) for shell caching, Suspense holes, invalidation, and
+observability events.
+
 ## Images
 
 Farm optimizes local and allowlisted remote images through the same runtime on development and production deployments.
@@ -441,7 +707,14 @@ Remote sources are denied by default. See [Images](/docs/images) for static impo
 Farm keeps one image preload—the explicitly high-priority hint first—and two font preloads by
 default. Lower-priority hints above those budgets are removed from buffered HTML and `Link` response
 headers, while the actual image and font elements remain unchanged and load normally. Route scripts,
-stylesheets, and module preloads are not removed.
+stylesheets, and module preloads are not removed. Budgets count resources, not hints: a URL preloaded
+in both the HTML and the `Link` header counts once, and its hints are kept or removed together.
+Preload-looking text inside comments, scripts, and other inert content is left unchanged, including
+when surrounding Unicode text changes length during case conversion.
+
+Production responses reuse buffered HTML without a body decode/re-encode when Farm can prove it
+contains no preload candidates. `Link` header budgets still apply, and HTML transformed by plugins
+is checked after those transforms. Candidate-bearing documents retain the full combined budget.
 
 ```ts
 import { defineConfig } from "@farm.js/core";
@@ -519,7 +792,39 @@ security: {
 
 You can also pass an already serialized policy as `csp: "default-src 'self'; object-src 'none'"`. The longer `contentSecurityPolicy` config name is intentionally unsupported; use `csp`.
 
-Farm currently emits small inline hydration and route-state bootstraps, so the compatible example allows inline scripts and styles. A stricter policy must supply correct hashes or renderer-generated nonces for every trusted inline bootstrap. Start with `reportOnly`, inspect violations, and enforce only after the deployed HTML and every third-party integration satisfy the policy.
+Farm emits small inline hydration, theme, and route-state bootstraps. The first example uses the
+compatibility path, so it permits inline scripts. For a strict script policy, enable Farm's managed
+script authorization and remove `'unsafe-inline'`:
+
+```ts
+security: {
+  csp: {
+    nonce: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+    },
+  },
+}
+```
+
+For dynamic HTML, Farm generates a fresh nonce for every response, adds it to the directive that
+governs script elements (`script-src-elem`, then `script-src`, then `default-src`), and stamps every
+script element in the streamed document. Any existing script `nonce` attribute is normalized to the
+fresh response nonce so application-authored inline scripts follow the same policy.
+Script contents, including Unicode text, are preserved across streamed response chunks.
+
+For fully prerendered HTML, the same option keeps the page static. Farm removes the build-time nonce,
+hashes the exact contents of every inline script with SHA-256, and emits a route-specific policy with
+those hashes. External scripts still need their origin in `script-src` or `script-src-elem`. Dynamic
+responses and PPR shells continue to use fresh nonces, so a nonce is never cached or reused. Keep
+`reportOnly` on while auditing and verify every third-party script and connection before enforcing the
+policy.
+
+Without `nonce: true`, Farm warns when a configured policy would block its inline framework scripts.
 
 ## Server HTTP policy
 
@@ -570,6 +875,11 @@ Customize both paths through `server.health`, or set `health: false` when an ada
 ## Server action security
 
 Server actions are same-origin application RPC endpoints. Farm rejects cross-origin action requests by default and limits the encoded request body to 1 MB.
+
+Server actions run on the React Server Components pipeline from `@farm.js/plugin/rsc` (see the
+[`rsc-demo` example](https://github.com/farming-labs/farm.js/tree/main/examples/rsc-demo)). The
+`experimental` flags below configure that pipeline; on their own they do not make server functions
+callable from the browser, and Farm keeps rejecting client imports of server-function modules.
 
 ```ts
 import { defineConfig } from "@farm.js/core";
@@ -676,6 +986,8 @@ export default defineConfig({
 ```
 
 `render: "static"` maps to prerendering. `render: "dynamic"` forces a dynamic response. `swr` and `isr` accept `true` or a TTL in seconds. `cors: true` applies permissive API CORS headers; pass an object when you need a specific origin, methods, or headers.
+
+API routes remain same-origin by default in development and production. Add `cors` only to route patterns that intentionally form a cross-origin browser API.
 
 Rules can also provide `runtime`, `regions`, and `maxDuration` defaults. File pages, API routes, and layouts can override them with named exports. See [Route Runtime](/docs/route-runtime) for inheritance and deployment behavior.
 
@@ -788,6 +1100,12 @@ Farm schedules a small check-in after the first non-health production request an
 before returning the application response. Only the detected origin, Farm version, renderer, and
 deployment target are sent. See [Product telemetry](/docs/telemetry) for validation, privacy,
 retention, preview-environment, opt-out, and static-export details.
+
+## Farm Infra analytics
+
+An app whose server environment sets `FARMJS_API_KEY` and `FARMJS_PROJECT_ID` reports request and MCP
+tool analytics to that Farm Infra project. Set `analytics: false` to never send them. See
+[Farm Infra analytics](/docs/infra-analytics) for what is sent and how.
 
 ## Deployment config
 

@@ -1,6 +1,7 @@
-import { OpenAPIGenerator, type OpenAPISpec } from "./generator";
+import { OpenAPIGenerator, type OpenAPIGeneratorContext, type OpenAPISpec } from "./generator";
 import { APITypeGenerator } from "../type-generator";
 import type { OpenAPIConfig } from "../config";
+import { SCALAR_API_REFERENCE_SCRIPT } from "./scalar-assets";
 
 function escapeHTML(value: string): string {
   return value
@@ -26,7 +27,11 @@ export function renderOpenAPIReferenceHTML(spec: OpenAPISpec, config: OpenAPICon
       id="api-reference"
       data-url="data:application/json;base64,${Buffer.from(JSON.stringify(spec)).toString("base64")}"
     ></script>
-    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script
+      src="${SCALAR_API_REFERENCE_SCRIPT.url}"
+      integrity="${SCALAR_API_REFERENCE_SCRIPT.integrity}"
+      crossorigin="anonymous"
+    ></script>
   </body>
 </html>
     `;
@@ -39,11 +44,15 @@ export class OpenAPIManager {
   private appDir: string;
   private specCache: any = null;
 
-  constructor(appDir: string | readonly string[], config: OpenAPIConfig) {
+  constructor(
+    appDir: string | readonly string[],
+    config: OpenAPIConfig,
+    context: OpenAPIGeneratorContext = {},
+  ) {
     const appDirs = Array.isArray(appDir) ? [...appDir] : [appDir as string];
     this.appDir = appDirs[appDirs.length - 1];
     this.config = config;
-    this.generator = new OpenAPIGenerator(this.appDir, config);
+    this.generator = new OpenAPIGenerator(this.appDir, config, context);
     this.apiTypeGenerator = new APITypeGenerator(appDirs);
   }
 
@@ -71,12 +80,14 @@ export class OpenAPIManager {
   /**
    * Get cached spec or generate new one
    */
-  async getSpec(): Promise<any> {
-    if (this.specCache) {
-      return this.specCache;
-    }
+  async getSpec(requestOrigin?: string): Promise<any> {
+    const spec = this.specCache ?? (await this.generateSpec());
+    if (!requestOrigin || !spec) return spec;
 
-    return await this.generateSpec();
+    return {
+      ...spec,
+      servers: this.generator.resolveServers(requestOrigin),
+    };
   }
 
   /**
@@ -105,7 +116,7 @@ export class OpenAPIManager {
   /**
    * Get the docs route handler
    */
-  getDocsRouteHandler() {
+  getDocsRouteHandler(requestOrigin?: string) {
     return async (req: any, res: any) => {
       try {
         const method = String(req.method || "GET").toUpperCase();
@@ -117,7 +128,7 @@ export class OpenAPIManager {
           return;
         }
 
-        const spec = await this.getSpec();
+        const spec = await this.getSpec(requestOrigin);
 
         if (!spec) {
           res.statusCode = 500;

@@ -5,17 +5,18 @@
   "scripts": {
     "dev": "farm dev",
     "build": "farm build",
+    "start": "node .farm/.output/server/index.mjs",
     "auth:migrate": "node --experimental-strip-types src/lib/migrate-auth.ts",
     "check": "pnpm type-check && pnpm build",
-    "deploy": "farm deploy",
+    "deploy": "farm deploy --vercel",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@farm.js/better-auth": "0.1.0-beta.95",
-    "@farm.js/core": "0.1.0-beta.95",
-    "@farming-labs/docs": "0.2.111",
-    "@farming-labs/farmjs": "0.2.111",
-    "@farming-labs/theme": "0.2.111",
+    "@farm.js/better-auth": "0.1.26",
+    "@farm.js/core": "0.1.26",
+    "@farming-labs/docs": "0.2.121",
+    "@farming-labs/farmjs": "0.2.121",
+    "@farming-labs/theme": "0.2.121",
     "@fontsource-variable/geist": "5.3.0",
     "@fontsource-variable/geist-mono": "5.3.0",
     "better-auth": "1.6.25",
@@ -25,7 +26,9 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@farm.js/cli": "0.1.0-beta.95",
+    "@farm.js/cli": "0.1.26",
+    "@farm.js/devtools": "0.1.26",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "22.20.1",
     "@types/pg": "8.20.0",
     "@types/react": "^19.0.0",

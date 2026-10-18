@@ -111,7 +111,76 @@ const queued = await api.jobs.sendWelcomeEmail.trigger({
 const handleId = queued.data!.handleId;
 ```
 
-The older `{ input, options }` body is still accepted, but the inline shape above is the canonical API.
+When a task takes a scalar input rather than an object, wrap it in `$value` so it stays distinguishable from inline payload fields:
+
+```ts
+const queued = await api.jobs.countTokens.trigger({
+  body: {
+    $value: 42,
+    $options: { tags: ["billing"] },
+  },
+});
+```
+
+Reserved keys are `$`-prefixed (`$value`, `$input`, `$options`, `$schedule`), so an object input is free to use ordinary field names such as `value` or `input` without colliding with the envelope. `$value` is read as the scalar wrapper only when it is the sole payload key; an object that carries other fields is delivered whole. An empty object body delivers `{}`, and a task whose input is an array can send the array as the whole body (or as a batch item).
+
+The older `{ input, options }` body is still accepted but is **deprecated**. The inline shape above,
+with `$input` for collision-prone object inputs, is the canonical API.
+
+If the task input itself has an `input` field, use the explicit `$input` envelope so Farm does not
+confuse the payload with that legacy trigger format:
+
+```ts
+await api.jobs.storeCount.trigger({
+  body: {
+    $input: { input: 5 },
+  },
+});
+```
+
+The same explicit form works for `schedule` (alongside `$schedule`) and for each item in a batch.
+
+### The deprecated `{ input, options }` envelope
+
+The legacy envelope still works, and will keep working for the whole `0.x` line, but it cannot be
+made unambiguous. A body whose only keys are `input` and `options` is read as the envelope, so an
+object input that carries its own `input` field is unwrapped into that field's value instead of being
+delivered whole:
+
+```ts
+// Deprecated. Read as the envelope, so the task receives "digest", not { input: "digest" }.
+await api.jobs.sendDigest.trigger({ body: { input: "digest" } });
+
+// Canonical. The $ prefix is reserved, so this cannot collide with payload data.
+await api.jobs.sendDigest.trigger({ body: { $input: { input: "digest" } } });
+```
+
+A development build logs a one-time warning per operation when a request arrives in the legacy shape.
+The warning names the shape and the replacement and never includes any part of the body, because a job
+payload can carry user data. Production builds stay silent.
+
+`trigger`, `schedule`, and every item in a `batchTrigger` follow the same policy.
+
+### Migrating during a rolling deploy
+
+`$input` is understood only by consumers running this version or later. An older consumer does not
+treat `$input` as reserved, so it delivers `{ $input: ... }` to the task as an ordinary payload field
+and the task sees the wrapper instead of its input.
+
+**Update every consumer before any producer starts sending `$input`.**
+
+| Producer sends                           | Consumer before `$input`         | Consumer on this version                   |
+| ---------------------------------------- | -------------------------------- | ------------------------------------------ |
+| `{ input, options }`                     | Works                            | Works, logs a development warning          |
+| Inline object, no reserved keys          | Works                            | Works                                      |
+| Inline object with its own `input` field | Unwrapped as the envelope        | Unwrapped as the envelope, so use `$input` |
+| `{ $input, $options }`                   | **Delivered as a payload field** | Works                                      |
+
+The third row is the reason for the deprecation: it is wrong on both sides of the deploy, and `$input`
+is the only form that fixes it. The fourth row is the reason for the ordering rule.
+
+Removal is not scheduled within `0.x`. The earliest candidate is the first release after `1.0`, which
+will be announced before it lands.
 
 ## Batch trigger
 
@@ -171,6 +240,8 @@ await api.jobs.sendWelcomeEmail.schedule({
 });
 ```
 
+`$options` launch options (`idempotencyKey`, `tags`, `debounce`) also apply to a schedule. Tags from both are combined, and a value set on `$schedule` wins over the same `$options` field. `$schedule` alone sets the timing.
+
 ```ts
 await api.jobs.sendWelcomeEmail.cancel({
   body: {
@@ -179,7 +250,21 @@ await api.jobs.sendWelcomeEmail.cancel({
 });
 ```
 
-These callers exist in the shared API for both runtimes, but the current Inngest adapter rejects one-off scheduling with `400` and cancellation with `501`. Trigger.dev supports both.
+These callers exist in the shared API for both runtimes. Trigger.dev supports one-off scheduling and cancellation. Inngest supports one-off scheduling by mapping the requested time to the event `ts`, but cancellation remains unsupported and returns `501`.
+
+For Inngest, `at` must be an ISO timestamp with an explicit `Z` or UTC offset. `after` accepts a positive number of milliseconds or a duration ending in `ms`, `s`, `m`, `h`, or `d`. The same formats apply to `$options.delay`: an ISO timestamp is absolute and a number or duration is relative. Farm rejects invalid or past absolute times before contacting Inngest.
+
+Inngest uses `idempotencyKey` as the event `id`. Per-call debounce cannot be represented by an event send; configure [debounce on the Inngest function](https://www.inngest.com/docs/guides/debounce) instead. Farm tags are also unsupported by Inngest event sends. Check `task.capabilities` or use the typed guard before exposing provider-dependent controls:
+
+```ts
+import { supportsJobsRuntimeCapability } from "@farm.js/jobs";
+
+if (supportsJobsRuntimeCapability(task.capabilities, "schedule")) {
+  // Show or call provider-backed scheduling controls.
+}
+```
+
+Inngest documents future event timestamps as scheduling new matching function runs. A function already waiting for that event resumes immediately rather than waiting for the future timestamp. See the [event send reference](https://www.inngest.com/docs/reference/typescript/v3/events/send) for that provider behavior.
 
 The `schedule` field on `task({...})`, including cron and timezone, is exposed as metadata only. It does not create a provider schedule.
 
@@ -210,7 +295,7 @@ task({
 });
 ```
 
-Trigger.dev maps all of these defaults into launch options. Inngest currently accepts only `idempotencyKey`; defining Trigger-only defaults causes integration setup to fail.
+Trigger.dev maps all of these defaults into launch options. Inngest accepts `idempotencyKey`; one-off timing is supplied per call through `schedule` or `$options.delay`. Defining Trigger-only task defaults causes integration setup to fail.
 
 ## Runtime capabilities
 
@@ -220,7 +305,7 @@ Trigger.dev maps all of these defaults into launch options. Inngest currently ac
 | Batch trigger                     | Yes           | Yes                       |
 | Status polling                    | Yes           | Yes                       |
 | Idempotency key                   | Yes           | Yes, sent as the event ID |
-| Delay and one-off schedule        | Yes           | No                        |
+| Delay and one-off schedule        | Yes           | Yes, via the event `ts`   |
 | Debounce and tags                 | Yes           | No                        |
 | Queue and retry defaults          | Yes           | No                        |
 | TTL and concurrency key           | Yes           | No                        |

@@ -23,7 +23,11 @@ export { unwrapMiddleware, getFromMiddleware, hasMiddlewareData } from "./helper
 export {
   createProductionMiddlewareRunner,
   applyProductionMiddlewareHeaders,
+  matchesMiddlewareConfig,
 } from "./production-runtime";
+// The segments every route matcher compares against, for a runner outside core
+// that has to agree with the router about which route a request is for.
+export { canonicalizeRequestPathSegments } from "../utils/decode";
 export * from "./vite-plugin";
 
 export type {

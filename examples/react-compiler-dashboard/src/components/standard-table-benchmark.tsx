@@ -712,6 +712,48 @@ export function StandardTableBenchmark() {
           Queue disjoint grow and shrink windows (snapshot control)
         </button>
         <button
+          data-action="table-position-window-reuse"
+          type="button"
+          onClick={() => {
+            const nextSeed = seed + 1;
+            const position = 2_500;
+            const retained = rows
+              .slice(position, position + 48)
+              .toReversed()
+              .map((row) => ({ ...row, label: `${row.label} retained` }));
+            const additions = buildRows(16, nextSeed);
+            const replacements = [...retained, ...additions];
+            setSeed(nextSeed);
+            setRows((current) => current.toSpliced(position, 64, ...replacements));
+            setOperation("reuse and reorder a 64-row runtime window");
+            setRevision((value) => value + 1);
+          }}
+        >
+          Reuse and reorder a 64-row runtime window
+        </button>
+        <button
+          data-action="table-position-window-reuse-snapshot"
+          type="button"
+          onClick={() => {
+            const nextSeed = seed + 1;
+            const position = 2_500;
+            const retained = rows
+              .slice(position, position + 48)
+              .toReversed()
+              .map((row) => ({ ...row, label: `${row.label} retained` }));
+            const additions = buildRows(16, nextSeed);
+            const replacements = [...retained, ...additions];
+            setSeed(nextSeed);
+            setRows((current) => {
+              return current.toSpliced(position, 64, ...replacements);
+            });
+            setOperation("reuse and reorder a 64-row runtime window (snapshot control)");
+            setRevision((value) => value + 1);
+          }}
+        >
+          Reuse and reorder a 64-row runtime window (snapshot control)
+        </button>
+        <button
           data-action="table-position-window-refresh"
           type="button"
           onClick={() => {
@@ -1045,7 +1087,9 @@ export function StandardTableBenchmark() {
           onClick={() => {
             setRows((current) => {
               return current
-                .filter((item) => item.id % 10_000 !== 5_001)
+                .filter((item) => {
+                  return item.id % 10_000 !== 5_001;
+                })
                 .toReversed()
                 .toReversed();
             });
@@ -1061,7 +1105,9 @@ export function StandardTableBenchmark() {
           onClick={() => {
             setRows((current) => {
               const nextRows = current
-                .filter((item) => item.id % 10_000 !== 5_001)
+                .filter((item) => {
+                  return item.id % 10_000 !== 5_001;
+                })
                 .toReversed()
                 .toReversed();
               return nextRows;
@@ -1083,7 +1129,11 @@ export function StandardTableBenchmark() {
               region: "AMR" as const,
               status: "review" as const,
             };
-            setRows((current) => current.filter((row) => row.id % 10_000 !== 7_001));
+            setRows((current) =>
+              current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              }),
+            );
             setRows((current) => [...current, incoming]);
             setOperation("remove and append across queued setters");
             setRevision((value) => value + 1);
@@ -1103,7 +1153,9 @@ export function StandardTableBenchmark() {
               status: "review" as const,
             };
             setRows((current) => {
-              const retained = current.filter((row) => row.id % 10_000 !== 7_001);
+              const retained = current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              });
               return retained;
             });
             setRows((current) => {
@@ -1303,7 +1355,11 @@ export function StandardTableBenchmark() {
               region: "AMR" as const,
               status: "review" as const,
             };
-            setRows((current) => current.filter((row) => row.id % 10_000 !== 7_001));
+            setRows((current) =>
+              current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              }),
+            );
             setRows((current) => [...current, incoming]);
             setRows((current) =>
               current.map((row) =>
@@ -1337,7 +1393,9 @@ export function StandardTableBenchmark() {
               status: "review" as const,
             };
             setRows((current) => {
-              const retained = current.filter((row) => row.id % 10_000 !== 7_001);
+              const retained = current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              });
               return retained;
             });
             setRows((current) => {
@@ -1374,7 +1432,11 @@ export function StandardTableBenchmark() {
               region: "AMR" as const,
               status: "review" as const,
             };
-            setRows((current) => current.filter((row) => row.id % 10_000 !== 7_001));
+            setRows((current) =>
+              current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              }),
+            );
             setRows((current) =>
               current.map((row) =>
                 row.id % 10_000 === 5_001
@@ -1401,7 +1463,9 @@ export function StandardTableBenchmark() {
               status: "review" as const,
             };
             setRows((current) => {
-              const retained = current.filter((row) => row.id % 10_000 !== 7_001);
+              const retained = current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              });
               return retained;
             });
             setRows((current) => {
@@ -1424,7 +1488,11 @@ export function StandardTableBenchmark() {
           data-action="table-map-structural-reorder-pipeline"
           type="button"
           onClick={() => {
-            setRows((current) => current.filter((row) => row.id % 10_000 !== 7_001));
+            setRows((current) =>
+              current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              }),
+            );
             setRows((current) =>
               current.map((row) =>
                 row.id % 10_000 === 5_001
@@ -1445,7 +1513,9 @@ export function StandardTableBenchmark() {
           type="button"
           onClick={() => {
             setRows((current) => {
-              const retained = current.filter((row) => row.id % 10_000 !== 7_001);
+              const retained = current.filter((row) => {
+                return row.id % 10_000 !== 7_001;
+              });
               return retained;
             });
             setRows((current) => {
@@ -1911,7 +1981,11 @@ export function StandardTableBenchmark() {
           onClick={() => {
             setRows((current) => {
               const target = current[Math.floor(current.length / 2)];
-              return target ? current.filter((item) => item.id !== target.id) : current;
+              return target
+                ? current.filter((item) => {
+                    return item.id !== target.id;
+                  })
+                : current;
             });
             setOperation("remove row (snapshot control)");
             setRevision((value) => value + 1);
@@ -1959,13 +2033,14 @@ export function StandardTableBenchmark() {
           type="button"
           onClick={() => {
             setRows((current) => {
-              return current
+              const next = current
                 .map((row, index) =>
                   index % 10 === 0 ? { ...row, label: `${row.label} reviewed` } : row,
                 )
                 .map((row, index) =>
                   index % 10 === 0 ? { ...row, amount: row.amount + 1 } : row,
                 );
+              return next;
             });
             setOperation("review and reprice every 10th (snapshot control)");
             setRevision((value) => value + 1);
@@ -2228,7 +2303,9 @@ export function StandardTableBenchmark() {
                     type="button"
                     onClick={() => {
                       setRows((current) => {
-                        return current.filter((item) => item.id !== row.id);
+                        return current.filter((item) => {
+                          return item.id !== row.id;
+                        });
                       });
                       setOperation("remove row");
                       setRevision((value) => value + 1);

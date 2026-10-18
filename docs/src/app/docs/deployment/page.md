@@ -27,14 +27,19 @@ export default defineConfig({
 
 ## First-class targets
 
-| Target     | Preset           | Default output |
-| ---------- | ---------------- | -------------- |
-| vercel     | vercel           | .vercel/output |
-| cloudflare | cloudflare-pages | .output        |
-| netlify    | netlify          | .output        |
-| node       | node-server      | .output        |
+| Target     | Preset           | Default output                         |
+| ---------- | ---------------- | -------------------------------------- |
+| vercel     | vercel           | `.vercel/output`                       |
+| cloudflare | cloudflare-pages | `.farm/.output`                        |
+| netlify    | netlify          | `dist` + `.netlify/functions-internal` |
+| node       | node-server      | `.farm/.output`                        |
 
 These targets get the most polished Farm defaults. They map `deploy.target` to a Nitro preset, output directory, and the matching `farm deploy` command when Farm has a deploy wrapper for that platform.
+
+When no target or preset is configured, Farm recognizes platform CI through `VERCEL`, `NETLIFY`,
+and `CF_PAGES`. Detection is enabled only by the values `1` or `true` (case-insensitive); unset,
+empty, `0`, `false`, and other values do not select a platform. An explicit target, preset, or CLI
+override remains authoritative.
 
 ### Immutable fingerprinted assets on Vercel
 
@@ -51,12 +56,12 @@ are still served directly from the CDN and never enter the Farm server function.
 
 Use `deploy.target` when you want one config file to control the platform output. Farm maps that target to the Nitro preset, default output directory, and deploy command shape.
 
-| Platform         | Config                 | Build command                              | Deploy command                  | Output to inspect |
-| ---------------- | ---------------------- | ------------------------------------------ | ------------------------------- | ----------------- |
-| Vercel           | `target: "vercel"`     | `FARM_DEPLOY_TARGET=vercel farm build`     | `farm deploy --vercel --prod`   | `.vercel/output`  |
-| Cloudflare Pages | `target: "cloudflare"` | `FARM_DEPLOY_TARGET=cloudflare farm build` | `farm deploy --cloudflare`      | `.output/public`  |
-| Netlify          | `target: "netlify"`    | `FARM_DEPLOY_TARGET=netlify farm build`    | `farm deploy --netlify`         | `.output`         |
-| Self-hosted Node | `target: "node"`       | `FARM_DEPLOY_TARGET=node farm build`       | `node .output/server/index.mjs` | `.output`         |
+| Platform         | Config                 | Build command                              | Deploy command                        | Output to inspect                      |
+| ---------------- | ---------------------- | ------------------------------------------ | ------------------------------------- | -------------------------------------- |
+| Vercel           | `target: "vercel"`     | `FARM_DEPLOY_TARGET=vercel farm build`     | `farm deploy --vercel --prod`         | `.vercel/output`                       |
+| Cloudflare Pages | `target: "cloudflare"` | `FARM_DEPLOY_TARGET=cloudflare farm build` | `farm deploy --cloudflare`            | `.farm/.output`                        |
+| Netlify          | `target: "netlify"`    | `FARM_DEPLOY_TARGET=netlify farm build`    | `farm deploy --netlify`               | `dist` + `.netlify/functions-internal` |
+| Self-hosted Node | `target: "node"`       | `FARM_DEPLOY_TARGET=node farm build`       | `node .farm/.output/server/index.mjs` | `.farm/.output`                        |
 
 **farm.config.ts**
 
@@ -88,7 +93,7 @@ export default defineConfig({
     "build:cloudflare": "FARM_DEPLOY_TARGET=cloudflare farm build",
     "build:netlify": "FARM_DEPLOY_TARGET=netlify farm build",
     "build:self-host": "FARM_DEPLOY_TARGET=node farm build",
-    "start:self-host": "node .output/server/index.mjs",
+    "start:self-host": "node .farm/.output/server/index.mjs",
     "deploy:vercel": "farm deploy --vercel --prod",
     "deploy:cloudflare": "farm deploy --cloudflare",
     "deploy:netlify": "farm deploy --netlify"
@@ -103,6 +108,8 @@ The same shape lives in `examples/deployment-presets` so the preset behavior can
 Farm installs client-side chunk recovery automatically in the generated browser runtime. When the browser fails to load a JavaScript or CSS chunk after a deployment, Farm reloads the current page once so the app can pick up the newest asset manifest.
 
 This is meant for stale deploy assets, where a user has an older HTML page open while the server now points at newer chunks. Farm stores a short session guard per page before reloading, so repeated chunk failures do not trap the user in a reload loop. Ordinary runtime errors are left alone and should still be handled with route `error.tsx`, programmatic `error` components, monitoring, and tests.
+
+Farm's browser error overlay and its source-map diagnostics are development-only and are excluded from production client bundles. Production client-plugin error hooks and chunk recovery remain available; no configuration change is required.
 
 ## Rolling deployment safety
 
@@ -179,9 +186,9 @@ pnpm build
 HOST=0.0.0.0 PORT=3000 pnpm start
 ```
 
-`farm start` is equivalent for the `node` target and adds `--port`/`--host` flags plus clear errors when the configured target has no local server.
+`farm start` is equivalent for the `node` target and adds `--port`/`--host` flags plus clear errors when the configured target has no local server. It runs through the `farm` CLI, which is a devDependency, so on hosts that remove devDependencies before starting the app, use the `node` command instead. New starters use it as their `start` script.
 
-For Docker, copy the app, install production dependencies, run `farm build`, expose the selected port, and start `node .output/server/index.mjs`. For a VPS, run the same start command behind nginx, Caddy, systemd, or a process manager such as PM2. Environment variables should be provided by the host at runtime, not committed into the bundle.
+For Docker, copy the app, install its dependencies including devDependencies (`farm build` needs the CLI), run `farm build`, expose the selected port, and start `node .output/server/index.mjs`. The generated server is self-contained, so the runtime image only needs the output directory, not `node_modules`. For a VPS, run the same start command behind nginx, Caddy, systemd, or a process manager such as PM2. Environment variables should be provided by the host at runtime, not committed into the bundle.
 
 ## Nitro preset pass-through
 
@@ -210,6 +217,12 @@ farm build --preset my-company-preset
 ```
 
 For built-in Nitro presets, the generated output follows Nitro's provider shape. For custom presets, Farm passes the preset name through to Nitro, so the preset must be installed or otherwise resolvable by Nitro in the project.
+
+### Nitro version compatibility
+
+Farm pins the Nitro and H3 versions used by its production adapters. Do not override either package independently: Nitro beta releases can change builder exports, runtime entry points, event shapes, and provider output layouts together.
+
+The current Farm dependency uses a patched Nitro v3 beta newer than `3.0.260429-beta`, the first v3 release containing the wildcard-redirect and encoded proxy-traversal fixes. Applications upgrading from a Farm release that used the Nitro v3 alpha should remove any app-level Nitro override or alpha compatibility patch, reinstall dependencies to refresh the lockfile, and rerun type-checking plus a production build for every deployment target. Applications without those overrides need no configuration migration.
 
 ## Nitro coverage
 
@@ -250,11 +263,19 @@ export default defineConfig({
 });
 ```
 
-When `target` is `vercel`, Farm uses the Vercel Nitro preset and writes Build Output API output to `.vercel/output`. Other targets default to `.farm/.output` unless you override `output` or `outputDir`. When `preset` is set directly, Farm passes that value through to Nitro.
+When `target` is `vercel`, Farm uses the Vercel Nitro preset and writes Build Output API output to `.vercel/output`. Netlify writes the server function to `.netlify/functions-internal`. Other targets default to `.farm/.output` unless you override `output` or `outputDir`. When `preset` is set directly, Farm passes that value through to Nitro.
 
 `farm deploy --vercel` requires `.vercel/output` because the Vercel CLI reads that fixed directory
 for `--prebuilt` uploads. Keep the default output for Farm-managed Vercel deploys. A custom Vercel
 output directory is only suitable when another deployment workflow uploads the build itself.
+
+For Netlify, Nitro writes static assets to `dist` and the server function to
+`.netlify/functions-internal`, the directory Netlify reads functions from without configuration. A
+Git-connected Netlify site needs only `farm build` as the build command and `dist` as the publish
+directory. `farm deploy --netlify` uploads the same output with `--no-build`, so the provider deploys
+the exact artifact Farm just verified instead of starting a second build. With a custom Netlify
+`output`, set `[build] functions` to `<output>/server` in `netlify.toml`.
+`farm deploy --netlify` passes that path for you.
 
 ## Override output
 
@@ -276,15 +297,15 @@ pages with `dynamic = "force-static"` or `routeRules` as described in
 
 ## Platform deploys
 
-| Command                                | What it expects                                         |
-| -------------------------------------- | ------------------------------------------------------- |
-| `FARM_DEPLOY_TARGET=vercel farm build` | Builds `.vercel/output` for Vercel prebuilt deploys.    |
-| `FARM_DEPLOY_TARGET=node farm build`   | Builds `.output/server/index.mjs` for self-hosted Node. |
-| `farm build --preset <nitro-preset>`   | Builds with any Nitro preset that Nitro can resolve.    |
-| `farm deploy --vercel`                 | Uses `vercel deploy --prebuilt`.                        |
-| `farm deploy --cloudflare`             | Deploys the Cloudflare Pages output with Wrangler.      |
-| `farm deploy --netlify`                | Deploys the Netlify output with Netlify CLI.            |
-| `farm deploy --plan`                   | Prints the resolved build and deploy operations only.   |
+| Command                                | What it expects                                               |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `FARM_DEPLOY_TARGET=vercel farm build` | Builds `.vercel/output` for Vercel prebuilt deploys.          |
+| `FARM_DEPLOY_TARGET=node farm build`   | Builds `.farm/.output/server/index.mjs` for self-hosted Node. |
+| `farm build --preset <nitro-preset>`   | Builds with any Nitro preset that Nitro can resolve.          |
+| `farm deploy --vercel`                 | Uses `vercel deploy --prebuilt`.                              |
+| `farm deploy --cloudflare`             | Deploys the Cloudflare Pages output with Wrangler.            |
+| `farm deploy --netlify`                | Deploys the Netlify output with Netlify CLI.                  |
+| `farm deploy --plan`                   | Prints the resolved build and deploy operations only.         |
 
 For other Nitro presets, use the host's documented deploy command or CI workflow after `farm build` writes the Nitro output.
 
@@ -293,6 +314,16 @@ Use `farm deploy --plan` before a release when you want to verify the selected t
 ## Environment variables
 
 Keep environment variables in the platform's environment manager or local `.env` files. Farm config can reference `process.env`, and integrations should validate required provider keys during setup.
+
+Server values declared under `env.server` are validated when the app builds, but they are not
+stored in the build output. The production server reads them from its own environment when code
+calls `getEnv` or `serverEnv`, so set them wherever the server runs, and a restart picks up a
+rotated secret. On Cloudflare Workers, Farm also reads the worker's bindings and secrets. A value
+read at runtime keeps the type its parser produced at build time, such as a number or boolean. When a
+parser does more than convert the raw string to a string, number, boolean, or JSON value, such as
+splitting a list or scaling a number, Farm cannot repeat it at runtime, so that parsed value stays in
+the build output. Values declared under `env.public` are part of the client bundle, so never put a
+secret there.
 
 ```ts
 export default defineConfig({
@@ -304,10 +335,44 @@ export default defineConfig({
 });
 ```
 
+## Preview deployments
+
+Set `agent.noindexPreviews` to keep preview deployments out of search results:
+
+```ts
+export default defineConfig({
+  agent: { noindexPreviews: true },
+});
+```
+
+On a preview, every response from Farm's server (pages, API routes, docs, errors) gets
+`X-Robots-Tag: noindex, nofollow`. Production deployments are unaffected. The option lives with the
+other [agent readiness](/docs/configuration#agent-readiness) settings.
+
+A deployment is a preview when:
+
+| Signal                                      | Where                                             |
+| ------------------------------------------- | ------------------------------------------------- |
+| `FARM_PREVIEW=1` (`0` turns it off)         | Any host, `farm dev`, `farm build`, or the server |
+| `VERCEL_ENV=preview`                        | Vercel previews and custom environments           |
+| `CONTEXT=deploy-preview` or `branch-deploy` | Netlify, with `NETLIFY` set, read at build time   |
+| `IS_PULL_REQUEST=true`                      | Render pull request previews                      |
+
+Farm reads these when it builds and again when the server starts, so a preview build stays one at
+runtime (Netlify sets `CONTEXT` only during the build); an explicit `FARM_PREVIEW` at runtime wins
+over the build. Cloudflare Pages exposes no variable that tells a preview from production, so set
+`FARM_PREVIEW=1` in its preview environment; Cloudflare already sends `X-Robots-Tag: noindex` on
+`*.pages.dev` preview URLs. Run `FARM_PREVIEW=1 farm dev` to check the behavior locally.
+
+Files a platform serves straight from its CDN or static file server, such as prerendered pages and
+assets, do not pass through Farm's server and keep their platform's headers. Vercel, Netlify, and
+Cloudflare Pages already mark their generated preview URLs as noindex; a preview on a custom
+domain only gets the header on responses from Farm's server.
+
 ## Production checklist
 
 - Run `farm build` before `farm deploy`.
-- For self-hosting, run `node .output/server/index.mjs` behind your process manager or container runtime.
+- For self-hosting, run the generated server (`node .farm/.output/server/index.mjs` with the default output directory) behind your process manager or container runtime.
 - Confirm the selected target or preset matches `deploy.target`, `deploy.preset`, or the CLI/env override.
 - For non-first-class platforms, confirm the Nitro preset name and provider deploy command from Nitro's docs.
 - Check generated output exists at the resolved output directory.

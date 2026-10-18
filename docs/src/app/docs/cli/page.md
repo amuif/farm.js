@@ -11,13 +11,13 @@ Use the Farm CLI to run, build, generate types, migrate apps, deploy output, and
 ## Create an app
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-app --template basic --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-preact-app --template basic --renderer preact --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-solid-app --template basic --renderer solid --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-vue-app --template basic --renderer vue --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-svelte-app --template basic --renderer svelte --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta stripe-app --template stripe --typescript
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta --list-templates
+pnpm create @farm.js/app my-app --template basic --typescript
+pnpm create @farm.js/app my-preact-app --template basic --renderer preact --typescript
+pnpm create @farm.js/app my-solid-app --template basic --renderer solid --typescript
+pnpm create @farm.js/app my-vue-app --template basic --renderer vue --typescript
+pnpm create @farm.js/app my-svelte-app --template basic --renderer svelte --typescript
+pnpm create @farm.js/app stripe-app --template stripe --typescript
+pnpm create @farm.js/app --list-templates
 ```
 
 The create-app CLI includes Basic, Farm.js Auth, Better Auth, and one ready-to-configure starter
@@ -39,9 +39,14 @@ React is the default renderer. `--renderer preact`, `--renderer solid`, `--rende
 | farm upgrade --beta              | Upgrade installed Farm packages to the latest beta release.          |
 | farm doctor                      | Inspect a running app, or fall back to project configuration checks. |
 | farm doctor --offline            | Check project files and config without probing a dev server.         |
+| farm doctor --registry           | Verify the public Farm beta tags against the npm registry.           |
 | farm doctor --fix                | Apply safe, additive project corrections.                            |
 | farm explain /products/42        | Explain the files and runtime behavior for one URL.                  |
+| farm agent check                 | Check how AI agents can read and use the running app.                |
 | farm preview                     | Create a public URL for a running local app.                         |
+| farm login                       | Sign in to Farm Preview without starting a preview.                  |
+| farm whoami                      | Show which credential farm preview would use.                        |
+| farm logout                      | Sign out of Farm Preview on this machine.                            |
 | farm generate                    | Generate route/API types and integration schema artifacts.           |
 | farm generate --check            | Fail when committed generated types are stale.                       |
 | farm deploy --plan               | Resolve the deployment plan without executing it.                    |
@@ -49,6 +54,8 @@ React is the default renderer. `--renderer preact`, `--renderer solid`, `--rende
 | farm migrate next --write        | Apply a deterministic Next.js App Router migration.                  |
 | farm migrate tanstack --write    | Apply a deterministic TanStack Router file-route migration.          |
 | farm migrate                     | Run one-shot schema or provider migration commands.                  |
+| farm schema check                | Check every declared table and reference against the live database.  |
+| farm schema migrate --apply      | Create every plugin's tables, dependencies first.                    |
 | farm add integration stripe --ui | Add integration wiring and optional UI.                              |
 | farm cron list                   | List configured UTC schedules and target routes.                     |
 | farm cron run dailyCleanup       | Invoke one cron route on a running app.                              |
@@ -124,9 +131,9 @@ farm migrate tanstack --write
 
 Framework migrations are deterministic codemods. They inspect the project, print a dry-run plan by default, and only write when `--write` is passed. Existing target files are skipped unless `--force` is passed.
 
-The Next.js migrator copies `app` or `src/app` into Farm's `src/app`, creates `farm.config.ts`, creates a minimal root layout when needed, rewrites supported imports from `next/link`, `next/navigation`, and `next/headers`, and updates package scripts to `farm dev`, `farm build`, and `node .output/server/index.mjs`.
+The Next.js migrator copies `app` or `src/app` into Farm's `src/app`, creates `farm.config.ts`, creates a minimal root layout when needed, rewrites supported imports from `next/link`, `next/navigation`, and `next/headers`, and updates package scripts to `farm dev`, `farm build`, and `node .farm/.output/server/index.mjs`.
 
-The TanStack migrator converts file routes from `src/routes` or `routes` into `src/app/**/page.tsx`, maps `$id` to `[id]`, maps `$` to `[...splat]`, and adds a default export for simple `component: ComponentName` route files.
+The TanStack migrator converts file routes from `src/routes` or `routes` into `src/app/**/page.tsx`, maps `$id` to `[id]`, maps `$` to `[...splat]`, adds a default export for simple `component: ComponentName` route files, and updates package scripts to `farm dev`, `farm build`, and `node .farm/.output/server/index.mjs`.
 
 Both migrators leave source files in place and print manual review notes for framework-specific APIs.
 
@@ -175,7 +182,7 @@ farm preview --dry-run
 
 `farm preview` exposes the app that is already running locally. It does not build or deploy the app. Use it when a teammate, webhook provider, OAuth provider, mobile device, or browser automation tool needs a public URL for the current `farm dev` session.
 
-Farm detects the running app on common local ports, or you can pass `--port` / `--url` when the app is running somewhere specific. By default `@farm.js/tunnel` tries to open one outbound WebSocket to the hosted Farm Preview relay and returns a URL such as `https://stripe-webhook.preview.farming-labs.dev`. During the relay rollout, the CLI falls back to compatibility gateway polling if the native connection is unavailable.
+Farm detects the running app on common local ports, or you can pass `--port` / `--url` when the app is running somewhere specific. By default `@farm.js/tunnel` tries to open one outbound WebSocket to the hosted Farm Preview relay and returns a URL such as `https://stripe-webhook.preview.farmjs.dev`. During the relay rollout, the CLI falls back to compatibility gateway polling if the native connection is unavailable.
 
 The preview terminal logs forwarded traffic:
 
@@ -186,6 +193,8 @@ POST /api/auth/login -> 200 580ms
 
 The local `farm dev` terminal logs the matched page, API route, and middleware work. Client components hydrate through the same public URL; early button clicks are queued and replayed after hydration so slow dev-mode module loading does not lose the click.
 
+`farm login`, `farm whoami` and `farm logout` manage the saved Farm Preview sign-in without starting a preview.
+
 See [Instant Preview](/docs/preview) for webhook setup, custom gateway configuration, troubleshooting, and security notes.
 
 ## Diagnose the app
@@ -195,19 +204,52 @@ farm doctor
 farm doctor --port 4319
 farm doctor --url http://localhost:4319
 farm doctor --offline
+farm doctor --offline --registry
 farm doctor --fix
 farm doctor --json
 ```
 
 `farm doctor` first probes the running app at `http://localhost:3000`. A live app provides the most accurate result because Farm can report its resolved routes, API methods, middleware, integrations, storage mounts, schedules, workflows, layers, and deployment runtime. When no app is running, the command falls back to config and filesystem checks.
 
-Pass `--port` or `--url` when the app runs somewhere else. An explicitly requested runtime that cannot be reached is reported as a warning before the project checks. Use `--offline` to skip the network probe entirely.
+Pass `--port` or `--url` when the app runs somewhere else. An explicitly requested runtime that cannot be reached is reported as a warning before the project checks. Use `--offline` to skip the runtime probe. Add `--registry` to verify that the public `@farm.js/core` and `@farm.js/create-app` beta tags resolve and to warn when an exact Farm dependency is stale.
 
-The command exits with a non-zero status only when a check fails. Warnings keep a zero exit status, so CI can distinguish broken configuration from production-readiness advice. `--json` prints the complete report without terminal formatting.
+Project checks cover Node and pnpm support, package-manager and workspace resolution, generated type freshness, selected renderer and integration entrypoints, routing, deployment, storage, and schedules. The command is read-only by default: it does not install dependencies, run package-manager scripts, update generated files, or contact providers. Registry access is opt-in.
+
+The command exits with a non-zero status only when a check fails. Warnings keep a zero exit status, so CI can distinguish broken configuration from production-readiness advice. `--json` prints the complete report without terminal formatting and preserves the same exit-code contract.
 
 `farm doctor --fix` applies only corrections Farm can make without replacing application code. Today that means creating a missing `src/app/layout.tsx`; an existing file is never overwritten. The command reruns diagnostics after each correction and reports exactly which files it created.
 
-See [DevTools and Doctor](/docs/devtools) for the browser dashboard, diagnostics, JSON contract, and CI examples.
+See [Doctor](/docs/doctor) for diagnostics, the JSON contract, and CI examples, and [Built-in DevTools](/docs/devtools) for the browser dashboard.
+
+## Check agent readiness
+
+```bash
+farm agent check
+farm agent check https://acme.com
+farm agent check http://localhost:3000/docs --path /getting-started
+farm agent check --mcp /api/tools --json
+```
+
+`farm agent check` probes a running app over HTTP the way an AI agent meets it, so it works the
+same against `farm dev`, `farm start`, or a deployed site. It defaults to `http://localhost:3000`;
+a URL with a path is treated as the app's `basePath`, and `--path` picks the page to check.
+
+| Check               | Passes when                                                                                           |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| Page metadata       | The page has a title, description, canonical link, and `lang`; JSON-LD is reported separately.        |
+| Markdown mirror     | The page advertises its `.md` mirror, the mirror answers, and a missing `.md` answers a Markdown 404. |
+| Content negotiation | `Accept: text/markdown` on the page URL returns Markdown. Prerendered pages report this as info.      |
+| Partial reads       | The mirror serves `?outline`, `?section`, `?max_tokens`, and ETags.                                   |
+| llms.txt            | `/llms.txt` lists pages, and `/llms-full.txt` answers.                                                |
+| Crawlers            | `/robots.txt` exists and does not block every agent; `/sitemap.xml` answers.                          |
+| API catalog         | `/.well-known/api-catalog` is an RFC 9727 Linkset, and the OpenAPI spec it lists answers.             |
+| MCP                 | The MCP endpoint (from the catalog, `--mcp`, or `/api/mcp`) answers a 401 with `WWW-Authenticate`.    |
+
+A surface that is off is reported as info or a warning with the config that turns it on, such as
+`agent: { llmsTxt: true }`. A surface that is advertised but broken, such as an OpenAPI spec listed in
+the catalog that does not answer, fails, and the command exits with code 1. `--json` prints the
+report for CI. The MCP check sends one unauthenticated `initialize` request; every other check is a
+`GET` or `HEAD`.
 
 ## Explain a route
 

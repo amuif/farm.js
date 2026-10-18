@@ -1,8 +1,11 @@
+import { isFarmProductionDeploymentEnvironment } from "./deployment-environment";
 import { FARM_VERSION } from "./version";
 
 export const FARM_PRODUCTION_SITE_TELEMETRY_SCHEMA_VERSION = 1 as const;
 export const FARM_PRODUCTION_SITE_TELEMETRY_EVENT_TYPE = "production_site_active" as const;
 export const FARM_PRODUCTION_SITE_TELEMETRY_PACKAGE_NAME = "@farm.js/core" as const;
+export const FARM_PRODUCTION_SITE_ATTESTATION_PATH = "/.well-known/farm-telemetry" as const;
+export const FARM_PRODUCTION_SITE_ATTESTATION_EVENT_TYPE = "production_site_attestation" as const;
 
 const DEFAULT_SITE_TELEMETRY_ENDPOINT = "https://farmjs.dev/api/telemetry/v1/sites";
 const REQUEST_TIMEOUT_MS = 3_000;
@@ -15,6 +18,15 @@ export interface FarmProductionSiteTelemetryPayload {
   schemaVersion: typeof FARM_PRODUCTION_SITE_TELEMETRY_SCHEMA_VERSION;
   eventType: typeof FARM_PRODUCTION_SITE_TELEMETRY_EVENT_TYPE;
   siteUrl: string;
+  packageName: typeof FARM_PRODUCTION_SITE_TELEMETRY_PACKAGE_NAME;
+  packageVersion: string;
+  renderer: string;
+  deployTarget: string;
+}
+
+export interface FarmProductionSiteAttestation {
+  schemaVersion: typeof FARM_PRODUCTION_SITE_TELEMETRY_SCHEMA_VERSION;
+  eventType: typeof FARM_PRODUCTION_SITE_ATTESTATION_EVENT_TYPE;
   packageName: typeof FARM_PRODUCTION_SITE_TELEMETRY_PACKAGE_NAME;
   packageVersion: string;
   renderer: string;
@@ -37,6 +49,7 @@ interface OriginReportState {
 }
 
 export interface FarmProductionSiteReporter {
+  handleAttestation(request: Request): Response | null;
   report(requestUrl: string | URL, waitUntil?: (promise: Promise<unknown>) => void): void;
 }
 
@@ -97,11 +110,51 @@ export function createFarmProductionSiteReporter(
   const retryIntervalMs = options.retryIntervalMs ?? RETRY_INTERVAL_MS;
   const send = options.fetch ?? globalThis.fetch;
   const reportStates = new Map<string, OriginReportState>();
+  const attestation: FarmProductionSiteAttestation = {
+    schemaVersion: FARM_PRODUCTION_SITE_TELEMETRY_SCHEMA_VERSION,
+    eventType: FARM_PRODUCTION_SITE_ATTESTATION_EVENT_TYPE,
+    packageName: FARM_PRODUCTION_SITE_TELEMETRY_PACKAGE_NAME,
+    packageVersion: sanitizeDetail(FARM_VERSION, "unknown"),
+    renderer: sanitizeDetail(options.renderer, "custom"),
+    deployTarget: sanitizeDetail(options.deployTarget, "custom"),
+  };
 
   return {
+    handleAttestation(request) {
+      if (productionTelemetryDisabled()) return null;
+
+      let pathname: string;
+      try {
+        pathname = new URL(request.url).pathname;
+      } catch {
+        return null;
+      }
+      if (pathname !== FARM_PRODUCTION_SITE_ATTESTATION_PATH) return null;
+
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return new Response("Method Not Allowed", {
+          status: 405,
+          headers: {
+            allow: "GET, HEAD",
+            "cache-control": "no-store",
+            "content-type": "text/plain; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+
+      return new Response(request.method === "HEAD" ? null : JSON.stringify(attestation), {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "application/json; charset=utf-8",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    },
     report(requestUrl, waitUntil) {
       if (productionTelemetryDisabled()) return;
-      if (!isProductionDeploymentEnvironment()) {
+      if (!isFarmProductionDeploymentEnvironment()) {
         debug("production-site check-in skipped outside a production deployment");
         return;
       }
@@ -125,9 +178,9 @@ export function createFarmProductionSiteReporter(
         eventType: FARM_PRODUCTION_SITE_TELEMETRY_EVENT_TYPE,
         siteUrl,
         packageName: FARM_PRODUCTION_SITE_TELEMETRY_PACKAGE_NAME,
-        packageVersion: sanitizeDetail(FARM_VERSION, "unknown"),
-        renderer: sanitizeDetail(options.renderer, "custom"),
-        deployTarget: sanitizeDetail(options.deployTarget, "custom"),
+        packageVersion: attestation.packageVersion,
+        renderer: attestation.renderer,
+        deployTarget: attestation.deployTarget,
       };
       state.pending = deliver(send, resolveSiteTelemetryEndpoint(options.endpoint), payload)
         .then((delivered) => {
@@ -216,27 +269,6 @@ function productionTelemetryDisabled(): boolean {
   if (process.env.DO_NOT_TRACK !== undefined && !isFalse(process.env.DO_NOT_TRACK)) return true;
   if (isTrue(process.env.FARM_TELEMETRY_DISABLED)) return true;
   return isFalse(process.env.FARM_TELEMETRY);
-}
-
-/**
- * Vercel exposes the deployment environment at build and runtime. Only its
- * production environment represents a production site; preview, development,
- * and custom targets must not create dashboard entries. Other deployment
- * providers remain eligible when no Vercel environment metadata is present.
- */
-function isProductionDeploymentEnvironment(): boolean {
-  const environment = normalizeEnvironment(process.env.VERCEL_ENV);
-  const targetEnvironment = normalizeEnvironment(process.env.VERCEL_TARGET_ENV);
-
-  if (!environment && !targetEnvironment) return true;
-  if (environment && environment !== "production") return false;
-  if (targetEnvironment && targetEnvironment !== "production") return false;
-  return true;
-}
-
-function normalizeEnvironment(value: string | undefined): string | undefined {
-  const normalized = value?.trim().toLowerCase();
-  return normalized || undefined;
 }
 
 function sanitizeDetail(value: string | undefined, fallback: string): string {

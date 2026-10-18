@@ -178,24 +178,23 @@ const COMPILER_KEYED_COMMITTED_ITEM_SNAPSHOTS = /* @__PURE__ */ new WeakMap<
   object,
   readonly unknown[]
 >();
-const NATIVE_ARRAY_PROTOTYPE = Array.prototype;
-const NATIVE_ARRAY_ITERATOR = Array.prototype[Symbol.iterator];
-const NATIVE_ARRAY_FILTER = Array.prototype.filter;
-const NATIVE_ARRAY_MAP = Array.prototype.map;
-const NATIVE_ARRAY_SLICE = Array.prototype.slice;
-const NATIVE_ARRAY_TO_SPLICED = (
-  Array.prototype as unknown as { toSpliced?: (...args: readonly unknown[]) => unknown }
-).toSpliced;
-const NATIVE_ARRAY_WITH = (
-  Array.prototype as unknown as { with?: (...args: readonly unknown[]) => unknown }
-).with;
-const NATIVE_ARRAY_TO_REVERSED = (
-  Array.prototype as unknown as { toReversed?: (...args: readonly unknown[]) => unknown }
-).toReversed;
-const NATIVE_ARRAY_TO_SORTED = (
-  Array.prototype as unknown as { toSorted?: (...args: readonly unknown[]) => unknown }
-).toSorted;
-const NATIVE_REFLECT_APPLY = Reflect.apply;
+const NATIVE_ARRAY_PROTOTYPE = /* @__PURE__ */ (() => Array.prototype)();
+const NATIVE_ARRAY_ITERATOR = /* @__PURE__ */ (() => Array.prototype[Symbol.iterator])();
+const NATIVE_ARRAY_FILTER = /* @__PURE__ */ (() => Array.prototype.filter)();
+const NATIVE_ARRAY_MAP = /* @__PURE__ */ (() => Array.prototype.map)();
+const NATIVE_ARRAY_SLICE = /* @__PURE__ */ (() => Array.prototype.slice)();
+const NATIVE_ARRAY_TO_SPLICED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toSpliced?: (...args: readonly unknown[]) => unknown })
+    .toSpliced)();
+const NATIVE_ARRAY_WITH = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { with?: (...args: readonly unknown[]) => unknown }).with)();
+const NATIVE_ARRAY_TO_REVERSED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toReversed?: (...args: readonly unknown[]) => unknown })
+    .toReversed)();
+const NATIVE_ARRAY_TO_SORTED = /* @__PURE__ */ (() =>
+  (Array.prototype as unknown as { toSorted?: (...args: readonly unknown[]) => unknown })
+    .toSorted)();
+const NATIVE_REFLECT_APPLY = /* @__PURE__ */ (() => Reflect.apply)();
 
 function compilerObject(value: unknown): object | undefined {
   return (typeof value === "object" && value !== null) || typeof value === "function"
@@ -223,7 +222,7 @@ function commitCompilerKeyedCollection(value: unknown): object | undefined {
 
 function commitCompilerKeyedCollectionWithItemSnapshot(
   value: unknown,
-  instances?: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances?: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
 ): object | undefined {
   const token = commitCompilerKeyedCollection(value);
   if (!token) return undefined;
@@ -379,7 +378,9 @@ function compilerKeyedArrayFilterSurvivorsFromUpdate(
     updates.push(current);
   }
 
-  let survivors = Array.from({ length: expectedLength }, (_, index) => index);
+  // oxlint-disable-next-line unicorn/no-new-array -- Known row count; avoid Array.from mapping callbacks.
+  let survivors = new Array<number>(expectedLength);
+  for (let index = 0; index < expectedLength; index += 1) survivors[index] = index;
   let keysStable = true;
   for (let updateIndex = updates.length - 1; updateIndex >= 0; updateIndex -= 1) {
     const current = updates[updateIndex];
@@ -866,7 +867,7 @@ function compilerKeyedArrayWindowReplacements(
   value: unknown,
   sourceToken: object | undefined,
   expectedLength: number,
-): readonly CompilerKeyedArrayWindowReplaceHint[] | undefined {
+): CompilerKeyedArrayWindowReplaceHint[] | undefined {
   const target = compilerObject(value);
   if (!target || !sourceToken || !Array.isArray(value)) return undefined;
   const update = COMPILER_KEYED_ARRAY_WINDOW_REPLACEMENTS.get(target);
@@ -2863,6 +2864,10 @@ export interface CompilerHostElement {
 
 export type CompilerKeyedRowElement = CompilerHostElement;
 
+// Shared by every delegated row onChange so React sees a handler without a
+// per-row allocation; the container's delegated listener does the work.
+const delegatedRowChangePlaceholder: React.EventHandler<React.SyntheticEvent> = () => undefined;
+
 export interface CompilerKeyedRowEvent {
   name: string;
   /** Host-element path relative to the keyed row root. */
@@ -3032,6 +3037,11 @@ export interface CompilerKeyedRowsBlockProps {
   conditionals?: readonly CompilerKeyedRowConditional[];
   /** Row descriptors contain compiler-owned nested host scopes. */
   hostBlocks?: boolean;
+  /**
+   * Compiler proof that every value differing between rows is a binding, so a
+   * row can be cloned from one already built with its bindings reapplied.
+   */
+  cloneRows?: boolean;
 }
 
 export interface CompilerKeyedRange {
@@ -3135,7 +3145,9 @@ function getCompilerHmrRegistry(): CompilerHmrRegistry {
 }
 
 function renderTextValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map(renderTextValue).join("");
+  if (Array.isArray(value)) {
+    return value.length === 1 ? renderTextValue(value[0]) : value.map(renderTextValue).join("");
+  }
   if (value === null || value === undefined || typeof value === "boolean") return "";
   return String(value);
 }
@@ -3295,8 +3307,12 @@ function updateSelectValue(element: HTMLSelectElement, value: unknown): void {
   if (fallback) fallback.selected = true;
 }
 
+function compilerAttributeName(name: string): string {
+  return name === "className" ? "class" : name === "htmlFor" ? "for" : name;
+}
+
 function updateAttribute(element: Element, name: string, value: unknown): void {
-  const attributeName = name === "className" ? "class" : name === "htmlFor" ? "for" : name;
+  const attributeName = compilerAttributeName(name);
   const stringifiesBoolean = attributeName.startsWith("data-") || attributeName.startsWith("aria-");
 
   if (name === "value" && (isInputElement(element) || isTextAreaElement(element))) {
@@ -3337,8 +3353,10 @@ function updateAttribute(element: Element, name: string, value: unknown): void {
 type CompilerBlockRefresh = (afterCommit?: () => void, dirtyState?: ReadonlySet<number>) => void;
 
 export interface CompilerRuntimeFeatureOwner {
-  setRoot(id: number, root: Element | null): void;
+  setRoot(id: number, root: Element | null, expectedRoot?: Element | null): void;
   subscribe(id: number, refresh: CompilerBlockRefresh): () => void;
+  /** Opaque identity used to detect compatible definition replacement. */
+  getDefinitionVersion?(): unknown;
 }
 
 export interface CompilerRuntimeFeature {
@@ -3348,7 +3366,7 @@ export interface CompilerRuntimeFeature {
 }
 
 interface ConditionalBlockOwner {
-  setRoot(id: number, root: Element | null): void;
+  setRoot(id: number, root: Element | null, expectedRoot?: Element | null): void;
   subscribe(id: number, refresh: CompilerBlockRefresh): () => void;
 }
 
@@ -3359,9 +3377,20 @@ function createConditionalBlockComponent(
     static displayName = "FarmCompiledConditionalBlock";
 
     private unsubscribe: (() => void) | undefined;
+    private root: Element | null = null;
+    private rootId: number | undefined;
 
     private captureRoot = (root: Element | null) => {
+      const previousRoot = this.root;
+      const previousId = this.rootId;
+      this.root = root;
+      if (!root) {
+        if (previousId !== undefined) owner.setRoot(previousId, null, previousRoot);
+        this.rootId = undefined;
+        return;
+      }
       owner.setRoot(this.props.id, root);
+      this.rootId = this.props.id;
     };
 
     private refresh = (afterCommit?: () => void) => {
@@ -3379,13 +3408,17 @@ function createConditionalBlockComponent(
     componentDidUpdate(previous: CompilerConditionalBlockProps): void {
       if (previous.id === this.props.id) return;
       this.unsubscribe?.();
-      owner.setRoot(previous.id, null);
+      if (this.root && this.rootId !== this.props.id) {
+        if (this.rootId !== undefined) owner.setRoot(this.rootId, null, this.root);
+        owner.setRoot(this.props.id, this.root);
+        this.rootId = this.props.id;
+      }
       this.subscribe();
     }
 
     componentWillUnmount(): void {
       this.unsubscribe?.();
-      owner.setRoot(this.props.id, null);
+      // React 18 lifecycle replay keeps refs attached; captureRoot owns deregistration.
     }
 
     render(): React.ReactNode {
@@ -3545,39 +3578,94 @@ function materializeCompilerHostChildren(descriptor: CompilerHostElement): reado
   return children;
 }
 
-function collectCompilerHostBlockIds(descriptor: CompilerHostElement, ids: Set<number>): void {
-  for (const child of flattenCompilerHostElements(descriptor.children)) {
-    collectCompilerHostBlockIds(child, ids);
+function collectActiveCompilerHostBlockIds(
+  descriptor: CompilerHostElement,
+  ids: Set<number>,
+): void {
+  for (const child of flattenCompilerHostElements(materializeCompilerHostChildren(descriptor))) {
+    collectActiveCompilerHostBlockIds(child, ids);
   }
   const block = descriptor.block;
-  if (!block || ids.has(block.id)) return;
+  if (!block) return;
   ids.add(block.id);
-  if (block.kind === "conditional-ranges") {
-    for (const range of block.ranges) {
-      if (range.truthy) collectCompilerHostBlockIds(range.truthy.create(), ids);
-      if (range.falsy) collectCompilerHostBlockIds(range.falsy.create(), ids);
+}
+
+function reconcileCompilerFallbackSubscriptions(
+  owner: Pick<ConditionalBlockOwner, "subscribe">,
+  subscriptions: Map<number, () => void>,
+  ids: ReadonlySet<number>,
+  refresh: CompilerBlockRefresh,
+): void {
+  for (const [id, unsubscribe] of subscriptions) {
+    if (ids.has(id)) continue;
+    unsubscribe();
+    subscriptions.delete(id);
+  }
+  for (const id of ids) {
+    if (!subscriptions.has(id)) subscriptions.set(id, owner.subscribe(id, refresh));
+  }
+}
+
+function clearCompilerFallbackSubscriptions(subscriptions: Map<number, () => void>): void {
+  for (const unsubscribe of subscriptions.values()) unsubscribe();
+  subscriptions.clear();
+}
+
+/**
+ * React can preserve a fallback subtree only while every mounted keyed range has
+ * an unambiguous identity. Inspect the complete live descriptor because nested
+ * row instances may own different blocks or keys than the first row.
+ */
+function hasUnsafeCompilerFallbackKeys(descriptor: CompilerHostElement): boolean {
+  const visitKeyedRange = (range: CompilerKeyedRange): boolean => {
+    const items = materializeIterable(range.items());
+    const keys = items.map((item, index) => keyedRowIdentity(range.rowKey(item, index)));
+    if (new Set(keys).size !== keys.length) return true;
+    return items.some((item, index) => visit(range.create(item, index)));
+  };
+  const visit = (current: CompilerHostElement): boolean => {
+    for (const child of flattenCompilerHostElements(current.children)) {
+      if (visit(child)) return true;
     }
-  } else if (block.kind === "keyed-ranges") {
-    for (const range of block.ranges) {
-      const first = materializeIterable(range.items())[0];
-      if (first !== undefined) collectCompilerHostBlockIds(range.create(first, 0), ids);
-    }
-  } else {
-    for (const range of block.ranges) {
-      if (range.kind === "conditional") {
-        if (range.truthy) collectCompilerHostBlockIds(range.truthy.create(), ids);
-        if (range.falsy) collectCompilerHostBlockIds(range.falsy.create(), ids);
-      } else {
-        const first = materializeIterable(range.items())[0];
-        if (first !== undefined) collectCompilerHostBlockIds(range.create(first, 0), ids);
+    const block = current.block;
+    if (!block) return false;
+    if (block.kind === "conditional-ranges") {
+      for (const range of block.ranges) {
+        const selection = hostConditionalSelection(range);
+        if (selection.kind === "branch" && visit(selection.branch.create())) return true;
       }
+      return false;
     }
+    if (block.kind === "keyed-ranges") {
+      return block.ranges.some(visitKeyedRange);
+    }
+    for (const range of block.ranges) {
+      if (range.kind === "keyed") {
+        if (visitKeyedRange(range)) return true;
+        continue;
+      }
+      const selection = hostConditionalSelection(range);
+      if (selection.kind === "branch" && visit(selection.branch.create())) return true;
+    }
+    return false;
+  };
+
+  try {
+    return visit(descriptor);
+  } catch {
+    // Reading an iterable, key, or nested descriptor must be proven safe before
+    // React is allowed to reuse the existing fallback subtree.
+    return true;
   }
 }
 
 function findCompilerHostTarget(root: Element, path: readonly number[]): Element | null {
   let current: Element | null = root;
-  for (const index of path) current = current?.children[index] || null;
+  // Walking siblings avoids materializing a live HTMLCollection per step.
+  for (const index of path) {
+    current = current && current.firstElementChild;
+    for (let step = 0; step < index && current; step += 1) current = current.nextElementSibling;
+  }
   return current;
 }
 
@@ -3596,11 +3684,7 @@ function applyStaticRangeBindings(
   values: unknown[],
 ): boolean {
   const activeBindings = bindings || [];
-  if (values.length === 0 && activeBindings.length > 0) {
-    values.push(...activeBindings.map(() => UNSET_STATIC_RANGE_BINDING));
-  }
-  if (values.length !== activeBindings.length) return false;
-
+  const targets: Element[] = [];
   for (let index = 0; index < activeBindings.length; index += 1) {
     const binding = activeBindings[index];
     if (
@@ -3613,26 +3697,47 @@ function applyStaticRangeBindings(
     }
     const sibling = segments[binding.segment]?.[binding.sibling];
     const target = sibling && findCompilerHostTarget(sibling, binding.path);
-    if (!target) return false;
-    const rawValue = binding.read();
-    const value = normalizedStaticRangeBindingValue(binding, rawValue);
-    if (Object.is(values[index], value)) continue;
+    if (
+      !target ||
+      (binding.kind !== "text" &&
+        ((binding.kind !== "style" && binding.kind !== "attribute") || !binding.name))
+    ) {
+      return false;
+    }
+    targets[index] = target;
+  }
+
+  const initializesValues = values.length === 0 && activeBindings.length > 0;
+  if (!initializesValues && values.length !== activeBindings.length) return false;
+
+  const nextValues: unknown[] = [];
+  for (let index = 0; index < activeBindings.length; index += 1) {
+    const binding = activeBindings[index];
+    nextValues[index] = normalizedStaticRangeBindingValue(binding, binding.read());
+  }
+
+  for (let index = 0; index < activeBindings.length; index += 1) {
+    const binding = activeBindings[index];
+    const value = nextValues[index];
+    const previous = initializesValues ? UNSET_STATIC_RANGE_BINDING : values[index];
+    if (Object.is(previous, value)) continue;
     values[index] = value;
+    const target = targets[index];
     if (binding.kind === "text") {
       target.textContent = value as string;
-    } else if (binding.kind === "style" && binding.name) {
-      updateStyle(target, binding.name, rawValue);
-    } else if (binding.kind === "attribute" && binding.name) {
-      updateAttribute(target, binding.name, rawValue);
+    } else if (binding.kind === "style") {
+      updateStyle(target, binding.name!, value);
     } else {
-      return false;
+      updateAttribute(target, binding.name!, value);
     }
   }
   return true;
 }
 
 interface CompilerKeyedRowInstance extends CompilerHostInstance {
-  key: string;
+  key: KeyedRowKey;
+  /** Binding targets of a cloneRows row, whose structure never changes. */
+  targets?: Element[];
   item: unknown;
   index: number;
   conditionalValues: ReadonlyMap<number, readonly unknown[]>;
@@ -3640,7 +3745,7 @@ interface CompilerKeyedRowInstance extends CompilerHostInstance {
 
 interface CompilerKeyedRollingWindowDelta {
   readonly added: readonly CompilerKeyedRowInstance[];
-  readonly removedKeys: readonly string[];
+  readonly removedKeys: readonly KeyedRowKey[];
 }
 
 const COMPILER_KEYED_ROLLING_WINDOW_DELTAS = /* @__PURE__ */ new WeakMap<
@@ -3648,15 +3753,20 @@ const COMPILER_KEYED_ROLLING_WINDOW_DELTAS = /* @__PURE__ */ new WeakMap<
   CompilerKeyedRollingWindowDelta
 >();
 
+const COMPILER_KEYED_APPEND_DELTAS = /* @__PURE__ */ new WeakMap<
+  object,
+  readonly CompilerKeyedRowInstance[]
+>();
+
 function keyedRowInstancesByKey(
   instances: readonly CompilerKeyedRowInstance[],
-): Map<string, CompilerKeyedRowInstance> {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> {
   return new Map(instances.map((instance) => [instance.key, instance]));
 }
 
 interface CompilerKeyedIdentityTargetSnapshot {
   eligible: boolean;
-  key?: string;
+  key?: KeyedRowKey;
 }
 
 interface CompilerKeyedMembershipTargetSnapshot {
@@ -3665,7 +3775,7 @@ interface CompilerKeyedMembershipTargetSnapshot {
   previous?: CompilerKeyedMembershipTargetSnapshot;
   changes?: ReadonlyMap<unknown, boolean>;
   sourceToken?: object;
-  targetedKeys?: ReadonlySet<string>;
+  targetedKeys?: ReadonlySet<KeyedRowKey>;
   depth?: number;
 }
 
@@ -3675,7 +3785,7 @@ interface CompilerKeyedMapLookupTargetSnapshot {
   previous?: CompilerKeyedMapLookupTargetSnapshot;
   changes?: ReadonlyMap<unknown, CompilerKeyedMapLookupValue>;
   sourceToken?: object;
-  targetedKeys?: ReadonlySet<string>;
+  targetedKeys?: ReadonlySet<KeyedRowKey>;
   depth?: number;
 }
 
@@ -3686,8 +3796,27 @@ interface CompilerKeyedMapLookupValue {
 
 const UNSET_KEYED_ROW_BINDING = Symbol("unset interactive keyed-row binding");
 
-function keyedRowIdentity(key: React.Key): string {
-  return String(key);
+// Beyond this many changed positions a reorder takes the complete reconcile.
+const KEYED_ROWS_MAX_MOVED = 64;
+
+/**
+ * The identity a keyed row is stored under. React compares keys as strings, so `1` and `"1"` are
+ * the same key; numbers stay numbers here, and a string that is exactly a number's canonical
+ * spelling maps to that number. Number identities skip a string conversion per row and make the
+ * row maps' lookups cheaper, which keyed reconciliation does once per row on every update.
+ */
+type KeyedRowKey = string | number;
+
+function keyedRowIdentity(key: unknown): KeyedRowKey {
+  if (typeof key === "number") return key;
+  const text = String(key);
+  const first = text.charCodeAt(0);
+  // Only digits, "-", "I"nfinity and "N"aN can start a canonical number spelling.
+  if ((first >= 48 && first <= 57) || first === 45 || first === 73 || first === 78) {
+    const number = Number(text);
+    if (String(number) === text) return number;
+  }
+  return text;
 }
 
 function keyedIdentityTargetSnapshot(value: unknown): CompilerKeyedIdentityTargetSnapshot {
@@ -3697,15 +3826,17 @@ function keyedIdentityTargetSnapshot(value: unknown): CompilerKeyedIdentityTarge
     kind === "string" ||
     kind === "number" ||
     kind === "bigint"
-    ? { eligible: true, key: String(value) }
+    ? { eligible: true, key: keyedRowIdentity(value) }
     : { eligible: false };
 }
 
-const NATIVE_SET_PROTOTYPE = Set.prototype;
-const NATIVE_SET_ADD = Set.prototype.add;
-const NATIVE_SET_DELETE = Set.prototype.delete;
-const NATIVE_SET_HAS = Set.prototype.has;
-const NATIVE_SET_VALUES = Set.prototype.values;
+// Capture intrinsics at module evaluation, while allowing bundlers to omit each
+// snapshot when its optional collection feature is unused.
+const NATIVE_SET_PROTOTYPE = /* @__PURE__ */ (() => Set.prototype)();
+const NATIVE_SET_ADD = /* @__PURE__ */ (() => Set.prototype.add)();
+const NATIVE_SET_DELETE = /* @__PURE__ */ (() => Set.prototype.delete)();
+const NATIVE_SET_HAS = /* @__PURE__ */ (() => Set.prototype.has)();
+const NATIVE_SET_VALUES = /* @__PURE__ */ (() => Set.prototype.values)();
 const KEYED_COLLECTION_SNAPSHOT_MAX_DEPTH = 64;
 
 function materializeKeyedMembershipSnapshot(
@@ -3757,7 +3888,7 @@ function keyedMembershipDeltaSnapshot(
   }
 
   const changes = new Map<unknown, boolean>();
-  const targetedKeys = new Set<string>();
+  const targetedKeys = new Set<KeyedRowKey>();
   try {
     for (const key of changedKeys) {
       if (!keyedIdentityTargetSnapshot(key).eligible) return undefined;
@@ -3765,7 +3896,7 @@ function keyedMembershipDeltaSnapshot(
       const before = keyedMembershipSnapshotHas(previous, key);
       if (before === undefined) return undefined;
       changes.set(key, present);
-      if (before !== present) NATIVE_SET_ADD.call(targetedKeys, String(key));
+      if (before !== present) NATIVE_SET_ADD.call(targetedKeys, keyedRowIdentity(key));
     }
   } catch {
     return undefined;
@@ -3824,27 +3955,27 @@ function keyedMembershipTargetSnapshot(
 function keyedMembershipChangedKeys(
   previousSnapshot: CompilerKeyedMembershipTargetSnapshot,
   nextSnapshot: CompilerKeyedMembershipTargetSnapshot,
-): Set<string> {
+): Set<KeyedRowKey> {
   if (nextSnapshot.targetedKeys) return new Set(nextSnapshot.targetedKeys);
   const previous = materializeKeyedMembershipSnapshot(previousSnapshot);
   const next = materializeKeyedMembershipSnapshot(nextSnapshot);
-  const keys = new Set<string>();
+  const keys = new Set<KeyedRowKey>();
   if (!previous || !next) return keys;
   for (const value of previous) {
-    if (!NATIVE_SET_HAS.call(next, value)) NATIVE_SET_ADD.call(keys, String(value));
+    if (!NATIVE_SET_HAS.call(next, value)) NATIVE_SET_ADD.call(keys, keyedRowIdentity(value));
   }
   for (const value of next) {
-    if (!NATIVE_SET_HAS.call(previous, value)) NATIVE_SET_ADD.call(keys, String(value));
+    if (!NATIVE_SET_HAS.call(previous, value)) NATIVE_SET_ADD.call(keys, keyedRowIdentity(value));
   }
   return keys;
 }
 
-const NATIVE_MAP_PROTOTYPE = Map.prototype;
-const NATIVE_MAP_GET = Map.prototype.get;
-const NATIVE_MAP_HAS = Map.prototype.has;
-const NATIVE_MAP_SET = Map.prototype.set;
-const NATIVE_MAP_DELETE = Map.prototype.delete;
-const NATIVE_MAP_ENTRIES = Map.prototype.entries;
+const NATIVE_MAP_PROTOTYPE = /* @__PURE__ */ (() => Map.prototype)();
+const NATIVE_MAP_GET = /* @__PURE__ */ (() => Map.prototype.get)();
+const NATIVE_MAP_HAS = /* @__PURE__ */ (() => Map.prototype.has)();
+const NATIVE_MAP_SET = /* @__PURE__ */ (() => Map.prototype.set)();
+const NATIVE_MAP_DELETE = /* @__PURE__ */ (() => Map.prototype.delete)();
+const NATIVE_MAP_ENTRIES = /* @__PURE__ */ (() => Map.prototype.entries)();
 
 function isSafeKeyedMapLookupValue(value: unknown): boolean {
   return (
@@ -3913,7 +4044,7 @@ function keyedMapLookupDeltaSnapshot(
   }
 
   const changes = new Map<unknown, CompilerKeyedMapLookupValue>();
-  const targetedKeys = new Set<string>();
+  const targetedKeys = new Set<KeyedRowKey>();
   try {
     for (const key of changedKeys) {
       if (!keyedIdentityTargetSnapshot(key).eligible) return undefined;
@@ -3924,7 +4055,7 @@ function keyedMapLookupDeltaSnapshot(
       if (!before) return undefined;
       changes.set(key, { present, ...(present ? { value: entry } : {}) });
       if (before.present !== present || !Object.is(before.value, entry)) {
-        NATIVE_SET_ADD.call(targetedKeys, String(key));
+        NATIVE_SET_ADD.call(targetedKeys, keyedRowIdentity(key));
       }
     }
   } catch {
@@ -3986,23 +4117,350 @@ function keyedMapLookupTargetSnapshot(
 function keyedMapLookupChangedKeys(
   previousSnapshot: CompilerKeyedMapLookupTargetSnapshot,
   nextSnapshot: CompilerKeyedMapLookupTargetSnapshot,
-): Set<string> {
+): Set<KeyedRowKey> {
   if (nextSnapshot.targetedKeys) return new Set(nextSnapshot.targetedKeys);
   const previous = materializeKeyedMapLookupSnapshot(previousSnapshot);
   const next = materializeKeyedMapLookupSnapshot(nextSnapshot);
-  const keys = new Set<string>();
+  const keys = new Set<KeyedRowKey>();
   if (!previous || !next) return keys;
   for (const [key, value] of previous) {
     if (!Object.is(value, NATIVE_MAP_GET.call(next, key))) {
-      NATIVE_SET_ADD.call(keys, String(key));
+      NATIVE_SET_ADD.call(keys, keyedRowIdentity(key));
     }
   }
   for (const [key, value] of next) {
     if (!Object.is(value, NATIVE_MAP_GET.call(previous, key))) {
-      NATIVE_SET_ADD.call(keys, String(key));
+      NATIVE_SET_ADD.call(keys, keyedRowIdentity(key));
     }
   }
   return keys;
+}
+
+interface KeyedTargetSelection {
+  keys: Iterable<KeyedRowKey>;
+  count: number;
+}
+
+interface KeyedTargetRuntime {
+  hasSafeTargets(props: CompilerKeyedRowsBlockProps, dirtyState?: ReadonlySet<number>): boolean;
+  commit(props: CompilerKeyedRowsBlockProps, dirtyState?: ReadonlySet<number>): void;
+  prepare(props: CompilerKeyedRowsBlockProps, bindingIndices: readonly number[]): boolean;
+  select(
+    props: CompilerKeyedRowsBlockProps,
+    bindingIndex: number,
+    dirtyState: ReadonlySet<number>,
+    fallbackKeys: Iterable<KeyedRowKey>,
+    fallbackCount: number,
+  ): KeyedTargetSelection;
+  commitPrepared(bindingIndices: readonly number[]): void;
+  clear(): void;
+}
+
+type KeyedTargetKind = "identityTarget" | "membershipTarget" | "mapLookupTarget";
+
+/** Two snapshot maps for a compiler-proven single target kind. The complete
+ * runtime below remains the compatibility path for mixed and structural rows. */
+function createSingleKindKeyedTargetRuntime<Snapshot extends { eligible: boolean }>(
+  props: CompilerKeyedRowsBlockProps,
+  kind: KeyedTargetKind,
+  snapshot: (value: unknown, previous?: Snapshot) => Snapshot,
+  changedKeys: (previous: Snapshot, next: Snapshot) => Set<KeyedRowKey>,
+): KeyedTargetRuntime | undefined {
+  if (
+    !props.bindings.some(
+      (binding) => binding.identityTarget || binding.membershipTarget || binding.mapLookupTarget,
+    )
+  )
+    return undefined;
+  const previous = new Map<number, Snapshot>();
+  let next = new Map<number, Snapshot>();
+  // A changed definition or hand-authored feature selection must fall back to
+  // React before patching if it introduces an unsupported target kind.
+  const compatible = (binding: CompilerKeyedRowBinding) =>
+    (kind === "identityTarget" || !binding.identityTarget) &&
+    (kind === "membershipTarget" || !binding.membershipTarget) &&
+    (kind === "mapLookupTarget" || !binding.mapLookupTarget);
+  return {
+    hasSafeTargets(props, dirtyState) {
+      for (const binding of props.bindings) {
+        if (!compatible(binding)) return false;
+        const target = binding[kind];
+        if (
+          kind !== "identityTarget" &&
+          target &&
+          (!dirtyState || dirtyState.has(target.dependency)) &&
+          !snapshot(target.read()).eligible
+        )
+          return false;
+      }
+      return true;
+    },
+    commit(props, dirtyState) {
+      if (!dirtyState) previous.clear();
+      for (let index = 0; index < props.bindings.length; index++) {
+        const target = props.bindings[index][kind];
+        if (!target) previous.delete(index);
+        else if (!dirtyState || dirtyState.has(target.dependency))
+          previous.set(index, snapshot(target.read()));
+      }
+    },
+    prepare(props, indices) {
+      next = new Map();
+      for (const index of indices) {
+        const binding = props.bindings[index];
+        if (!compatible(binding)) return false;
+        const target = binding[kind];
+        if (!target) continue;
+        const value = snapshot(target.read(), previous.get(index));
+        if (kind !== "identityTarget" && !value.eligible) return false;
+        next.set(index, value);
+      }
+      return true;
+    },
+    select(props, index, dirtyState, fallbackKeys, fallbackCount) {
+      const binding = props.bindings[index];
+      const target = binding[kind];
+      const before = previous.get(index);
+      const after = next.get(index);
+      if (
+        target &&
+        binding.dependencies?.length === 1 &&
+        binding.dependencies[0] === target.dependency &&
+        dirtyState.has(target.dependency) &&
+        before?.eligible &&
+        after?.eligible
+      ) {
+        const keys = changedKeys(before, after);
+        return { keys, count: keys.size };
+      }
+      return { keys: fallbackKeys, count: fallbackCount };
+    },
+    commitPrepared(indices) {
+      for (const index of indices) {
+        const value = next.get(index);
+        if (value) previous.set(index, value);
+        else previous.delete(index);
+      }
+    },
+    clear() {
+      previous.clear();
+      next.clear();
+    },
+  };
+}
+
+function createKeyedIdentityTargetRuntime(props: CompilerKeyedRowsBlockProps) {
+  return createSingleKindKeyedTargetRuntime(
+    props,
+    "identityTarget",
+    keyedIdentityTargetSnapshot,
+    (previous, next) => {
+      const keys = new Set<KeyedRowKey>();
+      if (previous.key !== undefined) keys.add(previous.key);
+      if (next.key !== undefined) keys.add(next.key);
+      return keys;
+    },
+  );
+}
+
+function createKeyedMembershipTargetRuntime(props: CompilerKeyedRowsBlockProps) {
+  return createSingleKindKeyedTargetRuntime(
+    props,
+    "membershipTarget",
+    keyedMembershipTargetSnapshot,
+    keyedMembershipChangedKeys,
+  );
+}
+
+function createKeyedMapLookupTargetRuntime(props: CompilerKeyedRowsBlockProps) {
+  return createSingleKindKeyedTargetRuntime(
+    props,
+    "mapLookupTarget",
+    keyedMapLookupTargetSnapshot,
+    keyedMapLookupChangedKeys,
+  );
+}
+
+function createKeyedTargetRuntime(
+  props: CompilerKeyedRowsBlockProps,
+): KeyedTargetRuntime | undefined {
+  if (
+    !props.bindings.some(
+      (binding) => binding.identityTarget || binding.membershipTarget || binding.mapLookupTarget,
+    )
+  ) {
+    return undefined;
+  }
+  const identityTargets = new Map<number, CompilerKeyedIdentityTargetSnapshot>();
+  const membershipTargets = new Map<number, CompilerKeyedMembershipTargetSnapshot>();
+  const mapLookupTargets = new Map<number, CompilerKeyedMapLookupTargetSnapshot>();
+  let nextIdentityTargets = new Map<number, CompilerKeyedIdentityTargetSnapshot>();
+  let nextMembershipTargets = new Map<number, CompilerKeyedMembershipTargetSnapshot>();
+  let nextMapLookupTargets = new Map<number, CompilerKeyedMapLookupTargetSnapshot>();
+
+  return {
+    hasSafeTargets(props, dirtyState) {
+      for (const binding of props.bindings) {
+        const membershipTarget = binding.membershipTarget;
+        if (
+          membershipTarget &&
+          (!dirtyState || dirtyState.has(membershipTarget.dependency)) &&
+          !keyedMembershipTargetSnapshot(membershipTarget.read()).eligible
+        ) {
+          return false;
+        }
+        const mapLookupTarget = binding.mapLookupTarget;
+        if (
+          mapLookupTarget &&
+          (!dirtyState || dirtyState.has(mapLookupTarget.dependency)) &&
+          !keyedMapLookupTargetSnapshot(mapLookupTarget.read()).eligible
+        ) {
+          return false;
+        }
+      }
+      return true;
+    },
+    commit(props, dirtyState) {
+      if (!dirtyState) {
+        identityTargets.clear();
+        membershipTargets.clear();
+        mapLookupTargets.clear();
+      }
+      for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
+        const binding = props.bindings[bindingIndex];
+        const identityTarget = binding.identityTarget;
+        if (!identityTarget) {
+          identityTargets.delete(bindingIndex);
+        } else if (!dirtyState || dirtyState.has(identityTarget.dependency)) {
+          identityTargets.set(bindingIndex, keyedIdentityTargetSnapshot(identityTarget.read()));
+        }
+
+        const membershipTarget = binding.membershipTarget;
+        if (!membershipTarget) {
+          membershipTargets.delete(bindingIndex);
+        } else if (!dirtyState || dirtyState.has(membershipTarget.dependency)) {
+          membershipTargets.set(
+            bindingIndex,
+            keyedMembershipTargetSnapshot(membershipTarget.read()),
+          );
+        }
+
+        const mapLookupTarget = binding.mapLookupTarget;
+        if (!mapLookupTarget) {
+          mapLookupTargets.delete(bindingIndex);
+        } else if (!dirtyState || dirtyState.has(mapLookupTarget.dependency)) {
+          mapLookupTargets.set(bindingIndex, keyedMapLookupTargetSnapshot(mapLookupTarget.read()));
+        }
+      }
+    },
+    prepare(props, bindingIndices) {
+      nextIdentityTargets = new Map();
+      nextMembershipTargets = new Map();
+      nextMapLookupTargets = new Map();
+      for (const bindingIndex of bindingIndices) {
+        const binding = props.bindings[bindingIndex];
+        if (binding.identityTarget) {
+          nextIdentityTargets.set(
+            bindingIndex,
+            keyedIdentityTargetSnapshot(binding.identityTarget.read()),
+          );
+        }
+        if (binding.membershipTarget) {
+          const snapshot = keyedMembershipTargetSnapshot(
+            binding.membershipTarget.read(),
+            membershipTargets.get(bindingIndex),
+          );
+          if (!snapshot.eligible) return false;
+          nextMembershipTargets.set(bindingIndex, snapshot);
+        }
+        if (binding.mapLookupTarget) {
+          const snapshot = keyedMapLookupTargetSnapshot(
+            binding.mapLookupTarget.read(),
+            mapLookupTargets.get(bindingIndex),
+          );
+          if (!snapshot.eligible) return false;
+          nextMapLookupTargets.set(bindingIndex, snapshot);
+        }
+      }
+      return true;
+    },
+    select(props, bindingIndex, dirtyState, fallbackKeys, fallbackCount) {
+      const binding = props.bindings[bindingIndex];
+      const identityTarget = binding.identityTarget;
+      const previousIdentityTarget = identityTargets.get(bindingIndex);
+      const nextIdentityTarget = nextIdentityTargets.get(bindingIndex);
+      const canTargetIdentity = Boolean(
+        identityTarget &&
+        binding.dependencies?.length === 1 &&
+        binding.dependencies[0] === identityTarget.dependency &&
+        dirtyState.has(identityTarget.dependency) &&
+        previousIdentityTarget?.eligible &&
+        nextIdentityTarget?.eligible,
+      );
+      const membershipTarget = binding.membershipTarget;
+      const previousMembershipTarget = membershipTargets.get(bindingIndex);
+      const nextMembershipTarget = nextMembershipTargets.get(bindingIndex);
+      const canTargetMembership = Boolean(
+        membershipTarget &&
+        binding.dependencies?.length === 1 &&
+        binding.dependencies[0] === membershipTarget.dependency &&
+        dirtyState.has(membershipTarget.dependency) &&
+        previousMembershipTarget?.eligible &&
+        nextMembershipTarget?.eligible,
+      );
+      const mapLookupTarget = binding.mapLookupTarget;
+      const previousMapLookupTarget = mapLookupTargets.get(bindingIndex);
+      const nextMapLookupTarget = nextMapLookupTargets.get(bindingIndex);
+      const canTargetMapLookup = Boolean(
+        mapLookupTarget &&
+        binding.dependencies?.length === 1 &&
+        binding.dependencies[0] === mapLookupTarget.dependency &&
+        dirtyState.has(mapLookupTarget.dependency) &&
+        previousMapLookupTarget?.eligible &&
+        nextMapLookupTarget?.eligible,
+      );
+
+      if (canTargetMapLookup && previousMapLookupTarget && nextMapLookupTarget) {
+        const keys = keyedMapLookupChangedKeys(previousMapLookupTarget, nextMapLookupTarget);
+        return { keys, count: keys.size };
+      }
+      if (canTargetMembership && previousMembershipTarget && nextMembershipTarget) {
+        const keys = keyedMembershipChangedKeys(previousMembershipTarget, nextMembershipTarget);
+        return { keys, count: keys.size };
+      }
+      if (canTargetIdentity && previousIdentityTarget && nextIdentityTarget) {
+        const keys = new Set<KeyedRowKey>();
+        if (previousIdentityTarget.key !== undefined) keys.add(previousIdentityTarget.key);
+        if (nextIdentityTarget.key !== undefined) keys.add(nextIdentityTarget.key);
+        return { keys, count: keys.size };
+      }
+      return { keys: fallbackKeys, count: fallbackCount };
+    },
+    commitPrepared(bindingIndices) {
+      for (const bindingIndex of bindingIndices) {
+        const nextIdentityTarget = nextIdentityTargets.get(bindingIndex);
+        const nextMembershipTarget = nextMembershipTargets.get(bindingIndex);
+        const nextMapLookupTarget = nextMapLookupTargets.get(bindingIndex);
+        if (nextIdentityTarget) identityTargets.set(bindingIndex, nextIdentityTarget);
+        else identityTargets.delete(bindingIndex);
+        if (nextMembershipTarget) {
+          membershipTargets.set(bindingIndex, nextMembershipTarget);
+        } else {
+          membershipTargets.delete(bindingIndex);
+        }
+        if (nextMapLookupTarget) {
+          mapLookupTargets.set(bindingIndex, nextMapLookupTarget);
+        } else {
+          mapLookupTargets.delete(bindingIndex);
+        }
+      }
+    },
+    clear() {
+      identityTargets.clear();
+      membershipTargets.clear();
+      mapLookupTargets.clear();
+    },
+  };
 }
 
 function normalizedKeyedRowBindingValue(binding: CompilerKeyedRowBinding, value: unknown): unknown {
@@ -4016,9 +4474,92 @@ function readKeyedRowBindingValues(
   item: unknown,
   index: number,
 ): unknown[] {
-  return props.bindings.map((binding) =>
-    normalizedKeyedRowBindingValue(binding, binding.read(item, index)),
-  );
+  const values: unknown[] = [];
+  for (const binding of props.bindings) {
+    values.push(normalizedKeyedRowBindingValue(binding, binding.read(item, index)));
+  }
+  return values;
+}
+
+type CompilerKeyedRowSource = Pick<CompilerKeyedRowsBlockProps, "bindings" | "create"> &
+  Partial<Pick<CompilerKeyedRowsBlockProps, "cloneRows">>;
+
+// With cloneRows, everything outside the bindings is identical for every row.
+// Once one row is built from its descriptor, the rest clone it and reapply
+// their bindings. Keyed by the props object: a new render, which can close
+// over new values, derives a new skeleton.
+const KEYED_ROW_TEMPLATES = /* @__PURE__ */ new WeakMap<object, Element>();
+
+function createKeyedRowInstance(
+  props: CompilerKeyedRowSource,
+  document: Document,
+  key: KeyedRowKey,
+  item: unknown,
+  index: number,
+): CompilerKeyedRowInstance {
+  const template = props.cloneRows && KEYED_ROW_TEMPLATES.get(props);
+  const element = template
+    ? (template.cloneNode(true) as Element)
+    : createCompilerHostElement(document, props.create(item, index));
+  const instance: CompilerKeyedRowInstance = {
+    key,
+    element,
+    values: readKeyedRowBindingValues(props, item, index),
+    item,
+    index,
+    conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
+  };
+  if (props.cloneRows) {
+    const targets: (Element | null)[] = [];
+    let found = true;
+    for (const binding of props.bindings) {
+      const target = findCompilerHostTarget(element, binding.path);
+      found &&= target !== null;
+      targets.push(target);
+    }
+    if (found) instance.targets = targets as Element[];
+    if (template) {
+      for (let bindingIndex = 0; bindingIndex < targets.length; bindingIndex += 1) {
+        commitKeyedRowBinding(
+          props.bindings[bindingIndex],
+          instance,
+          bindingIndex,
+          instance.values[bindingIndex],
+          targets[bindingIndex],
+        );
+      }
+    } else {
+      const skeleton = keyedRowTemplate(props, element, targets);
+      if (skeleton) KEYED_ROW_TEMPLATES.set(props, skeleton);
+    }
+  }
+  return instance;
+}
+
+function keyedRowTemplate(
+  props: CompilerKeyedRowSource,
+  element: Element,
+  targets: readonly (Element | null)[],
+): Element | undefined {
+  // A clone updates bound attributes in place, which keeps a built row's
+  // attribute order only if this row has every one of them. Otherwise wait for
+  // a row that does.
+  for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
+    const binding = props.bindings[bindingIndex];
+    const target = targets[bindingIndex];
+    if (!target || binding.kind === "style") return undefined;
+    if (
+      binding.kind === "attribute" &&
+      !target.hasAttribute(compilerAttributeName(binding.name!))
+    ) {
+      return undefined;
+    }
+  }
+  const template = element.cloneNode(true) as Element;
+  for (const binding of props.bindings) {
+    if (binding.kind === "text") findCompilerHostTarget(template, binding.path)!.textContent = "";
+  }
+  return template;
 }
 
 function applyKeyedRowBindings(
@@ -4027,8 +4568,28 @@ function applyKeyedRowBindings(
   item: unknown,
   index: number,
 ): void {
+  if (props.bindings.length < 2) {
+    if (props.bindings.length === 1) applyKeyedRowBinding(props, instance, item, index, 0);
+    return;
+  }
+  const nextValues = readKeyedRowBindingValues(props, item, index);
+  let targets: Array<Element | null> | undefined;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
-    applyKeyedRowBinding(props, instance, item, index, bindingIndex);
+    if (Object.is(instance.values[bindingIndex], nextValues[bindingIndex])) continue;
+    targets ||= [];
+    targets[bindingIndex] = keyedRowBindingTarget(props, instance, bindingIndex);
+  }
+  if (!targets) return;
+  for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
+    const value = nextValues[bindingIndex];
+    if (Object.is(instance.values[bindingIndex], value)) continue;
+    commitKeyedRowBinding(
+      props.bindings[bindingIndex],
+      instance,
+      bindingIndex,
+      value,
+      targets[bindingIndex],
+    );
   }
 }
 
@@ -4040,63 +4601,146 @@ function applyKeyedRowBinding(
   bindingIndex: number,
 ): void {
   const binding = props.bindings[bindingIndex];
-  const rawValue = binding.read(item, index);
-  const value = normalizedKeyedRowBindingValue(binding, rawValue);
+  const value = normalizedKeyedRowBindingValue(binding, binding.read(item, index));
   if (Object.is(instance.values[bindingIndex], value)) return;
+  const target = keyedRowBindingTarget(props, instance, bindingIndex);
+  commitKeyedRowBinding(binding, instance, bindingIndex, value, target);
+}
+
+function keyedRowBindingTarget(
+  props: CompilerKeyedRowBindingSource,
+  instance: CompilerKeyedRowInstance,
+  bindingIndex: number,
+): Element | null {
+  return (
+    instance.targets?.[bindingIndex] ||
+    findCompilerHostTarget(instance.element, props.bindings[bindingIndex].path)
+  );
+}
+
+function commitKeyedRowBinding(
+  binding: CompilerKeyedRowBinding,
+  instance: CompilerKeyedRowInstance,
+  bindingIndex: number,
+  value: unknown,
+  target: Element | null | undefined,
+): void {
   instance.values[bindingIndex] = value;
-  const target = findCompilerHostTarget(instance.element, binding.path);
   if (!target) return;
   if (binding.kind === "text") {
-    target.textContent = value as string;
+    updateTextContent(target, value as string);
   } else if (binding.kind === "style" && binding.name) {
-    updateStyle(target, binding.name, rawValue);
+    updateStyle(target, binding.name, value);
   } else if (binding.kind === "attribute" && binding.name) {
-    updateAttribute(target, binding.name, rawValue);
+    updateAttribute(target, binding.name, value);
+  }
+}
+
+function updateTextContent(target: Element, value: string): void {
+  // Like React's setTextContent: update a lone text node in place.
+  const text = target.firstChild;
+  if (value && text && text === target.lastChild && text.nodeType === 3) {
+    (text as Text).data = value;
+  } else {
+    target.textContent = value;
   }
 }
 
 type CompilerPreparedKeyedRowBindingUpdate = readonly [
   bindingIndex: number,
-  rawValue: unknown,
   target: Element,
   value: unknown,
 ];
+
+function prepareKeyedRowBindingUpdate(
+  props: CompilerKeyedRowBindingSource,
+  instance: CompilerKeyedRowInstance,
+  item: unknown,
+  index: number,
+  bindingIndex: number,
+): CompilerPreparedKeyedRowBindingUpdate | null | undefined {
+  const binding = props.bindings[bindingIndex];
+  const rawValue = binding.read(item, index);
+  const value = normalizedKeyedRowBindingValue(binding, rawValue);
+  if (Object.is(instance.values[bindingIndex], value)) return null;
+  const target = keyedRowBindingTarget(props, instance, bindingIndex);
+  if (!target || (binding.kind !== "text" && !binding.name)) return undefined;
+  return [bindingIndex, target, value];
+}
+
+type CompilerPreparedKeyedRowBindingCommit = readonly [
+  instance: CompilerKeyedRowInstance,
+  update: CompilerPreparedKeyedRowBindingUpdate,
+];
+
+// Keep a single update as its tuple; allocate a list only for multiple changes.
+type CompilerPreparedKeyedRowBindingUpdates =
+  | CompilerPreparedKeyedRowBindingUpdate
+  | CompilerPreparedKeyedRowBindingUpdate[];
 
 function prepareKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
   item: unknown,
   index: number,
-): CompilerPreparedKeyedRowBindingUpdate[] | undefined {
-  const updates: CompilerPreparedKeyedRowBindingUpdate[] = [];
+): CompilerPreparedKeyedRowBindingUpdates | undefined {
+  let first: CompilerPreparedKeyedRowBindingUpdate | undefined;
+  let updates: CompilerPreparedKeyedRowBindingUpdate[] | undefined;
   for (let bindingIndex = 0; bindingIndex < props.bindings.length; bindingIndex += 1) {
-    const binding = props.bindings[bindingIndex];
-    const rawValue = binding.read(item, index);
-    const value = normalizedKeyedRowBindingValue(binding, rawValue);
-    if (Object.is(instance.values[bindingIndex], value)) continue;
-    const target = findCompilerHostTarget(instance.element, binding.path);
-    if (!target || (binding.kind !== "text" && !binding.name)) return undefined;
-    updates.push([bindingIndex, rawValue, target, value]);
+    const update = prepareKeyedRowBindingUpdate(props, instance, item, index, bindingIndex);
+    if (update === undefined) return undefined;
+    if (update) {
+      if (updates) updates.push(update);
+      else if (first) {
+        updates = [];
+        updates.push(first);
+        updates.push(update);
+      } else first = update;
+    }
   }
-  return updates;
+  return updates || first || NO_KEYED_ROW_BINDING_UPDATES;
 }
+
+// Shared by every row with nothing to patch; callers only iterate it.
+const NO_KEYED_ROW_BINDING_UPDATES: CompilerPreparedKeyedRowBindingUpdates = [];
 
 function applyPreparedKeyedRowBindingUpdates(
   props: CompilerKeyedRowBindingSource,
   instance: CompilerKeyedRowInstance,
-  updates: readonly CompilerPreparedKeyedRowBindingUpdate[],
+  updates: Readonly<CompilerPreparedKeyedRowBindingUpdates>,
 ): void {
-  for (const [bindingIndex, rawValue, target, value] of updates) {
-    const binding = props.bindings[bindingIndex];
-    instance.values[bindingIndex] = value;
-    if (binding.kind === "text") {
-      target.textContent = value as string;
-    } else if (binding.kind === "style") {
-      updateStyle(target, binding.name!, rawValue);
-    } else {
-      updateAttribute(target, binding.name!, rawValue);
-    }
+  if (typeof updates[0] === "number") {
+    const [bindingIndex, target, value] = updates as CompilerPreparedKeyedRowBindingUpdate;
+    commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
+    return;
   }
+  for (const [
+    bindingIndex,
+    target,
+    value,
+  ] of updates as readonly CompilerPreparedKeyedRowBindingUpdate[]) {
+    commitKeyedRowBinding(props.bindings[bindingIndex], instance, bindingIndex, value, target);
+  }
+}
+
+type CompilerPreparedKeyedRowBindingSet = CompilerPreparedKeyedRowBindingUpdates[];
+
+function prepareKeyedRowBindingSetUpdates(
+  props: CompilerKeyedRowBindingSource,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
+  rows: { items: unknown[]; keys: KeyedRowKey[] },
+  /** Instances already in row order, which skips the keyed lookups. */
+  ordered?: readonly CompilerKeyedRowInstance[],
+): CompilerPreparedKeyedRowBindingSet | undefined {
+  const preparedUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
+  for (let index = 0; index < rows.items.length; index += 1) {
+    const instance = ordered ? ordered[index] : instances.get(rows.keys[index]);
+    if (!instance) return undefined;
+    const updates = prepareKeyedRowBindingUpdates(props, instance, rows.items[index], index);
+    if (!updates) return undefined;
+    preparedUpdates.push(updates);
+  }
+  return preparedUpdates;
 }
 
 function keyedRowConditionalSnapshot(
@@ -4200,6 +4844,47 @@ function applyHostConditionalBindings(
       updateStyle(target, binding.name, rawValue);
     } else if (binding.kind === "attribute" && binding.name) {
       updateAttribute(target, binding.name, rawValue);
+    }
+  }
+}
+
+function prepareHostConditionalBindings(
+  branch: CompilerHostConditionalBranch,
+  instance: CompilerHostInstance,
+): boolean {
+  for (let bindingIndex = 0; bindingIndex < branch.bindings.length; bindingIndex += 1) {
+    const binding = branch.bindings[bindingIndex];
+    const rawValue = binding.read();
+    const target = findCompilerHostTarget(instance.element, binding.path);
+    if (
+      !target ||
+      (binding.kind !== "text" &&
+        ((binding.kind !== "style" && binding.kind !== "attribute") || !binding.name))
+    ) {
+      return false;
+    }
+    instance.values[bindingIndex] = [
+      target,
+      normalizedHostConditionalBindingValue(binding, rawValue),
+    ];
+  }
+  return true;
+}
+
+function applyPreparedHostConditionalBindings(
+  branch: CompilerHostConditionalBranch,
+  instance: CompilerHostInstance,
+): void {
+  for (let bindingIndex = 0; bindingIndex < branch.bindings.length; bindingIndex += 1) {
+    const binding = branch.bindings[bindingIndex];
+    const [target, value] = instance.values[bindingIndex] as readonly [Element, unknown];
+    instance.values[bindingIndex] = value;
+    if (binding.kind === "text") {
+      target.textContent = value as string;
+    } else if (binding.kind === "style") {
+      updateStyle(target, binding.name!, value);
+    } else {
+      updateAttribute(target, binding.name!, value);
     }
   }
 }
@@ -4310,6 +4995,7 @@ function mountCompilerHostInstance(
   descriptor: CompilerHostElement,
   branch: Pick<CompilerHostConditionalBranch, "bindings">,
   onFallback: () => void,
+  applyBindingsImmediately = true,
 ): CompilerHostInstance | null {
   const scope = mountCompilerHostTree(owner, element, descriptor, onFallback);
   if (!scope) return null;
@@ -4318,6 +5004,7 @@ function mountCompilerHostInstance(
     scope,
     values: branch.bindings.map(() => UNSET_HOST_CONDITIONAL_BINDING),
   };
+  if (!applyBindingsImmediately) return instance;
   try {
     applyHostConditionalBindings(branch as CompilerHostConditionalBranch, instance);
   } catch (error) {
@@ -4419,12 +5106,17 @@ class CompilerNestedConditionalRanges implements CompilerHostTreeScope {
         descriptor,
         selection.branch,
         this.onFallback,
+        false, // Commit only after every sibling range validates.
       );
       if (!host) {
         this.cleanup();
         return false;
       }
       this.instances.push({ key: selection.key, host });
+      if (!prepareHostConditionalBindings(selection.branch, host)) {
+        this.cleanup();
+        return false;
+      }
       cursor += 1;
     }
 
@@ -4440,6 +5132,13 @@ class CompilerNestedConditionalRanges implements CompilerHostTreeScope {
     if (!applyStaticRangeBindings(this.block.bindings, this.staticSegments, this.staticValues)) {
       this.cleanup();
       return false;
+    }
+    for (let index = 0; index < selections.length; index += 1) {
+      const selection = selections[index];
+      const instance = this.instances[index];
+      if (selection.kind === "branch" && instance) {
+        applyPreparedHostConditionalBindings(selection.branch, instance.host);
+      }
     }
     this.unsubscribe = this.owner.subscribe(this.block.id, this.refresh);
     return true;
@@ -4583,11 +5282,36 @@ class CompilerNestedConditionalRanges implements CompilerHostTreeScope {
 
 interface NestedReadKeyedRange {
   items: unknown[];
-  keys: string[];
+  keys: KeyedRowKey[];
+}
+
+// Undefined means structural reconciliation is still required. Prove the entire
+// key order before updating scopes, which may themselves contain nested blocks.
+function reconcileStableNestedKeyedRows(
+  range: CompilerKeyedRange,
+  previous: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
+  rows: NestedReadKeyedRange,
+): boolean | undefined {
+  if (rows.keys.length !== previous.size) return undefined;
+  let index = 0;
+  for (const key of previous.keys()) {
+    if (rows.keys[index++] !== key) return undefined;
+  }
+  index = 0;
+  for (const existing of previous.values()) {
+    const item = rows.items[index];
+    const descriptor = range.create(item, index);
+    if (!existing.scope?.update(descriptor)) return false;
+    applyKeyedRowBindings(range, existing, item, index);
+    existing.item = item;
+    existing.index = index;
+    index += 1;
+  }
+  return true;
 }
 
 class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
-  private readonly instances: Array<Map<string, CompilerKeyedRowInstance>> = [];
+  private readonly instances: Array<Map<KeyedRowKey, CompilerKeyedRowInstance>> = [];
   private readonly staticSegments: Element[][] = [];
   private readonly staticScopes: CompilerHostTreeScope[] = [];
   private readonly staticValues: unknown[] = [];
@@ -4643,6 +5367,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
     const elements = [...this.root.children];
     const descriptors = flattenCompilerHostElements(materializeCompilerHostChildren(this.host));
     if (elements.length !== descriptors.length) return false;
+    const preparedBindings: CompilerPreparedKeyedRowBindingUpdates[][] = [];
     let cursor = 0;
 
     for (let rangeIndex = 0; rangeIndex < this.block.ranges.length; rangeIndex += 1) {
@@ -4663,7 +5388,9 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
       this.staticSegments.push(elements.slice(cursor, staticEnd));
       cursor = staticEnd;
 
-      const instances = new Map<string, CompilerKeyedRowInstance>();
+      const instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
+      this.instances.push(instances);
+      const rangeBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -4676,7 +5403,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
           this.cleanup();
           return false;
         }
-        instances.set(rows.keys[index], {
+        const instance: CompilerKeyedRowInstance = {
           key: rows.keys[index],
           element,
           scope,
@@ -4684,10 +5411,23 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
           item: rows.items[index],
           index,
           conditionalValues: new Map(),
-        });
-        applyKeyedRowBindings(range, instances.get(rows.keys[index])!, rows.items[index], index);
+        };
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
+        try {
+          bindingUpdates = prepareKeyedRowBindingUpdates(range, instance, rows.items[index], index);
+        } catch (error) {
+          scope.cleanup();
+          throw error;
+        }
+        if (!bindingUpdates) {
+          scope.cleanup();
+          this.cleanup();
+          return false;
+        }
+        instances.set(rows.keys[index], instance);
+        rangeBindingUpdates.push(bindingUpdates);
       }
-      this.instances.push(instances);
+      preparedBindings.push(rangeBindingUpdates);
       cursor += rows.items.length;
     }
 
@@ -4703,6 +5443,18 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
     if (!applyStaticRangeBindings(this.block.bindings, this.staticSegments, this.staticValues)) {
       this.cleanup();
       return false;
+    }
+    for (let rangeIndex = 0; rangeIndex < this.block.ranges.length; rangeIndex += 1) {
+      const range = this.block.ranges[rangeIndex];
+      let rowIndex = 0;
+      for (const instance of this.instances[rangeIndex].values()) {
+        applyPreparedKeyedRowBindingUpdates(
+          range,
+          instance,
+          preparedBindings[rangeIndex][rowIndex],
+        );
+        rowIndex += 1;
+      }
     }
     this.unsubscribe = this.owner.subscribe(this.block.id, this.refresh);
     return true;
@@ -4721,7 +5473,9 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
   private reconcileRange(rangeIndex: number, rows: NestedReadKeyedRange): boolean {
     const range = this.block.ranges[rangeIndex];
     const previous = this.instances[rangeIndex];
-    const oldIndices = new Map<string, number>();
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
+    const oldIndices = new Map<KeyedRowKey, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);
     for (const [key, instance] of previous) {
@@ -4765,7 +5519,7 @@ class CompilerNestedKeyedRanges implements CompilerHostTreeScope {
       const instance = nextInstances[index];
       if (
         sequence[index] < 0 ||
-        (!stablePositions.has(index) && instance.element.nextSibling !== anchor)
+        (!stablePositions[index] && instance.element.nextSibling !== anchor)
       ) {
         this.root.insertBefore(instance.element, anchor);
       }
@@ -4885,7 +5639,7 @@ type NestedMixedRangeSnapshot =
 
 type NestedMixedRangeInstance =
   | { kind: "conditional"; value: NestedConditionalRangeInstance | null }
-  | { kind: "keyed"; value: Map<string, CompilerKeyedRowInstance> };
+  | { kind: "keyed"; value: Map<KeyedRowKey, CompilerKeyedRowInstance> };
 
 class CompilerNestedMixedRanges implements CompilerHostTreeScope {
   private readonly instances: NestedMixedRangeInstance[] = [];
@@ -4945,6 +5699,9 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const elements = [...this.root.children];
     const descriptors = flattenCompilerHostElements(this.host.children);
     if (elements.length !== descriptors.length) return false;
+    const preparedKeyedBindings: Array<
+      readonly Readonly<CompilerPreparedKeyedRowBindingUpdates>[] | undefined
+    > = [];
     let cursor = 0;
 
     for (let rangeIndex = 0; rangeIndex < this.block.ranges.length; rangeIndex += 1) {
@@ -4982,6 +5739,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
           descriptor,
           snapshot.selection.branch,
           this.onFallback,
+          false, // Commit only after every sibling range validates.
         );
         if (!host) {
           this.cleanup();
@@ -4991,6 +5749,10 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
           kind: "conditional",
           value: { key: snapshot.selection.key, host },
         });
+        if (!prepareHostConditionalBindings(snapshot.selection.branch, host)) {
+          this.cleanup();
+          return false;
+        }
         cursor += 1;
         continue;
       }
@@ -4999,7 +5761,9 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
         this.cleanup();
         return false;
       }
-      const keyedInstances = new Map<string, CompilerKeyedRowInstance>();
+      const keyedInstances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
+      this.instances.push({ kind: "keyed", value: keyedInstances });
+      const keyedBindingUpdates: CompilerPreparedKeyedRowBindingUpdates[] = [];
       for (let index = 0; index < snapshot.rows.items.length; index += 1) {
         const element = elements[cursor + index];
         if (!element) {
@@ -5021,15 +5785,27 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
           index,
           conditionalValues: new Map(),
         };
+        let bindingUpdates: CompilerPreparedKeyedRowBindingUpdates | undefined;
         try {
-          applyKeyedRowBindings(range, instance, snapshot.rows.items[index], index);
+          bindingUpdates = prepareKeyedRowBindingUpdates(
+            range,
+            instance,
+            snapshot.rows.items[index],
+            index,
+          );
         } catch (error) {
           scope.cleanup();
           throw error;
         }
+        if (!bindingUpdates) {
+          scope.cleanup();
+          this.cleanup();
+          return false;
+        }
         keyedInstances.set(snapshot.rows.keys[index], instance);
+        keyedBindingUpdates.push(bindingUpdates);
       }
-      this.instances.push({ kind: "keyed", value: keyedInstances });
+      preparedKeyedBindings[rangeIndex] = keyedBindingUpdates;
       cursor += snapshot.rows.items.length;
     }
 
@@ -5045,6 +5821,27 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     if (!applyStaticRangeBindings(this.block.bindings, this.staticSegments, this.staticValues)) {
       this.cleanup();
       return false;
+    }
+    for (let index = 0; index < snapshots.length; index += 1) {
+      const snapshot = snapshots[index];
+      const instance = this.instances[index];
+      if (
+        snapshot.kind === "conditional" &&
+        snapshot.selection.kind === "branch" &&
+        instance?.kind === "conditional" &&
+        instance.value
+      ) {
+        applyPreparedHostConditionalBindings(snapshot.selection.branch, instance.value.host);
+      } else if (snapshot.kind === "keyed" && instance?.kind === "keyed") {
+        const range = this.block.ranges[index];
+        const bindingUpdates = preparedKeyedBindings[index]!;
+        if (range.kind !== "keyed") continue;
+        let rowIndex = 0;
+        for (const row of instance.value.values()) {
+          applyPreparedKeyedRowBindingUpdates(range, row, bindingUpdates[rowIndex]);
+          rowIndex += 1;
+        }
+      }
     }
     this.unsubscribe = this.owner.subscribe(this.block.id, this.refresh);
     return true;
@@ -5110,7 +5907,9 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     const instance = this.instances[rangeIndex];
     if (instance.kind !== "keyed") return false;
     const previous = instance.value;
-    const oldIndices = new Map<string, number>();
+    const stable = reconcileStableNestedKeyedRows(range, previous, rows);
+    if (stable !== undefined) return stable;
+    const oldIndices = new Map<KeyedRowKey, number>();
     [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
     const nextKeys = new Set(rows.keys);
     for (const [key, row] of previous) {
@@ -5159,10 +5958,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
     let anchor = this.anchorAfter(rangeIndex);
     for (let index = nextInstances.length - 1; index >= 0; index -= 1) {
       const row = nextInstances[index];
-      if (
-        sequence[index] < 0 ||
-        (!stablePositions.has(index) && row.element.nextSibling !== anchor)
-      ) {
+      if (sequence[index] < 0 || (!stablePositions[index] && row.element.nextSibling !== anchor)) {
         this.root.insertBefore(row.element, anchor);
       }
       anchor = row.element;
@@ -5299,7 +6095,7 @@ class CompilerNestedMixedRanges implements CompilerHostTreeScope {
 }
 
 function createHostConditionalBlockComponent(
-  owner: Pick<ConditionalBlockOwner, "subscribe">,
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
 ): React.ComponentType<CompilerHostConditionalBlockProps> {
   interface State {
     fallback: boolean;
@@ -5315,35 +6111,54 @@ function createHostConditionalBlockComponent(
     private fallbackVersion = 0;
     private propSyncQueued = false;
     private currentProps = this.props;
-    private unsubscribe: (() => void) | undefined;
-    private fallbackUnsubscribers: Array<() => void> = [];
+    declare private stop: (() => void) | undefined;
+    declare private id: number | undefined;
+    private readonly fallbackUnsubscribers = new Map<number, () => void>();
+    private fallbackKeysWereUnsafe = false;
     private activeBranch: "truthy" | "falsy" | null = null;
     private instance: CompilerHostInstance | null = null;
+    private definitionVersion = owner.getDefinitionVersion?.();
 
     private requestNestedFallback = () => {
       this.instance?.scope?.cleanup();
       this.activateFallback();
     };
 
+    private refreshFallbackDescendant: CompilerBlockRefresh = (afterCommit) => {
+      this.prepareFallbackUpdate();
+      this.forceUpdate(afterCommit);
+    };
+
     private subscribeFallbackDescendants(): void {
-      for (const unsubscribe of this.fallbackUnsubscribers) unsubscribe();
-      this.fallbackUnsubscribers = [];
       const ids = new Set<number>();
-      if (this.currentProps.truthy) {
-        collectCompilerHostBlockIds(this.currentProps.truthy.create(), ids);
-      }
-      if (this.currentProps.falsy) {
-        collectCompilerHostBlockIds(this.currentProps.falsy.create(), ids);
+      const selection = hostConditionalSelection(this.currentProps);
+      if (selection.kind === "branch") {
+        collectActiveCompilerHostBlockIds(selection.branch.create(), ids);
       }
       ids.delete(this.currentProps.id);
-      for (const id of ids) {
-        this.fallbackUnsubscribers.push(
-          owner.subscribe(id, (afterCommit) => {
-            this.fallbackVersion += 1;
-            this.forceUpdate(afterCommit);
-          }),
+      reconcileCompilerFallbackSubscriptions(
+        owner,
+        this.fallbackUnsubscribers,
+        ids,
+        this.refreshFallbackDescendant,
+      );
+    }
+
+    private hasUnsafeFallbackKeys(): boolean {
+      try {
+        const selection = hostConditionalSelection(this.currentProps);
+        return (
+          selection.kind === "branch" && hasUnsafeCompilerFallbackKeys(selection.branch.create())
         );
+      } catch {
+        return true;
       }
+    }
+
+    private prepareFallbackUpdate(): void {
+      const unsafeKeys = this.hasUnsafeFallbackKeys();
+      if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+      this.fallbackKeysWereUnsafe = unsafeKeys;
     }
 
     private captureRoot = (root: Element | null) => {
@@ -5356,6 +6171,7 @@ function createHostConditionalBlockComponent(
       if (selection.kind === "fallback") return false;
       if (selection.kind === "empty") {
         if (this.root.childNodes.length !== 0) return false;
+        this.instance?.scope?.cleanup();
         this.activeBranch = null;
         this.instance = null;
         return true;
@@ -5378,6 +6194,7 @@ function createHostConditionalBlockComponent(
         this.requestNestedFallback,
       );
       if (!instance) return false;
+      this.instance?.scope?.cleanup();
       this.activeBranch = selection.key;
       this.instance = instance;
       return true;
@@ -5393,6 +6210,7 @@ function createHostConditionalBlockComponent(
       this.instance = null;
       this.activeBranch = null;
       this.subscribeFallbackDescendants();
+      this.fallbackKeysWereUnsafe = this.hasUnsafeFallbackKeys();
       // One key change on entry: the compiled path mutated the DOM behind
       // React's back, so the first fallback render must rebuild the subtree.
       this.fallbackVersion += 1;
@@ -5405,9 +6223,7 @@ function createHostConditionalBlockComponent(
         return;
       }
       if (this.state.fallback) {
-        // React owns the container while in fallback; re-render with the
-        // stable key so updates reconcile in place instead of remounting the
-        // subtree (which would wipe uncontrolled inputs, focus, and scroll).
+        this.prepareFallbackUpdate();
         this.forceUpdate(afterCommit);
         return;
       }
@@ -5468,35 +6284,68 @@ function createHostConditionalBlockComponent(
       this.reconcile(afterCommit);
     };
 
+    private listen(): void {
+      const id = this.currentProps.id;
+      const stop = this.stop;
+      if (this.id === id) return;
+      stop?.();
+      this.stop = owner.subscribe(id, this.refresh);
+      this.id = id;
+    }
+
     private schedulePropSync(): void {
       if (this.propSyncQueued) return;
       this.propSyncQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.propSyncQueued = false;
-        if (this.mounted && !this.state.fallback) this.reconcile();
+        if (this.mounted && !this.state.fallback) {
+          this.listen();
+          this.reconcile();
+        }
       });
     }
 
     shouldComponentUpdate(nextProps: CompilerHostConditionalBlockProps, nextState: State): boolean {
+      const definitionChanged = this.definitionVersion !== owner.getDefinitionVersion?.();
       this.currentProps = nextProps;
+      if (this.state.fallback && nextState.fallback) this.prepareFallbackUpdate();
       if (nextState.fallback || this.state.fallback) return true;
+      if (definitionChanged) return true;
       this.schedulePropSync();
       return false;
     }
 
     componentDidMount(): void {
       this.mounted = true;
-      this.unsubscribe = owner.subscribe(this.props.id, this.refresh);
-      if (!this.adopt()) this.activateFallback();
+      this.listen();
+      // Replay must restore nested listeners even before the fallback state update commits.
+      if (this.state.fallback || this.fallbackRequested) {
+        this.subscribeFallbackDescendants();
+        this.fallbackKeysWereUnsafe = this.hasUnsafeFallbackKeys();
+      } else if (!this.adopt()) this.activateFallback();
+    }
+
+    componentDidUpdate(): void {
+      this.listen();
+      const nextDefinitionVersion = owner.getDefinitionVersion?.();
+      const definitionChanged = this.definitionVersion !== nextDefinitionVersion;
+      this.definitionVersion = nextDefinitionVersion;
+      if (this.state.fallback) {
+        this.subscribeFallbackDescendants();
+      } else if (definitionChanged && !this.adopt()) {
+        this.activateFallback();
+      }
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.unsubscribe?.();
-      for (const unsubscribe of this.fallbackUnsubscribers) unsubscribe();
-      this.fallbackUnsubscribers = [];
+      const stop = this.stop;
+      stop?.();
+      this.id = undefined;
+      clearCompilerFallbackSubscriptions(this.fallbackUnsubscribers);
+      this.fallbackKeysWereUnsafe = false;
       this.instance?.scope?.cleanup();
-      this.root = null;
+      // React 18 replays lifecycles without detaching refs; captureRoot owns ref cleanup.
       this.activeBranch = null;
       this.instance = null;
     }
@@ -5519,7 +6368,7 @@ function createHostConditionalBlockComponent(
 }
 
 function createConditionalRangesBlockComponent(
-  owner: Pick<ConditionalBlockOwner, "subscribe">,
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
 ): React.ComponentType<CompilerConditionalRangesBlockProps> {
   interface State {
     fallback: boolean;
@@ -5543,34 +6392,63 @@ function createConditionalRangesBlockComponent(
     private fallbackVersion = 0;
     private propFallbackQueued = false;
     private currentProps = this.props;
-    private unsubscribe: (() => void) | undefined;
-    private fallbackUnsubscribers: Array<() => void> = [];
+    declare private stop: (() => void) | undefined;
+    declare private id: number | undefined;
+    private readonly fallbackUnsubscribers = new Map<number, () => void>();
+    private fallbackKeysWereUnsafe = false;
     private rangeInstances: Array<ConditionalRangeInstance | null> = [];
     private staticSegments: Element[][] = [];
     private readonly staticValues: unknown[] = [];
+    private definitionVersion = owner.getDefinitionVersion?.();
 
     private requestNestedFallback = () => {
       for (const instance of this.rangeInstances) instance?.host.scope?.cleanup();
       this.activateFallback();
     };
 
+    private refreshFallbackDescendant: CompilerBlockRefresh = (afterCommit) => {
+      this.prepareFallbackUpdate();
+      this.forceUpdate(afterCommit);
+    };
+
     private subscribeFallbackDescendants(): void {
-      for (const unsubscribe of this.fallbackUnsubscribers) unsubscribe();
-      this.fallbackUnsubscribers = [];
       const ids = new Set<number>();
       for (const range of this.currentProps.ranges) {
-        if (range.truthy) collectCompilerHostBlockIds(range.truthy.create(), ids);
-        if (range.falsy) collectCompilerHostBlockIds(range.falsy.create(), ids);
+        const selection = hostConditionalSelection(range);
+        if (selection.kind === "branch") {
+          collectActiveCompilerHostBlockIds(selection.branch.create(), ids);
+        }
       }
       ids.delete(this.currentProps.id);
-      for (const id of ids) {
-        this.fallbackUnsubscribers.push(
-          owner.subscribe(id, (afterCommit) => {
-            this.fallbackVersion += 1;
-            this.forceUpdate(afterCommit);
-          }),
-        );
+      reconcileCompilerFallbackSubscriptions(
+        owner,
+        this.fallbackUnsubscribers,
+        ids,
+        this.refreshFallbackDescendant,
+      );
+    }
+
+    private hasUnsafeFallbackKeys(): boolean {
+      try {
+        for (const range of this.currentProps.ranges) {
+          const selection = hostConditionalSelection(range);
+          if (
+            selection.kind === "branch" &&
+            hasUnsafeCompilerFallbackKeys(selection.branch.create())
+          ) {
+            return true;
+          }
+        }
+        return false;
+      } catch {
+        return true;
       }
+    }
+
+    private prepareFallbackUpdate(): void {
+      const unsafeKeys = this.hasUnsafeFallbackKeys();
+      if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+      this.fallbackKeysWereUnsafe = unsafeKeys;
     }
 
     private captureRoot = (root: Element | null) => {
@@ -5597,6 +6475,7 @@ function createConditionalRangesBlockComponent(
       const elements = [...this.root.children];
       const staticSegments: Element[][] = [];
       const instances: Array<ConditionalRangeInstance | null> = [];
+      const staticValues = this.staticValues.slice();
       const cleanupInstances = () => {
         for (const instance of instances) instance?.host.scope?.cleanup();
       };
@@ -5637,6 +6516,7 @@ function createConditionalRangesBlockComponent(
           descriptor,
           selection.branch,
           this.requestNestedFallback,
+          false, // Commit only after every sibling range validates.
         );
         if (!host) {
           cleanupInstances();
@@ -5646,6 +6526,15 @@ function createConditionalRangesBlockComponent(
           key: selection.key,
           host,
         });
+        try {
+          if (!prepareHostConditionalBindings(selection.branch, host)) {
+            cleanupInstances();
+            return false;
+          }
+        } catch (error) {
+          cleanupInstances();
+          throw error;
+        }
         cursor += 1;
       }
 
@@ -5654,14 +6543,27 @@ function createConditionalRangesBlockComponent(
         return false;
       }
       staticSegments.push(elements.slice(cursor));
+      try {
+        if (!applyStaticRangeBindings(props.bindings, staticSegments, staticValues)) {
+          cleanupInstances();
+          return false;
+        }
+        for (let index = 0; index < selections.length; index += 1) {
+          const selection = selections[index];
+          const instance = instances[index];
+          if (selection.kind === "branch" && instance) {
+            applyPreparedHostConditionalBindings(selection.branch, instance.host);
+          }
+        }
+      } catch (error) {
+        cleanupInstances();
+        throw error;
+      }
+      for (const instance of this.rangeInstances) instance?.host.scope?.cleanup();
       this.staticSegments = staticSegments;
       this.rangeInstances = instances;
-      if (!applyStaticRangeBindings(props.bindings, this.staticSegments, this.staticValues)) {
-        cleanupInstances();
-        this.rangeInstances = [];
-        this.staticSegments = [];
-        return false;
-      }
+      this.staticValues.length = 0;
+      this.staticValues.push(...staticValues);
       return true;
     }
 
@@ -5734,7 +6636,7 @@ function createConditionalRangesBlockComponent(
         return;
       }
       if (this.state.fallback) {
-        this.fallbackVersion += 1;
+        this.prepareFallbackUpdate();
         this.forceUpdate(afterCommit);
         return;
       }
@@ -5771,6 +6673,15 @@ function createConditionalRangesBlockComponent(
       this.reconcile(afterCommit);
     };
 
+    private listen(): void {
+      const id = this.currentProps.id;
+      const stop = this.stop;
+      if (this.id === id) return;
+      stop?.();
+      this.stop = owner.subscribe(id, this.refresh);
+      this.id = id;
+    }
+
     private activateFallback(afterCommit?: () => void): void {
       if (!this.mounted || this.state.fallback || this.fallbackRequested) {
         afterCommit?.();
@@ -5779,6 +6690,7 @@ function createConditionalRangesBlockComponent(
       this.fallbackRequested = true;
       for (const instance of this.rangeInstances) instance?.host.scope?.cleanup();
       this.subscribeFallbackDescendants();
+      this.fallbackKeysWereUnsafe = this.hasUnsafeFallbackKeys();
       this.setState({ fallback: true }, afterCommit);
     }
 
@@ -5787,7 +6699,10 @@ function createConditionalRangesBlockComponent(
       this.propFallbackQueued = true;
       queueMicrotask(() => {
         this.propFallbackQueued = false;
-        if (this.mounted && !this.state.fallback) this.activateFallback();
+        if (this.mounted && !this.state.fallback) {
+          this.listen();
+          this.activateFallback();
+        }
       });
     }
 
@@ -5795,25 +6710,46 @@ function createConditionalRangesBlockComponent(
       nextProps: CompilerConditionalRangesBlockProps,
       nextState: State,
     ): boolean {
+      const definitionChanged = this.definitionVersion !== owner.getDefinitionVersion?.();
       this.currentProps = nextProps;
+      if (this.state.fallback && nextState.fallback) this.prepareFallbackUpdate();
       if (nextState.fallback || this.state.fallback) return true;
+      if (definitionChanged) return true;
       this.schedulePropFallback();
       return false;
     }
 
     componentDidMount(): void {
       this.mounted = true;
-      this.unsubscribe = owner.subscribe(this.props.id, this.refresh);
-      if (!this.adopt()) this.activateFallback();
+      this.listen();
+      // Replay must restore nested listeners even before the fallback state update commits.
+      if (this.state.fallback || this.fallbackRequested) {
+        this.subscribeFallbackDescendants();
+        this.fallbackKeysWereUnsafe = this.hasUnsafeFallbackKeys();
+      } else if (!this.adopt()) this.activateFallback();
+    }
+
+    componentDidUpdate(): void {
+      this.listen();
+      const nextDefinitionVersion = owner.getDefinitionVersion?.();
+      const definitionChanged = this.definitionVersion !== nextDefinitionVersion;
+      this.definitionVersion = nextDefinitionVersion;
+      if (this.state.fallback) {
+        this.subscribeFallbackDescendants();
+      } else if (definitionChanged && !this.adopt()) {
+        this.activateFallback();
+      }
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.unsubscribe?.();
-      for (const unsubscribe of this.fallbackUnsubscribers) unsubscribe();
-      this.fallbackUnsubscribers = [];
+      const stop = this.stop;
+      stop?.();
+      this.id = undefined;
+      clearCompilerFallbackSubscriptions(this.fallbackUnsubscribers);
+      this.fallbackKeysWereUnsafe = false;
       for (const instance of this.rangeInstances) instance?.host.scope?.cleanup();
-      this.root = null;
+      // Keep the attached root for React 18 replay; captureRoot clears real detachments.
       this.rangeInstances = [];
       this.staticSegments = [];
       this.staticValues.length = 0;
@@ -5837,9 +6773,9 @@ function createConditionalRangesBlockComponent(
 }
 
 /** Returns positions forming the LIS while ignoring newly inserted (-1) entries. */
-function longestIncreasingSubsequencePositions(sequence: readonly number[]): Set<number> {
+function longestIncreasingSubsequencePositions(sequence: readonly number[]): Uint8Array {
   const tails: number[] = [];
-  const previous = Array.from({ length: sequence.length }, () => -1);
+  const previous = new Int32Array(sequence.length).fill(-1);
 
   for (let index = 0; index < sequence.length; index += 1) {
     if (sequence[index] < 0) continue;
@@ -5854,10 +6790,11 @@ function longestIncreasingSubsequencePositions(sequence: readonly number[]): Set
     tails[low] = index;
   }
 
-  const positions = new Set<number>();
+  // positions[index] is 1 when that row is part of the stable subsequence.
+  const positions = new Uint8Array(sequence.length);
   let cursor = tails.at(-1) ?? -1;
   while (cursor >= 0) {
-    positions.add(cursor);
+    positions[cursor] = 1;
     cursor = previous[cursor];
   }
   return positions;
@@ -5876,21 +6813,40 @@ function reorderCompilerKeyedRows(
     if (sequence[index] < 0) {
       let start = index;
       while (start > 0 && sequence[start - 1] < 0) start -= 1;
-      const fragment = root.ownerDocument.createDocumentFragment();
+      // Insert the new run directly, in order, ahead of the anchor.
       for (let itemIndex = start; itemIndex <= index; itemIndex += 1) {
-        fragment.append(instances[itemIndex].element);
+        root.insertBefore(instances[itemIndex].element, anchor);
       }
-      root.insertBefore(fragment, anchor);
       anchor = instances[start].element;
       index = start;
     } else {
-      if (!stablePositions.has(index) && instance.element.nextSibling !== anchor) {
+      if (!stablePositions[index] && instance.element.nextSibling !== anchor) {
         root.insertBefore(instance.element, anchor);
       }
       anchor = instance.element;
     }
   }
   restoreCompilerFocus(activeElement);
+}
+
+const RESOLVED_COMPILER_MICROTASK = Promise.resolve();
+
+/**
+ * Runs `callback` as a microtask, in the same queue and order as `queueMicrotask`. Every compiled
+ * update schedules one, and in Chrome a reaction on an already-resolved promise skips the binding
+ * and async-task bookkeeping `queueMicrotask` pays per call. A throw is rethrown through
+ * `queueMicrotask` so it is reported as an uncaught error, not an unhandled rejection.
+ */
+function scheduleCompilerMicrotask(callback: () => void): void {
+  void RESOLVED_COMPILER_MICROTASK.then(() => {
+    try {
+      callback();
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error;
+      });
+    }
+  });
 }
 
 function compilerFocusedElement(root: Element): Element | null {
@@ -5926,12 +6882,12 @@ function reverseCompilerKeyedRows(root: Element, instances: CompilerKeyedRowInst
 type RowConditionalRefresh = (item: unknown, index: number, afterCommit?: () => void) => void;
 
 interface RowConditionalOwner {
-  subscribe(key: string, id: number, refresh: RowConditionalRefresh): () => void;
+  subscribe(key: KeyedRowKey, id: number, refresh: RowConditionalRefresh): () => void;
 }
 
 interface RowConditionalProps {
   owner: RowConditionalOwner;
-  rowKey: string;
+  rowKey: KeyedRowKey;
   id: number;
   renderVersion: number;
   item: unknown;
@@ -5946,13 +6902,31 @@ interface RowConditionalState {
 }
 
 interface KeyedRowConditionalRuntime {
-  Component: React.ComponentType<RowConditionalProps>;
   readValues(
     props: Pick<CompilerKeyedRowsBlockProps, "conditionals">,
     item: unknown,
     index: number,
   ): ReadonlyMap<number, readonly unknown[]>;
   changed(previous: readonly unknown[] | undefined, next: readonly unknown[]): boolean;
+  /** Renders one row's conditional boundary. */
+  element(props: RowConditionalProps): React.ReactElement;
+  /** Subscribes a block's conditional boundaries to its listener map. */
+  owner(listeners: RowConditionalListeners): RowConditionalOwner;
+  /** Refreshes changed boundaries synchronously, then calls afterCommit once. */
+  notify(
+    listeners: RowConditionalListeners,
+    changes: readonly RowConditionalChange[],
+    afterCommit?: () => void,
+  ): void;
+}
+
+type RowConditionalListeners = Map<KeyedRowKey, Map<number, RowConditionalRefresh>>;
+
+interface RowConditionalChange {
+  key: KeyedRowKey;
+  id: number;
+  item: unknown;
+  index: number;
 }
 
 interface KeyedRowHostRuntime {
@@ -5966,66 +6940,72 @@ interface KeyedRowHostRuntime {
 interface KeyedUpdateRuntime {
   commit(
     value: unknown,
-    instances?: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances?: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   ): object | undefined;
   append(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
+  // Validates every retained row, then deletes the removed rows from the owned
+  // input map in place and returns it.
   filter?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
+  // Transfers a fresh runtime-owned native map after validating the full update.
   prepend?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
   rollingWindow?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
+  // Returns the owned input for binding-only updates, or a fresh owned native map.
   position?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
+  // Returns a runtime-owned native map containing only retained row instances:
+  // reorders may remove rows, but never create or replace their root elements.
   reorder?(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
     root: Element,
     reactOwnedRows: boolean,
-  ): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined;
+  ): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined;
   reconcile(
     props: CompilerKeyedRowsBlockProps,
     dirtyState: ReadonlySet<number>,
     collectionToken: object | undefined,
-    instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+    instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
     conditionals: KeyedRowConditionalRuntime | undefined,
   ):
     | {
         collectionToken: object | undefined;
         conditionalChanges: readonly {
-          key: string;
+          key: KeyedRowKey;
           id: number;
           item: unknown;
           index: number;
@@ -6041,109 +7021,138 @@ const keyedUpdateRuntime: KeyedUpdateRuntime = {
   reconcile: reconcileCompilerKeyedMapUpdate,
 };
 
-const keyedFilterUpdateRuntime: KeyedUpdateRuntime = {
+// Compiler-proven append-only hints do not need the map-update fast path.
+// Unhinted and rejected updates retain the complete keyed reconciliation path.
+const keyedAppendOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: reconcileCompilerKeyedArrayAppend,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
+};
+
+// These immutable compositions have no observable effects. Mark their creation
+// as pure so unused feature chains can be removed by Rollup and Rolldown alike.
+const keyedFilterUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
+  filter: reconcileCompilerKeyedArrayFilter,
+}))();
+
+// Only selected when the compiler emits removal hints without map/append hints.
+// Other updates continue through the existing full keyed reconciliation path.
+const keyedFilterOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: () => undefined,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
   filter: reconcileCompilerKeyedArrayFilter,
 };
 
-const keyedPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
+  prepend: reconcileCompilerKeyedArrayPrepend,
+}))();
+
+// Compiler-proven prepend-only hints omit map/append fast paths, not fallback.
+const keyedPrependOnlyUpdateRuntime: KeyedUpdateRuntime = {
+  append: () => undefined,
+  commit: commitCompilerKeyedCollection,
+  reconcile: () => undefined,
   prepend: reconcileCompilerKeyedArrayPrepend,
 };
 
-const keyedFilterPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedFilterPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrepend,
-};
+}))();
 
-const keyedStructuralPrependUpdateRuntime: KeyedUpdateRuntime = {
+const keyedStructuralPrependUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterPrependUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependWithStructural,
-};
+}))();
 
-const keyedPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPosition,
-};
+}))();
 
-const keyedBatchPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedBatchPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithBatch,
-};
+}))();
 
-const keyedWindowPositionUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowPositionUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithWindow,
-};
+}))();
 
-const keyedReorderUpdateRuntime: KeyedUpdateRuntime = {
+const keyedReorderUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   reorder: reconcileCompilerKeyedArrayReorder,
-};
+}))();
 
-const keyedMapReorderUpdateRuntime: KeyedUpdateRuntime = {
+const keyedMapReorderUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedUpdateRuntime,
   reorder: reconcileCompilerKeyedArrayReorderWithMap,
-};
+}))();
 
-const keyedCompleteUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedFilterPrependUpdateRuntime,
   rollingWindow: reconcileCompilerKeyedArrayRollingWindow,
-};
+}))();
 
-const keyedEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteUpdateRuntime,
   position: reconcileCompilerKeyedArrayPosition,
   reorder: reconcileCompilerKeyedArrayReorderWithMapAndStructural,
-};
+}))();
 
-const keyedBatchEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedBatchEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedEveryUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithBatch,
-};
+}))();
 
-const keyedWindowEveryUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowEveryUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedEveryUpdateRuntime,
   position: reconcileCompilerKeyedArrayPositionWithWindow,
-};
+}))();
 
-const keyedWindowEveryStructuralAppendUpdateRuntime: KeyedUpdateRuntime = {
+const keyedWindowEveryStructuralAppendUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedWindowEveryUpdateRuntime,
   append: reconcileCompilerKeyedArrayAppendWithStructural,
-};
+}))();
 
-const keyedWindowEveryStructuralAppendMapUpdateRuntime: KeyedUpdateRuntime = {
-  ...keyedWindowEveryStructuralAppendUpdateRuntime,
-  append: reconcileCompilerKeyedArrayAppendMapWithStructural,
-  commit: commitCompilerKeyedCollectionWithItemSnapshot,
-};
+const keyedWindowEveryStructuralAppendMapUpdateRuntime: KeyedUpdateRuntime =
+  /* @__PURE__ */ (() => ({
+    ...keyedWindowEveryStructuralAppendUpdateRuntime,
+    append: reconcileCompilerKeyedArrayAppendMapWithStructural,
+    commit: commitCompilerKeyedCollectionWithItemSnapshot,
+  }))();
 
-const keyedCompleteCompatibilityUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteCompatibilityUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedWindowEveryStructuralAppendMapUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependWithStructural,
-};
+}))();
 
-const keyedCompleteStructuralPrependMapUpdateRuntime: KeyedUpdateRuntime = {
+const keyedCompleteStructuralPrependMapUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteCompatibilityUpdateRuntime,
   prepend: reconcileCompilerKeyedArrayPrependMapWithStructural,
-};
+}))();
 
-const keyedMappedRollingWindowUpdateRuntime: KeyedUpdateRuntime = {
+const keyedMappedRollingWindowUpdateRuntime: KeyedUpdateRuntime = /* @__PURE__ */ (() => ({
   ...keyedCompleteStructuralPrependMapUpdateRuntime,
   rollingWindow: reconcileCompilerKeyedArrayMappedRollingWindow,
-};
+}))();
 
 interface KeyedRowsRuntimeOptions {
   conditionals?: KeyedRowConditionalRuntime;
   hostBlocks?: KeyedRowHostRuntime;
   keyedUpdates?: KeyedUpdateRuntime;
+  keyedTargets?: (props: CompilerKeyedRowsBlockProps) => KeyedTargetRuntime | undefined;
 }
 
 function reconcileCompilerKeyedMapUpdate(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   conditionals: KeyedRowConditionalRuntime | undefined,
 ): ReturnType<KeyedUpdateRuntime["reconcile"]> {
   const dependency = props.collectionDependency;
@@ -6160,7 +7169,7 @@ function reconcileCompilerKeyedMapUpdate(
 
   const changedIndices = [...new Set(hintedIndices)].sort((left, right) => left - right);
   const updates: Array<{
-    key: string;
+    key: KeyedRowKey;
     item: unknown;
     index: number;
     instance: CompilerKeyedRowInstance;
@@ -6179,7 +7188,7 @@ function reconcileCompilerKeyedMapUpdate(
   }
 
   const conditionalChanges: Array<{
-    key: string;
+    key: KeyedRowKey;
     id: number;
     item: unknown;
     index: number;
@@ -6213,11 +7222,11 @@ function reconcileCompilerKeyedArrayMapReorder(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
   preparedReorder?: CompilerPreparedKeyedArrayReorder,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6253,7 +7262,7 @@ function reconcileCompilerKeyedArrayMapReorder(
   const reverse = update.kind === CompilerKeyedArrayReorderKind.Reverse;
   const prepared = (() => {
     const changed: Array<{
-      bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+      bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
       instance: CompilerKeyedRowInstance;
       item: unknown;
     }> = [];
@@ -6330,7 +7339,7 @@ function reconcileCompilerKeyedArrayAppend(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
 ): ReturnType<KeyedUpdateRuntime["append"]> {
@@ -6359,24 +7368,22 @@ function reconcileCompilerKeyedArrayAppend(
   const startIndex = compilerKeyedArrayAppendStart(finalValue, collectionToken, instances.size);
   if (startIndex === undefined || !Array.isArray(finalValue)) return undefined;
 
-  const nextInstances = new Map(instances);
+  const appendedKeys = new Set<KeyedRowKey>();
   const appended: CompilerKeyedRowInstance[] = [];
   try {
     for (let index = startIndex; index < finalValue.length; index += 1) {
       const item = finalValue[index];
       const key = keyedRowIdentity(props.rowKey(item, index));
-      if (nextInstances.has(key)) return undefined;
-      const descriptor = props.create(item, index);
-      const instance: CompilerKeyedRowInstance = {
+      if (instances.has(key) || appendedKeys.has(key)) return undefined;
+      appendedKeys.add(key);
+      const instance: CompilerKeyedRowInstance = createKeyedRowInstance(
+        props,
+        root.ownerDocument,
         key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
         item,
         index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      };
+      );
       appended.push(instance);
-      nextInstances.set(key, instance);
     }
   } catch {
     return undefined;
@@ -6387,17 +7394,22 @@ function reconcileCompilerKeyedArrayAppend(
     for (const instance of appended) fragment.append(instance.element);
     root.append(fragment);
   }
-  return nextInstances;
+  // The block owns this map. Commit only after every new key, descriptor and
+  // binding has been validated, so a rejected append leaves it untouched.
+  const mutableInstances = instances as Map<KeyedRowKey, CompilerKeyedRowInstance>;
+  for (const instance of appended) mutableInstances.set(instance.key, instance);
+  COMPILER_KEYED_APPEND_DELTAS.set(mutableInstances, appended);
+  return mutableInstances;
 }
 
 function reconcileCompilerKeyedArrayStructuralAppend(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6461,15 +7473,7 @@ function reconcileCompilerKeyedArrayStructuralAppend(
       // reconciliation so React can preserve that row's existing identity.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      appended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      appended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -6494,10 +7498,10 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6541,11 +7545,11 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
-  const appendedKeys = new Set<string>();
+  const appendedKeys = new Set<KeyedRowKey>();
   const appended: CompilerKeyedRowInstance[] = [];
   try {
     if (mappedStructuralSources) {
@@ -6611,21 +7615,13 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
       const key = keyedRowIdentity(props.rowKey(item, index));
       if (instances.has(key) || appendedKeys.has(key)) return undefined;
       appendedKeys.add(key);
-      const descriptor = props.create(item, index);
-      appended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      appended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
   }
 
-  const mutableInstances = instances as Map<string, CompilerKeyedRowInstance>;
+  const mutableInstances = instances as Map<KeyedRowKey, CompilerKeyedRowInstance>;
   if (survivorRange) {
     for (let index = 0; index < survivorRange.start; index += 1) {
       const instance = previousInstances[index];
@@ -6672,7 +7668,7 @@ function reconcileCompilerKeyedArrayStructuralAppendMap(
 
 function reconcileCompilerKeyedArrayAppendWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayAppend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralAppend(...args) ||
     reconcileCompilerKeyedArrayAppend(...args)
@@ -6681,7 +7677,7 @@ function reconcileCompilerKeyedArrayAppendWithStructural(
 
 function reconcileCompilerKeyedArrayAppendMapWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayAppend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralAppendMap(...args) ||
     reconcileCompilerKeyedArrayStructuralAppend(...args) ||
@@ -6693,10 +7689,10 @@ function reconcileCompilerKeyedArrayRollingWindow(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6753,15 +7749,7 @@ function reconcileCompilerKeyedArrayRollingWindow(
       // reconciliation path so React-owned row identity is never recreated.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -6784,10 +7772,10 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6822,7 +7810,7 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
   const retainedLength = previousInstances.length - retainedStart;
   const survivors: CompilerKeyedRowInstance[] = [];
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -6844,7 +7832,7 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
     return undefined;
   }
 
-  const incomingKeys = new Set<string>();
+  const incomingKeys = new Set<KeyedRowKey>();
   const incoming: CompilerKeyedRowInstance[] = [];
   try {
     for (let index = retainedLength; index < finalValue.length; index += 1) {
@@ -6854,22 +7842,14 @@ function reconcileCompilerKeyedArrayMappedRollingWindow(
       // reconciliation path so React-owned row identity is never recreated.
       if (instances.has(key) || incomingKeys.has(key)) return undefined;
       incomingKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
   }
 
-  const mutableInstances = instances as Map<string, CompilerKeyedRowInstance>;
-  const removedKeys: string[] = [];
+  const mutableInstances = instances as Map<KeyedRowKey, CompilerKeyedRowInstance>;
+  const removedKeys: KeyedRowKey[] = [];
   for (let index = 0; index < retainedStart; index += 1) {
     const instance = previousInstances[index];
     instance.scope?.cleanup();
@@ -6901,10 +7881,10 @@ function reconcileCompilerKeyedArrayPosition(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -6948,7 +7928,7 @@ function reconcileCompilerKeyedArrayPosition(
   }
 
   let item: unknown;
-  let key: string;
+  let key: KeyedRowKey;
   try {
     item = finalValue[update.position];
     key = keyedRowIdentity(props.rowKey(item, update.position));
@@ -6960,15 +7940,7 @@ function reconcileCompilerKeyedArrayPosition(
     if (instances.has(key)) return undefined;
     let inserted: CompilerKeyedRowInstance;
     try {
-      const descriptor = props.create(item, update.position);
-      inserted = {
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, update.position),
-        item,
-        index: update.position,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      };
+      inserted = createKeyedRowInstance(props, root.ownerDocument, key, item, update.position);
     } catch {
       return undefined;
     }
@@ -6994,15 +7966,7 @@ function reconcileCompilerKeyedArrayPosition(
 
   let replacement: CompilerKeyedRowInstance;
   try {
-    const descriptor = props.create(item, update.position);
-    replacement = {
-      key,
-      element: createCompilerHostElement(root.ownerDocument, descriptor),
-      values: readKeyedRowBindingValues(props, item, update.position),
-      item,
-      index: update.position,
-      conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-    };
+    replacement = createKeyedRowInstance(props, root.ownerDocument, key, item, update.position);
   } catch {
     return undefined;
   }
@@ -7016,10 +7980,10 @@ function reconcileCompilerKeyedArrayBatchInsert(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7055,24 +8019,18 @@ function reconcileCompilerKeyedArrayBatchInsert(
       return undefined;
     }
   }
-  const knownKeys = new Set(instances.keys());
+  // The committed map stays unchanged until every incoming row is prepared.
+  // Track only the new keys instead of copying the entire committed key set.
+  const incomingKeys = new Set<KeyedRowKey>();
   const incoming: CompilerKeyedRowInstance[] = [];
   try {
     for (let offset = 0; offset < insertCount; offset += 1) {
       const index = update.position + offset;
       const item = finalValue[index];
       const key = keyedRowIdentity(props.rowKey(item, index));
-      if (knownKeys.has(key)) return undefined;
-      knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      incoming.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      if (instances.has(key) || incomingKeys.has(key)) return undefined;
+      incomingKeys.add(key);
+      incoming.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7122,7 +8080,7 @@ function normalizeCompilerKeyedArrayDisjointWindows(
   return windows;
 }
 
-type CompilerKeyedArrayWindowItems = [items: unknown[], keys: string[]];
+type CompilerKeyedArrayWindowItems = [items: unknown[], keys: KeyedRowKey[]];
 
 function readCompilerKeyedArrayWindowItems(
   props: CompilerKeyedRowsBlockProps,
@@ -7131,7 +8089,7 @@ function readCompilerKeyedArrayWindowItems(
   insertedCount: number,
 ): CompilerKeyedArrayWindowItems | undefined {
   const items: unknown[] = [];
-  const keys: string[] = [];
+  const keys: KeyedRowKey[] = [];
   try {
     for (let offset = 0; offset < insertedCount; offset += 1) {
       const index = resultPosition + offset;
@@ -7149,20 +8107,20 @@ type CompilerPreparedKeyedArrayWindow = [
   removed: CompilerKeyedRowInstance[],
   anchor: ChildNode | null,
   incomingItems: unknown[],
-  incomingKeySet: ReadonlySet<string>,
+  incomingKeySet: ReadonlySet<KeyedRowKey>,
   nextWindow: CompilerKeyedRowInstance[],
   sequence: number[],
-  preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined>,
+  preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined>,
 ];
 
 function prepareCompilerKeyedArrayWindow(
   props: CompilerKeyedRowsBlockProps,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   previousInstances: readonly CompilerKeyedRowInstance[],
   root: Element,
   window: CompilerKeyedArrayDisjointWindow,
   incoming: CompilerKeyedArrayWindowItems,
-  preparedIncomingKeys: Set<string>,
+  preparedIncomingKeys: Set<KeyedRowKey>,
 ): CompilerPreparedKeyedArrayWindow | undefined {
   const removedEnd = window[0] + window[2];
   const removed = previousInstances.slice(window[0], removedEnd);
@@ -7191,7 +8149,7 @@ function prepareCompilerKeyedArrayWindow(
     : undefined;
   const nextWindow: CompilerKeyedRowInstance[] = [];
   const sequence: number[] = [];
-  const preparedBindings: Array<readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined> = [];
+  const preparedBindings: Array<Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined> = [];
   try {
     for (let offset = 0; offset < window[3]; offset += 1) {
       const index = window[1] + offset;
@@ -7209,15 +8167,7 @@ function prepareCompilerKeyedArrayWindow(
       // A key owned outside this exact source window would move a row across
       // a compiler-proven boundary. Complete reconciliation owns that case.
       if (instances.has(key)) return undefined;
-      const descriptor = props.create(item, index);
-      nextWindow.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      nextWindow.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
       sequence.push(-1);
       preparedBindings.push(undefined);
     }
@@ -7252,10 +8202,10 @@ function reconcileCompilerKeyedArrayWindowReplace(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7286,7 +8236,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
 
       let sourceCursor = 0;
       let resultCursor = 0;
-      const preparedIncomingKeys = new Set<string>();
+      const preparedIncomingKeys = new Set<KeyedRowKey>();
       const preparedWindows: CompilerPreparedKeyedArrayWindow[] = [];
       const nextInstances: CompilerKeyedRowInstance[] = [];
       for (const window of windows) {
@@ -7351,66 +8301,58 @@ function reconcileCompilerKeyedArrayWindowReplace(
       return keyedRowInstancesByKey(nextInstances);
     }
 
-    const touchedIndices = new Set<number>();
-    for (const update of updates) {
-      for (let index = update.position; index < update.position + update.removedCount; index += 1) {
-        touchedIndices.add(index);
-      }
-    }
+    // Length-preserving windows share source positions. Walk their ranges in
+    // row order so overlaps are prepared once, without hashing every row index.
+    // The validated chain is a fresh array; consuming it does not change the hints.
+    updates.sort((left, right) => right.position - left.position);
+    let window = updates.pop();
+    const touchedInstances: CompilerKeyedRowInstance[] = [];
 
     for (let index = 0; index < previousInstances.length; index += 1) {
+      while (window && index >= window.position + window.removedCount) {
+        window = updates.pop();
+      }
       const instance = previousInstances[index];
-      const touched = touchedIndices.has(index);
-      if (
-        !instance ||
-        instance.index !== index ||
-        (touched
-          ? instance.element.parentNode !== root
-          : !Object.is(instance.item, finalValue[index]))
-      ) {
+      if (!instance || instance.index !== index) return undefined;
+      if (window && index >= window.position) {
+        if (instance.element.parentNode !== root) return undefined;
+        touchedInstances.push(instance);
+      } else if (!Object.is(instance.item, finalValue[index])) {
         return undefined;
       }
     }
 
-    const knownKeys = new Set(instances.keys());
-    const incomingKeys = new Set<string>();
+    const incomingKeys = new Set<KeyedRowKey>();
     let replacesRows = false;
     const prepared: Array<
       readonly [
         index: number,
         instance: CompilerKeyedRowInstance,
         item: unknown,
-        updates: readonly CompilerPreparedKeyedRowBindingUpdate[] | undefined,
+        updates: Readonly<CompilerPreparedKeyedRowBindingUpdates> | undefined,
         replacement: CompilerKeyedRowInstance | undefined,
       ]
     > = [];
     try {
-      for (const index of [...touchedIndices].sort((left, right) => left - right)) {
-        const instance = previousInstances[index];
+      for (const instance of touchedInstances) {
+        const index = instance.index;
         const item = finalValue[index];
         const key = keyedRowIdentity(props.rowKey(item, index));
         if (key !== instance.key) {
           // Fixed-length queued windows never shift positions, and React only
           // commits their final array. Intermediate identities were never
           // mounted, so only the final key must be new to the committed
-          // rows and unique across the prepared replacements.
-          if (knownKeys.has(key) || incomingKeys.has(key)) return undefined;
+          // rows and unique across the prepared replacements. The committed
+          // map stays unchanged throughout preparation, so reuse its lookup.
+          if (instances.has(key) || incomingKeys.has(key)) return undefined;
           incomingKeys.add(key);
           replacesRows = true;
-          const descriptor = props.create(item, index);
           prepared.push([
             index,
             instance,
             item,
             undefined,
-            {
-              key,
-              element: createCompilerHostElement(root.ownerDocument, descriptor),
-              values: readKeyedRowBindingValues(props, item, index),
-              item,
-              index,
-              conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-            },
+            createKeyedRowInstance(props, root.ownerDocument, key, item, index),
           ]);
           continue;
         }
@@ -7471,7 +8413,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
     update.insertedCount === update.removedCount &&
     incomingKeys.every((key, offset) => key === removed[offset].key)
   ) {
-    const prepared: CompilerPreparedKeyedRowBindingUpdate[][] = [];
+    const prepared: CompilerPreparedKeyedRowBindingUpdates[] = [];
     try {
       for (let offset = 0; offset < update.insertedCount; offset += 1) {
         const updates = prepareKeyedRowBindingUpdates(
@@ -7513,7 +8455,7 @@ function reconcileCompilerKeyedArrayWindowReplace(
 
 function reconcileCompilerKeyedArrayPositionWithBatch(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPosition>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayBatchInsert(...args) || reconcileCompilerKeyedArrayPosition(...args)
   );
@@ -7521,7 +8463,7 @@ function reconcileCompilerKeyedArrayPositionWithBatch(
 
 function reconcileCompilerKeyedArrayPositionWithWindow(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPosition>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayWindowReplace(...args) ||
     reconcileCompilerKeyedArrayBatchInsert(...args) ||
@@ -7533,11 +8475,11 @@ function reconcileCompilerKeyedArrayStructuralReorder(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
   preparedReorder?: CompilerPreparedKeyedArrayReorder,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7598,7 +8540,7 @@ function reconcileCompilerKeyedArrayStructuralReorder(
       };
       let preservesSurvivorOrder = true;
       const directChanges: Array<{
-        bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+        bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
         instance: CompilerKeyedRowInstance;
         item: unknown;
       }> = [];
@@ -7698,11 +8640,11 @@ function reconcileCompilerKeyedArrayReorder(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
   preparedReorder?: CompilerPreparedKeyedArrayReorder,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7823,7 +8765,7 @@ function prepareCompilerKeyedArrayReorder(
 
 function reconcileCompilerKeyedArrayReorderWithMap(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayReorder>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   const prepared = prepareCompilerKeyedArrayReorder(args);
   if (!prepared) return undefined;
   const reconcile = prepared.update?.mapped
@@ -7834,7 +8776,7 @@ function reconcileCompilerKeyedArrayReorderWithMap(
 
 function reconcileCompilerKeyedArrayReorderWithMapAndStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayReorder>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   const prepared = prepareCompilerKeyedArrayReorder(args);
   if (!prepared) return undefined;
   const reconcile = prepared.update?.structuralUpdate
@@ -7849,10 +8791,10 @@ function reconcileCompilerKeyedArrayPrepend(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7883,23 +8825,16 @@ function reconcileCompilerKeyedArrayPrepend(
     }
   }
 
-  const knownKeys = new Set(instances.keys());
+  // Check committed rows in place; only the incoming prefix needs its own key set.
+  const incomingKeys = new Set<KeyedRowKey>();
   const prepended: CompilerKeyedRowInstance[] = [];
   try {
     for (let index = 0; index < prefixLength; index += 1) {
       const item = finalValue[index];
       const key = keyedRowIdentity(props.rowKey(item, index));
-      if (knownKeys.has(key)) return undefined;
-      knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      if (instances.has(key) || incomingKeys.has(key)) return undefined;
+      incomingKeys.add(key);
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -7920,10 +8855,10 @@ function reconcileCompilerKeyedArrayStructuralPrepend(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -7989,15 +8924,7 @@ function reconcileCompilerKeyedArrayStructuralPrepend(
       // reconciliation so React can preserve that row's existing identity.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -8024,10 +8951,10 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
   root: Element,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8071,7 +8998,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
     : (survivorIndices?.length ?? 0);
   if (!survivorRange && !survivorIndices) return undefined;
   const changed: Array<{
-    bindingUpdates: CompilerPreparedKeyedRowBindingUpdate[];
+    bindingUpdates: CompilerPreparedKeyedRowBindingUpdates;
     instance: CompilerKeyedRowInstance;
     item: unknown;
   }> = [];
@@ -8150,15 +9077,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
       // Reusing a committed key may require React to move an existing row.
       if (knownKeys.has(key)) return undefined;
       knownKeys.add(key);
-      const descriptor = props.create(item, index);
-      prepended.push({
-        key,
-        element: createCompilerHostElement(root.ownerDocument, descriptor),
-        values: readKeyedRowBindingValues(props, item, index),
-        item,
-        index,
-        conditionalValues: EMPTY_KEYED_ROW_CONDITIONAL_VALUES,
-      });
+      prepended.push(createKeyedRowInstance(props, root.ownerDocument, key, item, index));
     }
   } catch {
     return undefined;
@@ -8201,7 +9120,7 @@ function reconcileCompilerKeyedArrayStructuralPrependMap(
 
 function reconcileCompilerKeyedArrayPrependWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPrepend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralPrepend(...args) ||
     reconcileCompilerKeyedArrayPrepend(...args)
@@ -8210,7 +9129,7 @@ function reconcileCompilerKeyedArrayPrependWithStructural(
 
 function reconcileCompilerKeyedArrayPrependMapWithStructural(
   ...args: Parameters<typeof reconcileCompilerKeyedArrayPrepend>
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   return (
     reconcileCompilerKeyedArrayStructuralPrependMap(...args) ||
     reconcileCompilerKeyedArrayStructuralPrepend(...args) ||
@@ -8222,9 +9141,9 @@ function reconcileCompilerKeyedArrayFilter(
   props: CompilerKeyedRowsBlockProps,
   dirtyState: ReadonlySet<number>,
   collectionToken: object | undefined,
-  instances: ReadonlyMap<string, CompilerKeyedRowInstance>,
+  instances: Map<KeyedRowKey, CompilerKeyedRowInstance>,
   reactOwnedRows: boolean,
-): ReadonlyMap<string, CompilerKeyedRowInstance> | undefined {
+): Map<KeyedRowKey, CompilerKeyedRowInstance> | undefined {
   if (
     reactOwnedRows ||
     props.hostBlocks ||
@@ -8252,37 +9171,40 @@ function reconcileCompilerKeyedArrayFilter(
   );
   if (!survivorResult || !Array.isArray(finalValue)) return undefined;
   const { indices: survivorIndices, keysStable } = survivorResult;
-  const previousInstances = [...instances.values()];
-  const survivors: CompilerKeyedRowInstance[] = [];
+  // Filter keeps source order, so survivors are walked alongside the rows.
+  const removed: CompilerKeyedRowInstance[] = [];
+  let cursor = 0;
+  let sourceIndex = 0;
   try {
-    for (let index = 0; index < survivorIndices.length; index += 1) {
-      const sourceIndex = survivorIndices[index];
-      const instance = previousInstances[sourceIndex];
-      const item = finalValue[index];
-      if (
-        !instance ||
-        instance.index !== sourceIndex ||
-        !Object.is(instance.item, item) ||
-        (!keysStable && keyedRowIdentity(props.rowKey(item, index)) !== instance.key)
-      ) {
-        return undefined;
+    for (const instance of instances.values()) {
+      if (survivorIndices[cursor] !== sourceIndex) {
+        removed.push(instance);
+      } else {
+        const item = finalValue[cursor];
+        if (
+          instance.index !== sourceIndex ||
+          !Object.is(instance.item, item) ||
+          (!keysStable && keyedRowIdentity(props.rowKey(item, cursor)) !== instance.key)
+        ) {
+          return undefined;
+        }
+        cursor += 1;
       }
-      survivors.push(instance);
+      sourceIndex += 1;
     }
   } catch {
     return undefined;
   }
+  if (cursor !== survivorIndices.length) return undefined;
 
-  const survivorSet = new Set(survivorIndices);
-  for (let index = 0; index < previousInstances.length; index += 1) {
-    if (survivorSet.has(index)) continue;
-    previousInstances[index].scope?.cleanup();
-    previousInstances[index].element.remove();
+  for (const instance of removed) {
+    instance.scope?.cleanup();
+    instance.element.remove();
+    instances.delete(instance.key);
   }
-  for (let index = 0; index < survivors.length; index += 1) {
-    survivors[index].index = index;
-  }
-  return keyedRowInstancesByKey(survivors);
+  let index = 0;
+  for (const instance of instances.values()) instance.index = index++;
+  return instances;
 }
 
 function createKeyedRowConditionalRuntime(): KeyedRowConditionalRuntime {
@@ -8342,9 +9264,46 @@ function createKeyedRowConditionalRuntime(): KeyedRowConditionalRuntime {
   }
 
   return {
-    Component: FarmKeyedRowConditional,
+    element: (props) =>
+      React.createElement(FarmKeyedRowConditional, {
+        key: `${props.rowKey}:${props.id}`,
+        ...props,
+      }),
     readValues: readKeyedRowConditionalValues,
     changed: keyedRowConditionalChanged,
+    owner: (listeners) => ({
+      subscribe(key, id, refresh) {
+        let row = listeners.get(key);
+        if (!row) {
+          row = new Map();
+          listeners.set(key, row);
+        }
+        row.set(id, refresh);
+        return () => {
+          const current = listeners.get(key);
+          if (current?.get(id) !== refresh) return;
+          current.delete(id);
+          if (current.size === 0) listeners.delete(key);
+        };
+      },
+    }),
+    notify(listeners, changes, afterCommit) {
+      let pending = changes.length;
+      const committed = () => {
+        pending -= 1;
+        if (pending === 0) afterCommit?.();
+      };
+      // The normal row bindings are patched synchronously. Flush the
+      // React-owned conditional boundaries in the same turn as well so React
+      // 18 cannot expose a transient row where text and branch disagree.
+      flushSync(() => {
+        for (const change of changes) {
+          const refresh = listeners.get(change.key)?.get(change.id);
+          if (refresh) refresh(change.item, change.index, committed);
+          else committed();
+        }
+      });
+    },
   };
 }
 
@@ -8358,8 +9317,8 @@ function createKeyedRowHostRuntime(): KeyedRowHostRuntime {
   };
 }
 
-function createKeyedRowsBlockComponent(
-  owner: Pick<ConditionalBlockOwner, "subscribe">,
+function createKeyedRowsBlockComponentCore(
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
   options: KeyedRowsRuntimeOptions = {},
 ): React.ComponentType<CompilerKeyedRowsBlockProps> {
   interface State {
@@ -8377,22 +9336,23 @@ function createKeyedRowsBlockComponent(
     private fallbackKeysWereUnsafe = false;
     private propSyncQueued = false;
     private currentProps = this.props;
-    private unsubscribe: (() => void) | undefined;
-    private instances = new Map<string, CompilerKeyedRowInstance>();
-    private identityTargets = new Map<number, CompilerKeyedIdentityTargetSnapshot>();
-    private membershipTargets = new Map<number, CompilerKeyedMembershipTargetSnapshot>();
-    private mapLookupTargets = new Map<number, CompilerKeyedMapLookupTargetSnapshot>();
+    private definitionVersion = owner.getDefinitionVersion?.();
+    declare private stop: (() => void) | undefined;
+    declare private id: number | undefined;
+    private instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
+    private reactElements: readonly Element[] = [];
+    private keyedTargets = options.keyedTargets?.(this.props);
     private collectionToken: object | undefined;
     private renderVersion = 0;
     private readonly eventHandlers = new Map<
-      string,
+      KeyedRowKey,
       Map<number, React.EventHandler<React.SyntheticEvent>>
     >();
-    private readonly conditionalListeners = new Map<string, Map<number, RowConditionalRefresh>>();
+    private readonly conditionalListeners: RowConditionalListeners = new Map();
     private instancesByElement = new WeakMap<Element, CompilerKeyedRowInstance>();
-    private readonly conditionalOwner: RowConditionalOwner = {
-      subscribe: (key, id, refresh) => this.subscribeToRowConditional(key, id, refresh),
-    };
+    // False after a rebuild without delegated events left surviving rows unindexed.
+    private elementIndexComplete = true;
+    private readonly conditionalOwner = options.conditionals?.owner(this.conditionalListeners);
 
     private captureRoot = (root: Element | null) => {
       this.root = root;
@@ -8402,13 +9362,76 @@ function createKeyedRowsBlockComponent(
       this.activateFallback();
     };
 
-    private readRows(
-      props: CompilerKeyedRowsBlockProps,
-    ): { items: unknown[]; keys: string[] } | null {
+    private readRows(props: CompilerKeyedRowsBlockProps): {
+      items: unknown[];
+      keys: KeyedRowKey[];
+      keySet?: Set<KeyedRowKey>;
+      /** Set when the keys are the committed keys followed by new ones. */
+      appended?: boolean;
+      /**
+       * Set when the keys are the committed keys reordered among these
+       * ascending positions only, such as a swap. A moved row's committed
+       * position is also a moved position; `sources` holds its index here.
+       */
+      moved?: { positions: number[]; sources: number[] };
+    } | null {
       const items = materializeIterable(props.items());
-      const keys = items.map((item, index) => keyedRowIdentity(props.rowKey(item, index)));
-      if (new Set(keys).size !== keys.length) return null;
-      return { items, keys };
+      const keys: KeyedRowKey[] = [];
+      const committedSize = this.instances.size;
+      let prefix = 0;
+      // A same-length update keeps comparing past the first difference, so a
+      // few moved rows can be recognized without a set of every key.
+      let tracking = true;
+      let moved: number[] | undefined;
+      let displaced: KeyedRowKey[] | undefined;
+      const committed = this.instances.keys();
+      for (let index = 0; index < items.length; index += 1) {
+        const key = keyedRowIdentity(props.rowKey(items[index], index));
+        keys.push(key);
+        if (!tracking || index >= committedSize) continue;
+        const committedKey = committed.next().value as KeyedRowKey;
+        if (committedKey === key) {
+          if (prefix === index) prefix += 1;
+          continue;
+        }
+        if (items.length !== committedSize || (moved && moved.length === KEYED_ROWS_MAX_MOVED)) {
+          tracking = false;
+          moved = displaced = undefined;
+          continue;
+        }
+        (moved ??= []).push(index);
+        (displaced ??= []).push(committedKey);
+      }
+      // The committed keys are unique, so the same sequence needs no recheck.
+      if (prefix === committedSize && keys.length === committedSize) return { items, keys };
+      if (moved && displaced) {
+        // Every other position holds its committed key, so the keys are the
+        // committed (unique) keys in a new order exactly when the moved
+        // positions hold the displaced keys, each once.
+        const pending = new Map<KeyedRowKey, number>();
+        for (let index = 0; index < moved.length; index += 1) pending.set(displaced[index], index);
+        const sources: number[] = [];
+        for (const position of moved) {
+          const source = pending.get(keys[position]);
+          if (source === undefined) break;
+          pending.delete(keys[position]);
+          sources.push(source);
+        }
+        if (sources.length === moved.length)
+          return { items, keys, moved: { positions: moved, sources } };
+      }
+      if (prefix === committedSize && committedSize > 0) {
+        // Only the new tail needs checking, against itself and the committed rows.
+        const tail = new Set<KeyedRowKey>();
+        for (let index = committedSize; index < keys.length; index += 1) {
+          const key = keys[index];
+          if (this.instances.has(key) || tail.has(key)) return null;
+          tail.add(key);
+        }
+        return { items, keys, appended: true };
+      }
+      const keySet = new Set(keys);
+      return keySet.size === keys.length ? { items, keys, keySet } : null;
     }
 
     private rowEvent = (
@@ -8420,7 +9443,14 @@ function createKeyedRowsBlockComponent(
         return (event) => this.currentProps.events?.[eventId]?.invoke(item, index, event);
       }
       if (this.usesDelegatedEvents()) {
-        return undefined as unknown as React.EventHandler<React.SyntheticEvent>;
+        // The container's delegated listener runs the handler. React still checks
+        // that controlled value/checked fields carry onChange, so give change
+        // events one shared no-op instead of none; other events stay unset.
+        return (
+          this.currentProps.events?.[eventId]?.name === "onChange"
+            ? delegatedRowChangePlaceholder
+            : undefined
+        ) as React.EventHandler<React.SyntheticEvent>;
       }
       const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
       let handlers = this.eventHandlers.get(key);
@@ -8448,8 +9478,13 @@ function createKeyedRowsBlockComponent(
       );
     }
 
-    private rebuildElementIndex(instances: ReadonlyMap<string, CompilerKeyedRowInstance>): void {
+    private rebuildElementIndex(
+      instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance>,
+    ): void {
       this.instancesByElement = new WeakMap();
+      this.elementIndexComplete = this.usesDelegatedEvents();
+      // Ordinary row callbacks resolve through this.instances, not the DOM index.
+      if (!this.elementIndexComplete) return;
       for (const instance of instances.values()) {
         this.instancesByElement.set(instance.element, instance);
       }
@@ -8537,14 +9572,10 @@ function createKeyedRowsBlockComponent(
       conditionalId: number,
       render: (item: unknown, index: number) => React.ReactNode,
     ): React.ReactNode => {
-      if (this.state.fallback) return render(item, index);
-      const key = keyedRowIdentity(this.currentProps.rowKey(item, index));
-      const Conditional = options.conditionals?.Component;
-      if (!Conditional) return render(item, index);
-      return React.createElement(Conditional, {
-        key: `${key}:${conditionalId}`,
-        owner: this.conditionalOwner,
-        rowKey: key,
+      if (this.state.fallback || !options.conditionals) return render(item, index);
+      return options.conditionals.element({
+        owner: this.conditionalOwner!,
+        rowKey: keyedRowIdentity(this.currentProps.rowKey(item, index)),
         id: conditionalId,
         renderVersion: this.renderVersion,
         item,
@@ -8553,25 +9584,6 @@ function createKeyedRowsBlockComponent(
       });
     };
 
-    private subscribeToRowConditional(
-      key: string,
-      id: number,
-      refresh: RowConditionalRefresh,
-    ): () => void {
-      let listeners = this.conditionalListeners.get(key);
-      if (!listeners) {
-        listeners = new Map();
-        this.conditionalListeners.set(key, listeners);
-      }
-      listeners.set(id, refresh);
-      return () => {
-        const current = this.conditionalListeners.get(key);
-        if (current?.get(id) !== refresh) return;
-        current.delete(id);
-        if (current.size === 0) this.conditionalListeners.delete(key);
-      };
-    }
-
     private hasReactOwnedRows(props: CompilerKeyedRowsBlockProps = this.currentProps): boolean {
       return Boolean(
         props.conditionals?.length || (props.events?.length && !this.usesDelegatedEvents(props)),
@@ -8579,7 +9591,7 @@ function createKeyedRowsBlockComponent(
     }
 
     private cleanupHostScopes(
-      instances: ReadonlyMap<string, CompilerKeyedRowInstance> = this.instances,
+      instances: ReadonlyMap<KeyedRowKey, CompilerKeyedRowInstance> = this.instances,
     ): void {
       for (const instance of instances.values()) instance.scope?.cleanup();
     }
@@ -8603,17 +9615,18 @@ function createKeyedRowsBlockComponent(
       );
     }
 
-    private pruneEventHandlers(keys: readonly string[]): void {
-      const active = new Set(keys);
+    // Call only after committing this.instances: it is the authoritative live-key set.
+    private pruneEventHandlers(): void {
+      if (this.eventHandlers.size === 0) return;
       for (const key of this.eventHandlers.keys()) {
-        if (!active.has(key)) this.eventHandlers.delete(key);
+        if (!this.instances.has(key)) this.eventHandlers.delete(key);
       }
     }
 
-    private pruneConditionalListeners(keys: readonly string[]): void {
-      const active = new Set(keys);
+    private pruneConditionalListeners(): void {
+      if (this.conditionalListeners.size === 0) return;
       for (const key of this.conditionalListeners.keys()) {
-        if (!active.has(key)) this.conditionalListeners.delete(key);
+        if (!this.instances.has(key)) this.conditionalListeners.delete(key);
       }
     }
 
@@ -8622,85 +9635,24 @@ function createKeyedRowsBlockComponent(
         this.currentProps.items(),
         this.instances,
       );
-      this.commitKeyedTargets(dirtyState);
-    }
-
-    private hasSafeMembershipTargets(dirtyState?: ReadonlySet<number>): boolean {
-      for (const binding of this.currentProps.bindings) {
-        const target = binding.membershipTarget;
-        if (!target || (dirtyState && !dirtyState.has(target.dependency))) continue;
-        if (!keyedMembershipTargetSnapshot(target.read()).eligible) return false;
-      }
-      return true;
-    }
-
-    private hasSafeMapLookupTargets(dirtyState?: ReadonlySet<number>): boolean {
-      for (const binding of this.currentProps.bindings) {
-        const target = binding.mapLookupTarget;
-        if (!target || (dirtyState && !dirtyState.has(target.dependency))) continue;
-        if (!keyedMapLookupTargetSnapshot(target.read()).eligible) return false;
-      }
-      return true;
-    }
-
-    private commitKeyedTargets(dirtyState?: ReadonlySet<number>): void {
-      if (!dirtyState) {
-        this.identityTargets.clear();
-        this.membershipTargets.clear();
-        this.mapLookupTargets.clear();
-      }
-      for (
-        let bindingIndex = 0;
-        bindingIndex < this.currentProps.bindings.length;
-        bindingIndex += 1
-      ) {
-        const binding = this.currentProps.bindings[bindingIndex];
-        const identityTarget = binding.identityTarget;
-        if (!identityTarget) {
-          this.identityTargets.delete(bindingIndex);
-        } else if (!dirtyState || dirtyState.has(identityTarget.dependency)) {
-          this.identityTargets.set(
-            bindingIndex,
-            keyedIdentityTargetSnapshot(identityTarget.read()),
-          );
-        }
-
-        const membershipTarget = binding.membershipTarget;
-        if (!membershipTarget) {
-          this.membershipTargets.delete(bindingIndex);
-        } else if (!dirtyState || dirtyState.has(membershipTarget.dependency)) {
-          this.membershipTargets.set(
-            bindingIndex,
-            keyedMembershipTargetSnapshot(membershipTarget.read()),
-          );
-        }
-
-        const mapLookupTarget = binding.mapLookupTarget;
-        if (!mapLookupTarget) {
-          this.mapLookupTargets.delete(bindingIndex);
-        } else if (!dirtyState || dirtyState.has(mapLookupTarget.dependency)) {
-          this.mapLookupTargets.set(
-            bindingIndex,
-            keyedMapLookupTargetSnapshot(mapLookupTarget.read()),
-          );
-        }
-      }
+      this.keyedTargets?.commit(this.currentProps, dirtyState);
     }
 
     private adopt(): boolean {
       if (!this.root) return false;
-      if (!this.hasSafeMembershipTargets() || !this.hasSafeMapLookupTargets()) return false;
+      if (this.keyedTargets && !this.keyedTargets.hasSafeTargets(this.currentProps)) return false;
       const rows = this.readRows(this.currentProps);
       const elements = [...this.root.children];
       if (!rows || rows.items.length !== elements.length) return false;
+      const reactOwnedRows = this.hasReactOwnedRows();
       const opaqueConditionalPaths = new Set(
         (this.currentProps.conditionals || []).map((conditional) => conditional.path.join(".")),
       );
-      const instances = new Map<string, CompilerKeyedRowInstance>();
+      const instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
       for (let index = 0; index < rows.items.length; index += 1) {
         const descriptor = this.currentProps.create(rows.items[index], index);
         if (
-          this.hasReactOwnedRows() &&
+          reactOwnedRows &&
           !matchesCompilerHostElement(elements[index], descriptor, opaqueConditionalPaths)
         ) {
           this.cleanupHostScopes(instances);
@@ -8715,7 +9667,7 @@ function createKeyedRowsBlockComponent(
           key: rows.keys[index],
           element: elements[index],
           scope: scope || undefined,
-          values: this.hasReactOwnedRows()
+          values: reactOwnedRows
             ? this.currentProps.bindings.map(() => UNSET_KEYED_ROW_BINDING)
             : readKeyedRowBindingValues(this.currentProps, rows.items[index], index),
           item: rows.items[index],
@@ -8726,20 +9678,23 @@ function createKeyedRowsBlockComponent(
             index,
           ),
         };
-        if (this.hasReactOwnedRows()) {
+        instances.set(rows.keys[index], instance);
+      }
+      if (reactOwnedRows) {
+        for (const instance of instances.values()) {
           // React compares the next row against its previous virtual props, not
           // against DOM values patched by Farm between commits. Reapply every
-          // binding after a structural React commit so both views converge
-          // before direct same-key patches resume.
-          applyKeyedRowBindings(this.currentProps, instance, rows.items[index], index);
+          // binding only after every row passes structural validation so a
+          // failed adoption cannot mutate an earlier row before React fallback.
+          applyKeyedRowBindings(this.currentProps, instance, instance.item, instance.index);
         }
-        instances.set(rows.keys[index], instance);
       }
       this.cleanupHostScopes();
       this.instances = instances;
+      this.reactElements = elements;
       this.rebuildElementIndex(instances);
-      this.pruneEventHandlers(rows.keys);
-      this.pruneConditionalListeners(rows.keys);
+      this.pruneEventHandlers();
+      this.pruneConditionalListeners();
       this.commitCurrentCollection();
       return true;
     }
@@ -8781,33 +9736,12 @@ function createKeyedRowsBlockComponent(
     }
 
     private notifyConditionalChanges(
-      changes: readonly {
-        key: string;
-        id: number;
-        item: unknown;
-        index: number;
-      }[],
+      changes: readonly RowConditionalChange[],
       afterCommit?: () => void,
     ): void {
-      if (changes.length === 0) {
-        afterCommit?.();
-        return;
-      }
-      let pending = changes.length;
-      const committed = () => {
-        pending -= 1;
-        if (pending === 0) afterCommit?.();
-      };
-      // The normal row bindings above are patched synchronously. Flush the
-      // React-owned conditional boundaries in the same turn as well so React
-      // 18 cannot expose a transient row where text and branch disagree.
-      flushSync(() => {
-        for (const change of changes) {
-          const refresh = this.conditionalListeners.get(change.key)?.get(change.id);
-          if (refresh) refresh(change.item, change.index, committed);
-          else committed();
-        }
-      });
+      // Changes are only reported when the conditional runtime is present.
+      if (changes.length === 0) afterCommit?.();
+      else options.conditionals!.notify(this.conditionalListeners, changes, afterCommit);
     }
 
     private refreshDirtyBindings(
@@ -8839,123 +9773,30 @@ function createKeyedRowsBlockComponent(
         }
       }
 
-      const nextIdentityTargets = new Map<number, CompilerKeyedIdentityTargetSnapshot>();
-      const nextMembershipTargets = new Map<number, CompilerKeyedMembershipTargetSnapshot>();
-      const nextMapLookupTargets = new Map<number, CompilerKeyedMapLookupTargetSnapshot>();
-      for (const bindingIndex of affectedBindingIndices) {
-        const binding = this.currentProps.bindings[bindingIndex];
-        if (binding.identityTarget) {
-          nextIdentityTargets.set(
-            bindingIndex,
-            keyedIdentityTargetSnapshot(binding.identityTarget.read()),
-          );
-        }
-        if (binding.membershipTarget) {
-          const snapshot = keyedMembershipTargetSnapshot(
-            binding.membershipTarget.read(),
-            this.membershipTargets.get(bindingIndex),
-          );
-          if (!snapshot.eligible) {
-            this.activateFallback(afterCommit);
-            return true;
-          }
-          nextMembershipTargets.set(bindingIndex, snapshot);
-        }
-        if (binding.mapLookupTarget) {
-          const snapshot = keyedMapLookupTargetSnapshot(
-            binding.mapLookupTarget.read(),
-            this.mapLookupTargets.get(bindingIndex),
-          );
-          if (!snapshot.eligible) {
-            this.activateFallback(afterCommit);
-            return true;
-          }
-          nextMapLookupTargets.set(bindingIndex, snapshot);
-        }
+      const targetsPrepared = this.keyedTargets?.prepare(this.currentProps, affectedBindingIndices);
+      if (targetsPrepared === false) {
+        this.activateFallback(afterCommit);
+        return true;
       }
 
+      let preparedBindingUpdates: CompilerPreparedKeyedRowBindingCommit[] | undefined;
       for (const bindingIndex of affectedBindingIndices) {
-        const binding = this.currentProps.bindings[bindingIndex];
-        const identityTarget = binding.identityTarget;
-        const previousIdentityTarget = this.identityTargets.get(bindingIndex);
-        const nextIdentityTarget = nextIdentityTargets.get(bindingIndex);
-        const canTargetIdentity = Boolean(
-          identityTarget &&
-          binding.dependencies?.length === 1 &&
-          binding.dependencies[0] === identityTarget.dependency &&
-          dirtyState.has(identityTarget.dependency) &&
-          previousIdentityTarget?.eligible &&
-          nextIdentityTarget?.eligible,
+        const selection = this.keyedTargets?.select(
+          this.currentProps,
+          bindingIndex,
+          dirtyState,
+          this.instances.keys(),
+          this.instances.size,
         );
-        const membershipTarget = binding.membershipTarget;
-        const previousMembershipTarget = this.membershipTargets.get(bindingIndex);
-        const nextMembershipTarget = nextMembershipTargets.get(bindingIndex);
-        const canTargetMembership = Boolean(
-          membershipTarget &&
-          binding.dependencies?.length === 1 &&
-          binding.dependencies[0] === membershipTarget.dependency &&
-          dirtyState.has(membershipTarget.dependency) &&
-          previousMembershipTarget?.eligible &&
-          nextMembershipTarget?.eligible,
-        );
-        const mapLookupTarget = binding.mapLookupTarget;
-        const previousMapLookupTarget = this.mapLookupTargets.get(bindingIndex);
-        const nextMapLookupTarget = nextMapLookupTargets.get(bindingIndex);
-        const canTargetMapLookup = Boolean(
-          mapLookupTarget &&
-          binding.dependencies?.length === 1 &&
-          binding.dependencies[0] === mapLookupTarget.dependency &&
-          dirtyState.has(mapLookupTarget.dependency) &&
-          previousMapLookupTarget?.eligible &&
-          nextMapLookupTarget?.eligible,
-        );
+        const selectedKeys = selection?.keys || this.instances.keys();
+        const selectedCount = selection?.count ?? this.instances.size;
 
-        if (canTargetMapLookup && previousMapLookupTarget && nextMapLookupTarget) {
-          const keys = keyedMapLookupChangedKeys(previousMapLookupTarget, nextMapLookupTarget);
-          for (const key of keys) {
-            const instance = this.instances.get(key);
-            if (instance) {
-              applyKeyedRowBinding(
-                this.currentProps,
-                instance,
-                instance.item,
-                instance.index,
-                bindingIndex,
-              );
-            }
-          }
-        } else if (canTargetMembership && previousMembershipTarget && nextMembershipTarget) {
-          const keys = keyedMembershipChangedKeys(previousMembershipTarget, nextMembershipTarget);
-          for (const key of keys) {
-            const instance = this.instances.get(key);
-            if (instance) {
-              applyKeyedRowBinding(
-                this.currentProps,
-                instance,
-                instance.item,
-                instance.index,
-                bindingIndex,
-              );
-            }
-          }
-        } else if (canTargetIdentity && previousIdentityTarget && nextIdentityTarget) {
-          const keys = new Set<string>();
-          if (previousIdentityTarget.key !== undefined) keys.add(previousIdentityTarget.key);
-          if (nextIdentityTarget.key !== undefined) keys.add(nextIdentityTarget.key);
-          for (const key of keys) {
-            const instance = this.instances.get(key);
-            if (instance) {
-              applyKeyedRowBinding(
-                this.currentProps,
-                instance,
-                instance.item,
-                instance.index,
-                bindingIndex,
-              );
-            }
-          }
-        } else {
-          for (const instance of this.instances.values()) {
+        const prepare = affectedBindingIndices.length > 1 || selectedCount > 1;
+        if (prepare) preparedBindingUpdates ||= [];
+        for (const key of selectedKeys) {
+          const instance = this.instances.get(key);
+          if (!instance) continue;
+          if (!prepare) {
             applyKeyedRowBinding(
               this.currentProps,
               instance,
@@ -8963,28 +9804,41 @@ function createKeyedRowsBlockComponent(
               instance.index,
               bindingIndex,
             );
+            continue;
           }
-        }
-
-        if (nextIdentityTarget) this.identityTargets.set(bindingIndex, nextIdentityTarget);
-        else this.identityTargets.delete(bindingIndex);
-        if (nextMembershipTarget) {
-          this.membershipTargets.set(bindingIndex, nextMembershipTarget);
-        } else {
-          this.membershipTargets.delete(bindingIndex);
-        }
-        if (nextMapLookupTarget) {
-          this.mapLookupTargets.set(bindingIndex, nextMapLookupTarget);
-        } else {
-          this.mapLookupTargets.delete(bindingIndex);
+          const update = prepareKeyedRowBindingUpdate(
+            this.currentProps,
+            instance,
+            instance.item,
+            instance.index,
+            bindingIndex,
+          );
+          if (update === undefined) {
+            this.activateFallback(afterCommit);
+            return true;
+          }
+          if (update) preparedBindingUpdates!.push([instance, update]);
         }
       }
+
+      if (preparedBindingUpdates) {
+        for (const [instance, [bindingIndex, target, value]] of preparedBindingUpdates) {
+          commitKeyedRowBinding(
+            this.currentProps.bindings[bindingIndex],
+            instance,
+            bindingIndex,
+            value,
+            target,
+          );
+        }
+      }
+      this.keyedTargets?.commitPrepared(affectedBindingIndices);
       afterCommit?.();
       return true;
     }
 
     private reconcileStableRows(
-      rows: { items: unknown[]; keys: string[] },
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
       afterCommit?: () => void,
       dirtyState?: ReadonlySet<number>,
     ): boolean {
@@ -8995,24 +9849,57 @@ function createKeyedRowsBlockComponent(
         index += 1;
       }
 
-      const conditionalChanges: Array<{
-        key: string;
-        id: number;
-        item: unknown;
-        index: number;
-      }> = [];
-      for (index = 0; index < rows.items.length; index += 1) {
+      // Keys match the committed order, so instances line up with rows.
+      const conditionalChanges = this.patchOrderedRows(
+        rows,
+        [...this.instances.values()],
+        afterCommit,
+      );
+      if (!conditionalChanges) return true;
+      this.commitCurrentCollection(dirtyState);
+      this.notifyConditionalChanges(conditionalChanges, afterCommit);
+      return true;
+    }
+
+    // Rereads and patches every row as React would rerender it. `ordered` holds
+    // the existing instance for each row. Returns undefined after activating
+    // the fallback.
+    private patchOrderedRows(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
+      ordered: CompilerKeyedRowInstance[],
+      afterCommit?: () => void,
+    ): RowConditionalChange[] | undefined {
+      // Host scopes can replace binding targets during their update, so only
+      // static row structures can safely resolve the whole row set up front.
+      const shouldPrepareBindings =
+        rows.items.length > 1 &&
+        this.currentProps.bindings.length > 0 &&
+        !this.currentProps.hostBlocks;
+      const preparedBindings = shouldPrepareBindings
+        ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows, ordered)
+        : undefined;
+      if (shouldPrepareBindings && !preparedBindings) {
+        this.activateFallback(afterCommit);
+        return undefined;
+      }
+
+      const conditionalChanges: RowConditionalChange[] = [];
+      for (let index = 0; index < rows.items.length; index += 1) {
         const key = rows.keys[index];
-        const existing = this.instances.get(key);
-        if (!existing) return false;
+        const existing = ordered[index];
         if (this.currentProps.hostBlocks) {
           const descriptor = this.currentProps.create(rows.items[index], index);
           if (!existing.scope?.update(descriptor)) {
             this.activateFallback(afterCommit);
-            return true;
+            return undefined;
           }
         }
-        applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        const bindingUpdates = preparedBindings?.[index];
+        if (bindingUpdates) {
+          applyPreparedKeyedRowBindingUpdates(this.currentProps, existing, bindingUpdates);
+        } else {
+          applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        }
         const conditionalValues = this.readConditionalValues(
           this.currentProps,
           rows.items[index],
@@ -9032,34 +9919,125 @@ function createKeyedRowsBlockComponent(
         existing.item = rows.items[index];
         existing.index = index;
       }
-      this.commitCurrentCollection(dirtyState);
-      this.notifyConditionalChanges(conditionalChanges, afterCommit);
-      return true;
+      return conditionalChanges;
     }
 
-    private reconcileSingleRemoval(
-      rows: { items: unknown[]; keys: string[] },
+    // The same rows in a new order that differs only at the ascending `moved`
+    // positions: patch every row, then move only moved rows outside a stable
+    // subsequence. A moved row may stay put only when every position between
+    // its committed and final place also moved; otherwise an unmoved row lies
+    // between them and the order would be wrong. Inserting the rest from the
+    // last position down puts each before its final next sibling.
+    private reconcileMovedRows(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
+      moved: readonly number[],
+      sources: readonly number[],
+      afterCommit?: () => void,
+      dirtyState?: ReadonlySet<number>,
+    ): void {
+      const ordered = [...this.instances.values()];
+      for (const position of moved) ordered[position] = this.instances.get(rows.keys[position])!;
+      const conditionalChanges = this.patchOrderedRows(rows, ordered, afterCommit);
+      if (!conditionalChanges) return;
+      // Moved positions are ascending and distinct, so every position between
+      // two of them moved exactly when their index distance is their distance.
+      const sequence = sources.map((source, index) =>
+        Math.abs(moved[source] - moved[index]) === Math.abs(source - index) ? source : -1,
+      );
+      const stays = longestIncreasingSubsequencePositions(sequence);
+      const root = this.root!;
+      const activeElement = compilerFocusedElement(root);
+      for (let index = moved.length - 1; index >= 0; index -= 1) {
+        if (stays[index]) continue;
+        const position = moved[index];
+        const element = ordered[position].element;
+        const anchor = position + 1 < ordered.length ? ordered[position + 1].element : null;
+        if (element.nextSibling !== anchor) root.insertBefore(element, anchor);
+      }
+      restoreCompilerFocus(activeElement);
+      // The same elements stay mounted, so the element index and handlers
+      // are unchanged; only the key order moves.
+      this.instances = keyedRowInstancesByKey(ordered);
+      this.commitCurrentCollection(dirtyState);
+      this.notifyConditionalChanges(conditionalChanges, afterCommit);
+    }
+
+    // Keys are the committed keys plus new ones: patch every existing row like
+    // the complete path does, then create and append only the new rows.
+    private reconcileAppendedRows(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
+      afterCommit?: () => void,
+      dirtyState?: ReadonlySet<number>,
+    ): void {
+      const root = this.root!;
+      let index = 0;
+      for (const existing of this.instances.values()) {
+        applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        existing.item = rows.items[index];
+        existing.index = index;
+        index += 1;
+      }
+      // Build every new row before touching the DOM or the committed map.
+      const appended: CompilerKeyedRowInstance[] = [];
+      for (; index < rows.items.length; index += 1) {
+        appended.push(
+          createKeyedRowInstance(
+            this.currentProps,
+            root.ownerDocument,
+            rows.keys[index],
+            rows.items[index],
+            index,
+          ),
+        );
+      }
+      const indexElements = this.elementIndexComplete && this.usesDelegatedEvents();
+      for (const instance of appended) {
+        root.appendChild(instance.element);
+        this.instances.set(instance.key, instance);
+        if (indexElements) this.instancesByElement.set(instance.element, instance);
+      }
+      if (!indexElements) this.rebuildElementIndex(this.instances);
+      this.commitCurrentCollection(dirtyState);
+      afterCommit?.();
+    }
+
+    private reconcileRemovals(
+      rows: { items: unknown[]; keys: KeyedRowKey[] },
       afterCommit?: () => void,
       dirtyState?: ReadonlySet<number>,
     ): boolean {
-      if (this.hasReactOwnedRows() || rows.keys.length + 1 !== this.instances.size) return false;
-      const previousKeys = [...this.instances.keys()];
-      let removedIndex = 0;
-      while (
-        removedIndex < rows.keys.length &&
-        previousKeys[removedIndex] === rows.keys[removedIndex]
+      if (this.hasReactOwnedRows() || rows.keys.length >= this.instances.size) return false;
+      const removed: CompilerKeyedRowInstance[] = [];
+      let nextIndex = 0;
+      for (const [key, instance] of this.instances) {
+        if (key === rows.keys[nextIndex]) nextIndex += 1;
+        else removed.push(instance);
+      }
+      if (nextIndex !== rows.keys.length) return false;
+      // Validate every singleton target before removing rows. Direct singleton
+      // updates cache a missing target and cannot recover on a later refresh.
+      const shouldPrepareBindings =
+        this.currentProps.bindings.length > 0 && !this.currentProps.hostBlocks;
+      if (
+        shouldPrepareBindings &&
+        rows.items.length === 1 &&
+        this.currentProps.bindings.some(
+          (binding) =>
+            !findCompilerHostTarget(this.instances.get(rows.keys[0])!.element, binding.path),
+        )
       ) {
-        removedIndex += 1;
+        this.activateFallback(afterCommit);
+        return true;
       }
-      for (let index = removedIndex; index < rows.keys.length; index += 1) {
-        if (previousKeys[index + 1] !== rows.keys[index]) return false;
+      const preparedBindings = shouldPrepareBindings
+        ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows)
+        : undefined;
+      if (shouldPrepareBindings && !preparedBindings) {
+        this.activateFallback(afterCommit);
+        return true;
       }
-
-      const removedKey = previousKeys[removedIndex];
-      const removed = this.instances.get(removedKey);
-      if (!removed) return false;
       const conditionalChanges: Array<{
-        key: string;
+        key: KeyedRowKey;
         id: number;
         item: unknown;
         index: number;
@@ -9075,7 +10053,12 @@ function createKeyedRowsBlockComponent(
             return true;
           }
         }
-        applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        const bindingUpdates = preparedBindings?.[index];
+        if (bindingUpdates) {
+          applyPreparedKeyedRowBindingUpdates(this.currentProps, existing, bindingUpdates);
+        } else {
+          applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+        }
         const conditionalValues = this.readConditionalValues(
           this.currentProps,
           rows.items[index],
@@ -9096,11 +10079,13 @@ function createKeyedRowsBlockComponent(
         existing.index = index;
       }
 
-      removed.scope?.cleanup();
-      removed.element.remove();
-      this.instances.delete(removedKey);
-      this.eventHandlers.delete(removedKey);
-      this.conditionalListeners.delete(removedKey);
+      for (const instance of removed) {
+        instance.scope?.cleanup();
+        instance.element.remove();
+        this.instances.delete(instance.key);
+        this.eventHandlers.delete(instance.key);
+        this.conditionalListeners.delete(instance.key);
+      }
       this.commitCurrentCollection(dirtyState);
       this.notifyConditionalChanges(conditionalChanges, afterCommit);
       return true;
@@ -9119,20 +10104,13 @@ function createKeyedRowsBlockComponent(
         // with duplicates is unreliable, so any render touched by them (this
         // one, or the previously committed one) still remounts.
         const unsafeKeys = this.hasUnsafeFallbackKeys();
-        if (unsafeKeys || this.fallbackKeysWereUnsafe) {
-          this.fallbackVersion += 1;
-        }
+        if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
         this.fallbackKeysWereUnsafe = unsafeKeys;
         this.forceUpdate(afterCommit);
         return;
       }
 
-      if (!this.hasSafeMembershipTargets(dirtyState)) {
-        this.activateFallback(afterCommit);
-        return;
-      }
-
-      if (!this.hasSafeMapLookupTargets(dirtyState)) {
+      if (this.keyedTargets && !this.keyedTargets.hasSafeTargets(this.currentProps, dirtyState)) {
         this.activateFallback(afterCommit);
         return;
       }
@@ -9159,6 +10137,7 @@ function createKeyedRowsBlockComponent(
         this.root.replaceChildren();
         this.instances = new Map();
         this.instancesByElement = new WeakMap();
+        this.elementIndexComplete = true;
         this.eventHandlers.clear();
         this.conditionalListeners.clear();
         this.commitCurrentCollection(dirtyState);
@@ -9167,13 +10146,39 @@ function createKeyedRowsBlockComponent(
       }
 
       if (this.reconcileStableRows(rows, afterCommit, dirtyState)) return;
-      if (this.reconcileSingleRemoval(rows, afterCommit, dirtyState)) return;
+      if (rows.moved && !this.currentProps.hostBlocks) {
+        this.reconcileMovedRows(
+          rows,
+          rows.moved.positions,
+          rows.moved.sources,
+          afterCommit,
+          dirtyState,
+        );
+        return;
+      }
+      if (this.reconcileRemovals(rows, afterCommit, dirtyState)) return;
+      if (rows.appended && !this.currentProps.hostBlocks) {
+        this.reconcileAppendedRows(rows, afterCommit, dirtyState);
+        return;
+      }
 
-      const nextKeys = new Set(rows.keys);
+      const nextKeys = rows.keySet ?? new Set(rows.keys);
       const hasSurvivingRows = rows.keys.some((key) => this.instances.has(key));
-      const oldIndices = new Map<string, number>();
+      const preparedBindings =
+        nextKeys.size < this.instances.size &&
+        this.currentProps.bindings.length > 0 &&
+        !this.currentProps.hostBlocks &&
+        rows.keys.every((key) => this.instances.has(key))
+          ? prepareKeyedRowBindingSetUpdates(this.currentProps, this.instances, rows)
+          : null;
+      if (preparedBindings === undefined) {
+        this.activateFallback(afterCommit);
+        return;
+      }
+      const oldIndices = new Map<KeyedRowKey, number>();
       if (hasSurvivingRows) {
-        [...this.instances].forEach(([key], index) => oldIndices.set(key, index));
+        let oldIndex = 0;
+        for (const key of this.instances.keys()) oldIndices.set(key, oldIndex++);
       }
       for (const [key, instance] of this.instances) {
         if (!nextKeys.has(key)) {
@@ -9182,12 +10187,11 @@ function createKeyedRowsBlockComponent(
         }
       }
 
-      const sequence = hasSurvivingRows
-        ? rows.keys.map((key) => oldIndices.get(key) ?? -1)
-        : rows.keys.map(() => -1);
+      // Only a reorder of surviving rows reads old positions.
+      const sequence = hasSurvivingRows ? rows.keys.map((key) => oldIndices.get(key) ?? -1) : [];
       const nextInstances: CompilerKeyedRowInstance[] = [];
       const conditionalChanges: Array<{
-        key: string;
+        key: KeyedRowKey;
         id: number;
         item: unknown;
         index: number;
@@ -9203,7 +10207,15 @@ function createKeyedRowsBlockComponent(
               return;
             }
           }
-          applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+          if (preparedBindings) {
+            applyPreparedKeyedRowBindingUpdates(
+              this.currentProps,
+              existing,
+              preparedBindings[index],
+            );
+          } else {
+            applyKeyedRowBindings(this.currentProps, existing, rows.items[index], index);
+          }
           const conditionalValues = this.readConditionalValues(
             this.currentProps,
             rows.items[index],
@@ -9225,10 +10237,26 @@ function createKeyedRowsBlockComponent(
           nextInstances.push(existing);
           continue;
         }
+        if (!this.currentProps.hostBlocks) {
+          const instance = createKeyedRowInstance(
+            this.currentProps,
+            this.root.ownerDocument,
+            key,
+            rows.items[index],
+            index,
+          );
+          instance.conditionalValues = this.readConditionalValues(
+            this.currentProps,
+            rows.items[index],
+            index,
+          );
+          nextInstances.push(instance);
+          continue;
+        }
         const descriptor = this.currentProps.create(rows.items[index], index);
         const element = createCompilerHostElement(this.root.ownerDocument, descriptor);
         const scope = this.mountRowHostScope(element, descriptor);
-        if (this.currentProps.hostBlocks && !scope) {
+        if (!scope) {
           for (const instance of nextInstances) {
             if (!this.instances.has(instance.key)) instance.scope?.cleanup();
           }
@@ -9251,16 +10279,26 @@ function createKeyedRowsBlockComponent(
       }
 
       if (!hasSurvivingRows) {
-        const fragment = this.root.ownerDocument.createDocumentFragment();
-        for (const instance of nextInstances) fragment.append(instance.element);
-        this.root.replaceChildren(fragment);
+        // Like React's own commit: insert each new row directly.
+        this.root.replaceChildren();
+        for (const instance of nextInstances) this.root.appendChild(instance.element);
       } else {
         reorderCompilerKeyedRows(this.root, nextInstances, sequence, null);
       }
       this.instances = keyedRowInstancesByKey(nextInstances);
-      this.rebuildElementIndex(this.instances);
-      this.pruneEventHandlers(rows.keys);
-      this.pruneConditionalListeners(rows.keys);
+      if (hasSurvivingRows && this.elementIndexComplete && this.usesDelegatedEvents()) {
+        // Surviving rows keep their elements and index entries; removed rows
+        // are no longer under the root, so only new rows need entries.
+        for (let index = 0; index < nextInstances.length; index += 1) {
+          if (sequence[index] < 0) {
+            this.instancesByElement.set(nextInstances[index].element, nextInstances[index]);
+          }
+        }
+      } else {
+        this.rebuildElementIndex(this.instances);
+      }
+      this.pruneEventHandlers();
+      this.pruneConditionalListeners();
       this.commitCurrentCollection(dirtyState);
       this.notifyConditionalChanges(conditionalChanges, afterCommit);
     }
@@ -9291,9 +10329,19 @@ function createKeyedRowsBlockComponent(
           this.hasReactOwnedRows(),
         );
         if (appendedInstances) {
+          const appended = COMPILER_KEYED_APPEND_DELTAS.get(appendedInstances);
+          COMPILER_KEYED_APPEND_DELTAS.delete(appendedInstances);
           this.instances =
             appendedInstances instanceof Map ? appendedInstances : new Map(appendedInstances);
-          this.rebuildElementIndex(this.instances);
+          if (appended && this.elementIndexComplete) {
+            for (const instance of appended) {
+              this.instancesByElement.set(instance.element, instance);
+            }
+          } else {
+            // Structural append paths and event-ownership changes still need
+            // the complete index; only a validated plain append supplies a delta.
+            this.rebuildElementIndex(this.instances);
+          }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
           return;
@@ -9307,11 +10355,14 @@ function createKeyedRowsBlockComponent(
           this.hasReactOwnedRows(),
         );
         if (positionedInstances) {
-          this.instances = new Map(positionedInstances);
-          this.rebuildElementIndex(this.instances);
-          const keys = [...this.instances.keys()];
-          this.pruneEventHandlers(keys);
-          this.pruneConditionalListeners(keys);
+          // Position refreshes return the original map only when row instances,
+          // order, and elements are unchanged; their item/binding data is current.
+          if (positionedInstances !== this.instances) {
+            this.instances = positionedInstances;
+            this.rebuildElementIndex(this.instances);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
+          }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
           return;
@@ -9326,12 +10377,15 @@ function createKeyedRowsBlockComponent(
         );
         if (reorderedInstances) {
           const removedRows = reorderedInstances.size < this.instances.size;
-          this.instances = new Map(reorderedInstances);
-          this.rebuildElementIndex(this.instances);
+          // Reorder preparation returns an owned map (or the current one for
+          // unchanged order), just like append and rolling-window updates.
+          this.instances = reorderedInstances;
           if (removedRows) {
-            const keys = [...this.instances.keys()];
-            this.pruneEventHandlers(keys);
-            this.pruneConditionalListeners(keys);
+            // Pure reorders keep the same element -> instance associations;
+            // those instances already hold their current item and index.
+            this.rebuildElementIndex(this.instances);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
           }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -9353,8 +10407,10 @@ function createKeyedRowsBlockComponent(
               : new Map(rollingWindowInstances);
           if (delta) {
             COMPILER_KEYED_ROLLING_WINDOW_DELTAS.delete(rollingWindowInstances);
-            for (const instance of delta.added) {
-              this.instancesByElement.set(instance.element, instance);
+            if (this.usesDelegatedEvents()) {
+              for (const instance of delta.added) {
+                this.instancesByElement.set(instance.element, instance);
+              }
             }
             for (const key of delta.removedKeys) {
               this.eventHandlers.delete(key);
@@ -9362,9 +10418,8 @@ function createKeyedRowsBlockComponent(
             }
           } else {
             this.rebuildElementIndex(this.instances);
-            const keys = [...this.instances.keys()];
-            this.pruneEventHandlers(keys);
-            this.pruneConditionalListeners(keys);
+            this.pruneEventHandlers();
+            this.pruneConditionalListeners();
           }
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -9378,11 +10433,11 @@ function createKeyedRowsBlockComponent(
           this.hasReactOwnedRows(),
         );
         if (filteredInstances) {
-          this.instances = new Map(filteredInstances);
-          this.rebuildElementIndex(this.instances);
-          const keys = [...this.instances.keys()];
-          this.pruneEventHandlers(keys);
-          this.pruneConditionalListeners(keys);
+          this.instances = filteredInstances;
+          // Removed rows leave the root; survivors keep their elements and entries.
+          if (!this.elementIndexComplete) this.rebuildElementIndex(this.instances);
+          this.pruneEventHandlers();
+          this.pruneConditionalListeners();
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
           return;
@@ -9396,7 +10451,7 @@ function createKeyedRowsBlockComponent(
           this.hasReactOwnedRows(),
         );
         if (prependedInstances) {
-          this.instances = new Map(prependedInstances);
+          this.instances = prependedInstances;
           this.rebuildElementIndex(this.instances);
           this.commitCurrentCollection(dirtyState);
           afterCommit?.();
@@ -9407,21 +10462,51 @@ function createKeyedRowsBlockComponent(
       this.reconcile(afterCommit, dirtyState);
     };
 
+    private listen(): void {
+      const id = this.currentProps.id;
+      const stop = this.stop;
+      if (this.id === id) return;
+      stop?.();
+      this.stop = owner.subscribe(id, this.refresh);
+      this.id = id;
+    }
+
     private schedulePropSync(): void {
       if (this.propSyncQueued) return;
       this.propSyncQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.propSyncQueued = false;
-        if (this.mounted && !this.state.fallback) this.reconcile();
+        if (this.mounted && !this.state.fallback) {
+          this.listen();
+          this.reconcile();
+        }
       });
     }
 
     shouldComponentUpdate(nextProps: CompilerKeyedRowsBlockProps, nextState: State): boolean {
       const wasReactOwned = this.hasReactOwnedRows(this.currentProps);
       const willBeReactOwned = this.hasReactOwnedRows(nextProps);
+      const definitionChanged = this.definitionVersion !== owner.getDefinitionVersion?.();
       this.currentProps = nextProps;
+      this.keyedTargets ||= options.keyedTargets?.(nextProps);
+      if (this.state.fallback && nextState.fallback) {
+        const unsafeKeys = this.hasUnsafeFallbackKeys();
+        if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+        this.fallbackKeysWereUnsafe = unsafeKeys;
+      }
       if (nextState.fallback || this.state.fallback) return true;
-      if (wasReactOwned || willBeReactOwned) {
+      if (definitionChanged || wasReactOwned || willBeReactOwned) {
+        const elements = this.root?.children;
+        if (
+          elements &&
+          (elements.length !== this.reactElements.length ||
+            this.reactElements.some((element, index) => element !== elements[index]))
+        ) {
+          // React still owns the child fibers from its last render, not rows
+          // inserted, removed, or reordered by the compiler since adoption.
+          // Reset only that stale host container before handing it back to React.
+          this.fallbackVersion += 1;
+        }
         // Parent prop updates and Fast Refresh definitions must pass through
         // React so event locations, static row markup, and proxy identities
         // cannot remain tied to an older render definition.
@@ -9433,10 +10518,16 @@ function createKeyedRowsBlockComponent(
     }
 
     componentDidUpdate(previousProps: CompilerKeyedRowsBlockProps): void {
+      this.listen();
+      const nextDefinitionVersion = owner.getDefinitionVersion?.();
+      const definitionChanged = this.definitionVersion !== nextDefinitionVersion;
+      this.definitionVersion = nextDefinitionVersion;
       if (
         this.state.fallback ||
         previousProps === this.props ||
-        (!this.hasReactOwnedRows(previousProps) && !this.hasReactOwnedRows(this.props)) ||
+        (!definitionChanged &&
+          !this.hasReactOwnedRows(previousProps) &&
+          !this.hasReactOwnedRows(this.props)) ||
         this.adopt()
       ) {
         return;
@@ -9446,20 +10537,23 @@ function createKeyedRowsBlockComponent(
 
     componentDidMount(): void {
       this.mounted = true;
-      this.unsubscribe = owner.subscribe(this.props.id, this.refresh);
+      this.listen();
       if (!this.adopt()) this.activateFallback();
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.unsubscribe?.();
-      this.root = null;
+      const stop = this.stop;
+      stop?.();
+      this.id = undefined;
+      // React 18 StrictMode replays mount lifecycles without detaching host refs.
+      // captureRoot clears the element on a real unmount; retain it for replay adoption.
       this.cleanupHostScopes();
       this.instances.clear();
-      this.identityTargets.clear();
-      this.membershipTargets.clear();
-      this.mapLookupTargets.clear();
+      this.reactElements = [];
+      this.keyedTargets?.clear();
       this.instancesByElement = new WeakMap();
+      this.elementIndexComplete = true;
       this.eventHandlers.clear();
       this.conditionalListeners.clear();
     }
@@ -9474,7 +10568,7 @@ function createKeyedRowsBlockComponent(
       }
       return React.cloneElement(container, {
         ...this.delegatedContainerProps(container),
-        key: this.state.fallback ? `react-${this.fallbackVersion}` : "compiled",
+        key: `${this.state.fallback ? "react" : "compiled"}-${this.fallbackVersion}`,
         ref: this.captureRoot,
       } as React.Attributes);
     }
@@ -9483,8 +10577,18 @@ function createKeyedRowsBlockComponent(
   return FarmKeyedRowsBlock;
 }
 
+function createKeyedRowsBlockComponent(
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
+  options: KeyedRowsRuntimeOptions = {},
+): React.ComponentType<CompilerKeyedRowsBlockProps> {
+  return createKeyedRowsBlockComponentCore(owner, {
+    ...options,
+    keyedTargets: createKeyedTargetRuntime,
+  });
+}
+
 function createKeyedRangesBlockComponent(
-  owner: Pick<ConditionalBlockOwner, "subscribe">,
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
 ): React.ComponentType<CompilerKeyedRangesBlockProps> {
   interface State {
     fallback: boolean;
@@ -9492,7 +10596,7 @@ function createKeyedRangesBlockComponent(
 
   interface ReadRange {
     items: unknown[];
-    keys: string[];
+    keys: KeyedRowKey[];
   }
 
   class FarmKeyedRangesBlock extends React.Component<CompilerKeyedRangesBlockProps, State> {
@@ -9503,12 +10607,15 @@ function createKeyedRangesBlockComponent(
     private mounted = false;
     private fallbackRequested = false;
     private fallbackVersion = 0;
+    private fallbackKeysWereUnsafe = false;
     private propFallbackQueued = false;
     private currentProps = this.props;
-    private unsubscribe: (() => void) | undefined;
-    private rangeInstances: Array<Map<string, CompilerKeyedRowInstance>> = [];
+    declare private stop: (() => void) | undefined;
+    declare private id: number | undefined;
+    private rangeInstances: Array<Map<KeyedRowKey, CompilerKeyedRowInstance>> = [];
     private staticSegments: Element[][] = [];
     private readonly staticValues: unknown[] = [];
+    private definitionVersion = owner.getDefinitionVersion?.();
 
     private captureRoot = (root: Element | null) => {
       this.root = root;
@@ -9532,13 +10639,22 @@ function createKeyedRangesBlockComponent(
       return ranges;
     }
 
+    private hasUnsafeFallbackKeys(): boolean {
+      try {
+        return this.readRanges(this.currentProps) === null;
+      } catch {
+        return true;
+      }
+    }
+
     private adopt(props: CompilerKeyedRangesBlockProps = this.currentProps): boolean {
       if (!this.root || !Number.isSafeInteger(props.trailing) || props.trailing < 0) return false;
       const rowsByRange = this.readRanges(props);
       if (!rowsByRange) return false;
       const elements = [...this.root.children];
       const staticSegments: Element[][] = [];
-      const instancesByRange: Array<Map<string, CompilerKeyedRowInstance>> = [];
+      const instancesByRange: Array<Map<KeyedRowKey, CompilerKeyedRowInstance>> = [];
+      const staticValues = this.staticValues.slice();
       let cursor = 0;
 
       for (let rangeIndex = 0; rangeIndex < props.ranges.length; rangeIndex += 1) {
@@ -9552,7 +10668,7 @@ function createKeyedRangesBlockComponent(
 
         const rowEnd = cursor + rows.items.length;
         if (rowEnd > elements.length) return false;
-        const instances = new Map<string, CompilerKeyedRowInstance>();
+        const instances = new Map<KeyedRowKey, CompilerKeyedRowInstance>();
         for (let index = 0; index < rows.items.length; index += 1) {
           const element = elements[cursor + index];
           if (!matchesCompilerHostElement(element, range.create(rows.items[index], index))) {
@@ -9573,13 +10689,11 @@ function createKeyedRangesBlockComponent(
 
       if (cursor + props.trailing !== elements.length) return false;
       staticSegments.push(elements.slice(cursor));
+      if (!applyStaticRangeBindings(props.bindings, staticSegments, staticValues)) return false;
       this.staticSegments = staticSegments;
       this.rangeInstances = instancesByRange;
-      if (!applyStaticRangeBindings(props.bindings, this.staticSegments, this.staticValues)) {
-        this.rangeInstances = [];
-        this.staticSegments = [];
-        return false;
-      }
+      this.staticValues.length = 0;
+      this.staticValues.push(...staticValues);
       return true;
     }
 
@@ -9597,7 +10711,7 @@ function createKeyedRangesBlockComponent(
       if (!this.root) return;
       const range = this.currentProps.ranges[rangeIndex];
       const previous = this.rangeInstances[rangeIndex];
-      const oldIndices = new Map<string, number>();
+      const oldIndices = new Map<KeyedRowKey, number>();
       [...previous.keys()].forEach((key, index) => oldIndices.set(key, index));
       const nextKeys = new Set(rows.keys);
       for (const [key, instance] of previous) {
@@ -9617,18 +10731,9 @@ function createKeyedRangesBlockComponent(
           nextInstances.push(existing);
           continue;
         }
-        const element = createCompilerHostElement(
-          this.root.ownerDocument,
-          range.create(rows.items[index], index),
+        nextInstances.push(
+          createKeyedRowInstance(range, this.root.ownerDocument, key, rows.items[index], index),
         );
-        nextInstances.push({
-          key,
-          element,
-          values: readKeyedRowBindingValues(range, rows.items[index], index),
-          item: rows.items[index],
-          index,
-          conditionalValues: new Map(),
-        });
       }
 
       let anchor = this.anchorAfter(rangeIndex);
@@ -9636,7 +10741,7 @@ function createKeyedRangesBlockComponent(
         const instance = nextInstances[index];
         if (sequence[index] < 0) {
           this.root.insertBefore(instance.element, anchor);
-        } else if (!stablePositions.has(index) && instance.element.nextSibling !== anchor) {
+        } else if (!stablePositions[index] && instance.element.nextSibling !== anchor) {
           this.root.insertBefore(instance.element, anchor);
         }
         anchor = instance.element;
@@ -9652,7 +10757,12 @@ function createKeyedRangesBlockComponent(
         return;
       }
       if (this.state.fallback) {
-        this.fallbackVersion += 1;
+        // React can reconcile a permanently fallen-back range in place while
+        // its keys remain unique. Duplicate keys are ambiguous, so remount the
+        // render that introduces them and the first safe render after them.
+        const unsafeKeys = this.hasUnsafeFallbackKeys();
+        if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+        this.fallbackKeysWereUnsafe = unsafeKeys;
         this.forceUpdate(afterCommit);
         return;
       }
@@ -9692,12 +10802,22 @@ function createKeyedRangesBlockComponent(
       this.reconcile(afterCommit);
     };
 
+    private listen(): void {
+      const id = this.currentProps.id;
+      const stop = this.stop;
+      if (this.id === id) return;
+      stop?.();
+      this.stop = owner.subscribe(id, this.refresh);
+      this.id = id;
+    }
+
     private activateFallback(afterCommit?: () => void): void {
       if (!this.mounted || this.state.fallback || this.fallbackRequested) {
         afterCommit?.();
         return;
       }
       this.fallbackRequested = true;
+      this.fallbackKeysWereUnsafe = this.hasUnsafeFallbackKeys();
       this.setState({ fallback: true }, afterCommit);
     }
 
@@ -9706,30 +10826,50 @@ function createKeyedRangesBlockComponent(
       this.propFallbackQueued = true;
       queueMicrotask(() => {
         this.propFallbackQueued = false;
-        if (this.mounted && !this.state.fallback) this.activateFallback();
+        if (this.mounted && !this.state.fallback) {
+          this.listen();
+          this.activateFallback();
+        }
       });
     }
 
     shouldComponentUpdate(nextProps: CompilerKeyedRangesBlockProps, nextState: State): boolean {
+      const definitionChanged = this.definitionVersion !== owner.getDefinitionVersion?.();
       this.currentProps = nextProps;
+      if (this.state.fallback && nextState.fallback) {
+        const unsafeKeys = this.hasUnsafeFallbackKeys();
+        if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+        this.fallbackKeysWereUnsafe = unsafeKeys;
+      }
       if (nextState.fallback || this.state.fallback) return true;
-      // Parent props and compatible Fast Refresh definitions can change static
-      // siblings that are deliberately outside the range descriptors. Remount
-      // this one container through React instead of retaining stale markup.
+      if (definitionChanged) return true;
+      // Parent props can change static siblings that are deliberately outside
+      // the range descriptors. Remount this one container through React instead
+      // of retaining stale markup.
       this.schedulePropFallback();
       return false;
     }
 
     componentDidMount(): void {
       this.mounted = true;
-      this.unsubscribe = owner.subscribe(this.props.id, this.refresh);
+      this.listen();
       if (!this.adopt()) this.activateFallback();
+    }
+
+    componentDidUpdate(): void {
+      this.listen();
+      const nextDefinitionVersion = owner.getDefinitionVersion?.();
+      const definitionChanged = this.definitionVersion !== nextDefinitionVersion;
+      this.definitionVersion = nextDefinitionVersion;
+      if (!this.state.fallback && definitionChanged && !this.adopt()) this.activateFallback();
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.unsubscribe?.();
-      this.root = null;
+      const stop = this.stop;
+      stop?.();
+      this.id = undefined;
+      // Keep the attached root for React 18 replay; captureRoot clears real detachments.
       this.rangeInstances = [];
       this.staticSegments = [];
       this.staticValues.length = 0;
@@ -9753,7 +10893,7 @@ function createKeyedRangesBlockComponent(
 }
 
 function createMixedRangesBlockComponent(
-  owner: Pick<ConditionalBlockOwner, "subscribe">,
+  owner: Pick<CompilerRuntimeFeatureOwner, "subscribe" | "getDefinitionVersion">,
 ): React.ComponentType<CompilerMixedRangesBlockProps> {
   interface State {
     fallback: boolean;
@@ -9767,10 +10907,12 @@ function createMixedRangesBlockComponent(
     private mounted = false;
     private fallbackRequested = false;
     private fallbackVersion = 0;
+    private fallbackKeysWereUnsafe = false;
     private propFallbackQueued = false;
     private currentProps = this.props;
     private controller: CompilerNestedMixedRanges | null = null;
-    private fallbackUnsubscribers: Array<() => void> = [];
+    private readonly fallbackUnsubscribers = new Map<number, () => void>();
+    private definitionVersion = owner.getDefinitionVersion?.();
 
     private captureRoot = (root: Element | null) => {
       this.root = root;
@@ -9778,27 +10920,40 @@ function createMixedRangesBlockComponent(
     };
 
     private clearFallbackSubscriptions(): void {
-      for (const unsubscribe of this.fallbackUnsubscribers) unsubscribe();
-      this.fallbackUnsubscribers = [];
+      clearCompilerFallbackSubscriptions(this.fallbackUnsubscribers);
+    }
+
+    private refreshFallbackBlock: CompilerBlockRefresh = (afterCommit) => {
+      if (!this.mounted || !this.state.fallback) {
+        afterCommit?.();
+        return;
+      }
+      const nextDescriptor = this.currentProps.create();
+      this.prepareFallbackUpdate(nextDescriptor);
+      this.forceUpdate(afterCommit);
+    };
+
+    private readFallbackBlockIds(descriptor: CompilerHostElement): Set<number> {
+      const ids = new Set<number>();
+      collectActiveCompilerHostBlockIds(descriptor, ids);
+      return ids;
+    }
+
+    private prepareFallbackUpdate(descriptor: CompilerHostElement): void {
+      const unsafeKeys = hasUnsafeCompilerFallbackKeys(descriptor);
+      if (unsafeKeys || this.fallbackKeysWereUnsafe) this.fallbackVersion += 1;
+      this.fallbackKeysWereUnsafe = unsafeKeys;
     }
 
     private subscribeFallbackBlocks(): void {
-      this.clearFallbackSubscriptions();
       const descriptor = this.currentProps.create();
-      const ids = new Set<number>();
-      collectCompilerHostBlockIds(descriptor, ids);
-      for (const id of ids) {
-        this.fallbackUnsubscribers.push(
-          owner.subscribe(id, (afterCommit) => {
-            if (!this.mounted || !this.state.fallback) {
-              afterCommit?.();
-              return;
-            }
-            this.fallbackVersion += 1;
-            this.forceUpdate(afterCommit);
-          }),
-        );
-      }
+      const ids = this.readFallbackBlockIds(descriptor);
+      reconcileCompilerFallbackSubscriptions(
+        owner,
+        this.fallbackUnsubscribers,
+        ids,
+        this.refreshFallbackBlock,
+      );
     }
 
     private adopt(): boolean {
@@ -9822,7 +10977,9 @@ function createMixedRangesBlockComponent(
         controller.cleanup();
         throw error;
       }
+      const previous = this.controller;
       this.controller = controller;
+      previous?.cleanup();
       return true;
     }
 
@@ -9834,6 +10991,7 @@ function createMixedRangesBlockComponent(
       this.fallbackRequested = true;
       this.controller?.cleanup();
       this.controller = null;
+      this.fallbackKeysWereUnsafe = hasUnsafeCompilerFallbackKeys(this.currentProps.create());
       this.fallbackVersion += 1;
       this.setState({ fallback: true }, () => {
         this.subscribeFallbackBlocks();
@@ -9851,19 +11009,34 @@ function createMixedRangesBlockComponent(
     }
 
     shouldComponentUpdate(nextProps: CompilerMixedRangesBlockProps, nextState: State): boolean {
+      const definitionChanged = this.definitionVersion !== owner.getDefinitionVersion?.();
       this.currentProps = nextProps;
+      if (this.state.fallback && nextState.fallback) {
+        this.prepareFallbackUpdate(this.currentProps.create());
+      }
       if (nextState.fallback || this.state.fallback) return true;
+      if (definitionChanged) return true;
       this.schedulePropFallback();
       return false;
     }
 
     componentDidMount(): void {
       this.mounted = true;
-      if (!this.adopt()) this.activateFallback();
+      if (this.state.fallback || this.fallbackRequested) {
+        this.fallbackKeysWereUnsafe = hasUnsafeCompilerFallbackKeys(this.currentProps.create());
+        this.subscribeFallbackBlocks();
+      } else if (!this.adopt()) this.activateFallback();
     }
 
     componentDidUpdate(): void {
-      if (this.state.fallback) this.subscribeFallbackBlocks();
+      const nextDefinitionVersion = owner.getDefinitionVersion?.();
+      const definitionChanged = this.definitionVersion !== nextDefinitionVersion;
+      this.definitionVersion = nextDefinitionVersion;
+      if (this.state.fallback) {
+        this.subscribeFallbackBlocks();
+      } else if (definitionChanged && !this.adopt()) {
+        this.activateFallback();
+      }
     }
 
     componentWillUnmount(): void {
@@ -9871,7 +11044,8 @@ function createMixedRangesBlockComponent(
       this.controller?.cleanup();
       this.controller = null;
       this.clearFallbackSubscriptions();
-      this.root = null;
+      this.fallbackKeysWereUnsafe = false;
+      // Keep the attached root for React 18 replay; captureRoot clears real detachments.
     }
 
     render(): React.ReactNode {
@@ -9964,11 +11138,54 @@ export const keyedRowsRuntimeFeature: CompilerRuntimeFeature = {
   }),
 };
 
+export const keyedRowsPlainRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:plain",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner),
+  }),
+};
+
+export const keyedRowsIdentityRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:identity",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedIdentityTargetRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsMembershipRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:membership",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedMembershipTargetRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsMapLookupRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:map-lookup",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedMapLookupTargetRuntime,
+    }),
+  }),
+};
+
 export const keyedRowsHintedRuntimeFeature: CompilerRuntimeFeature = {
   name: "keyed-rows:hinted",
   create: (owner) => ({
     KeyedRows: createKeyedRowsBlockComponent(owner, {
       keyedUpdates: keyedUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsAppendOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:append-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedUpdates: keyedAppendOnlyUpdateRuntime,
     }),
   }),
 };
@@ -10072,6 +11289,35 @@ export const keyedRowsFilterHintedRuntimeFeature: CompilerRuntimeFeature = {
   }),
 };
 
+export const keyedRowsFilterOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:filter-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedUpdates: keyedFilterOnlyUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsIdentityFilterHintedRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:identity-filter-hinted",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedIdentityTargetRuntime,
+      keyedUpdates: keyedFilterUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsIdentityFilterOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:identity-filter-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedTargets: createKeyedIdentityTargetRuntime,
+      keyedUpdates: keyedFilterOnlyUpdateRuntime,
+    }),
+  }),
+};
+
 export const keyedRowsStructuralAppendHintedRuntimeFeature: CompilerRuntimeFeature = {
   name: "keyed-rows:structural-append-hinted",
   create: (owner) => ({
@@ -10113,6 +11359,15 @@ export const keyedRowsPrependHintedRuntimeFeature: CompilerRuntimeFeature = {
   create: (owner) => ({
     KeyedRows: createKeyedRowsBlockComponent(owner, {
       keyedUpdates: keyedPrependUpdateRuntime,
+    }),
+  }),
+};
+
+export const keyedRowsPrependOnlyRuntimeFeature: CompilerRuntimeFeature = {
+  name: "keyed-rows:prepend-only",
+  create: (owner) => ({
+    KeyedRows: createKeyedRowsBlockComponentCore(owner, {
+      keyedUpdates: keyedPrependOnlyUpdateRuntime,
     }),
   }),
 };
@@ -10763,6 +12018,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private trackedBindingsByDependency: Set<CompilerBinding<Props>>[] = [];
     private readonly trackedDependenciesByBinding = new Map<CompilerBinding<Props>, Set<number>>();
     private readonly bindingValues = new Map<CompilerBinding<Props>, unknown>();
+    private readonly textNodes = new Map<Element, readonly Node[]>();
     private activeBinding: CompilerBinding<Props> | null = null;
     private activeDependencies: Set<number> | null = null;
     private readonly cells: RuntimeCell[];
@@ -10813,8 +12069,9 @@ export function createCompiledComponentWithFeatures<Props>(
         };
       });
       const featureOwner: CompilerRuntimeFeatureOwner = {
-        setRoot: (id, root) => this.setBlockRoot(id, root),
+        setRoot: (id, root, expectedRoot) => this.setBlockRoot(id, root, expectedRoot),
         subscribe: (id, refresh) => this.subscribeToBlock(id, refresh),
+        getDefinitionVersion: () => definitionReference.current,
       };
       const blockRuntime: Partial<CompilerBlockRuntime> = {
         target: (id) => this.bindingTarget(id),
@@ -10825,20 +12082,16 @@ export function createCompiledComponentWithFeatures<Props>(
       this.blockRuntime = blockRuntime as CompilerBlockRuntime;
     }
 
-    private usesHybridReactivity(): boolean {
-      return definitionReference.current.reactivity === "hybrid";
-    }
-
     private canReuseRenderedElement(
       currentDefinition: CompiledComponentDefinition<Props>,
       propValues: readonly unknown[] | null,
     ): boolean {
-      return Boolean(
+      // The committed root ref publishes the definition and element together.
+      return (
         this.mounted &&
-        propValues &&
+        propValues !== null &&
         propValues.every(isCompilerPrimitive) &&
-        this.renderedDefinition === currentDefinition &&
-        this.renderedElement,
+        this.renderedDefinition === currentDefinition
       );
     }
 
@@ -10872,7 +12125,7 @@ export function createCompiledComponentWithFeatures<Props>(
     private tracksBinding(
       binding: Exclude<CompilerBinding<Props>, CompilerConditionalBlockBinding>,
     ): boolean {
-      return this.usesHybridReactivity() && binding.tracking === "dynamic";
+      return definitionReference.current.reactivity === "hybrid" && binding.tracking === "dynamic";
     }
 
     private ensureBindingIndex(): void {
@@ -10948,7 +12201,7 @@ export function createCompiledComponentWithFeatures<Props>(
     }
 
     private primeHybridBindings(): void {
-      if (!this.usesHybridReactivity()) return;
+      if (definitionReference.current.reactivity !== "hybrid") return;
       for (const binding of definitionReference.current.bindings) {
         if (binding.kind === "block") continue;
         if (!this.tracksBinding(binding)) continue;
@@ -10956,10 +12209,6 @@ export function createCompiledComponentWithFeatures<Props>(
         this.bindingValues.set(binding, this.bindingValue(binding, value));
       }
     }
-
-    private captureRoot = (root: Element | null) => {
-      this.root = root;
-    };
 
     private refreshDefinition = () => {
       if (this.mounted) this.forceUpdate();
@@ -11008,8 +12257,9 @@ export function createCompiledComponentWithFeatures<Props>(
       snapshot.element.setSelectionRange(snapshot.start, snapshot.end, snapshot.direction);
     }
 
-    private setBlockRoot(id: number, root: Element | null): void {
+    private setBlockRoot(id: number, root: Element | null, expectedRoot?: Element | null): void {
       const previous = this.blockRoots.get(id);
+      if (!root && expectedRoot !== undefined && previous !== expectedRoot) return;
       if (previous) this.blockRootElements.delete(previous);
       if (root) {
         this.blockRoots.set(id, root);
@@ -11033,7 +12283,7 @@ export function createCompiledComponentWithFeatures<Props>(
       this.captureInputSelection();
       if (!this.mounted || this.flushQueued) return;
       this.flushQueued = true;
-      queueMicrotask(() => {
+      scheduleCompilerMicrotask(() => {
         this.flushQueued = false;
         this.flushBindingUpdates();
       });
@@ -11061,34 +12311,28 @@ export function createCompiledComponentWithFeatures<Props>(
           for (const binding of this.staticBindingsByDependency[dependency] || []) {
             affectedBindings.add(binding);
           }
-          if (this.usesHybridReactivity()) {
+          if (definitionReference.current.reactivity === "hybrid") {
             for (const binding of this.trackedBindingsByDependency[dependency] || []) {
               affectedBindings.add(binding);
             }
           }
         }
 
-        const hasAffectedMountedAncestor = (binding: CompilerConditionalBlockBinding): boolean => {
+        const blockRefreshes: CompilerBlockRefresh[] = [];
+        for (const id of affectedBlockIds) {
+          const binding = this.blockBindings.get(id);
+          const refresh = this.blockRefreshListeners.get(id);
+          if (!binding || !refresh) continue;
           let parent = binding.parent;
           while (parent !== undefined) {
-            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) {
-              return true;
-            }
+            if (affectedBlockIds.has(parent) && this.blockRefreshListeners.has(parent)) break;
             parent = this.blockBindings.get(parent)?.parent;
           }
-          return false;
-        };
-
-        const blockRefreshes = [...affectedBlockIds]
-          .map((id) => {
-            const binding = this.blockBindings.get(id);
-            const refresh = this.blockRefreshListeners.get(id);
-            return binding && refresh && !hasAffectedMountedAncestor(binding) ? refresh : undefined;
-          })
-          .filter((refresh): refresh is CompilerBlockRefresh => refresh !== undefined);
+          if (parent === undefined) blockRefreshes.push(refresh);
+        }
 
         for (const binding of affectedBindings) {
-          if (binding.kind !== "block") this.applyBinding(binding);
+          this.applyBinding(binding);
         }
 
         let pendingBlockCommits = blockRefreshes.length;
@@ -11121,7 +12365,15 @@ export function createCompiledComponentWithFeatures<Props>(
         if (Object.is(this.bindingValues.get(binding), comparableValue)) return;
       }
       if (binding.kind === "text") {
-        target.textContent = comparableValue as string;
+        // Keep React's committed children for the next full reconciliation.
+        // Direct writes may replace HostText nodes still owned by its fibers.
+        if (!this.textNodes.has(target)) {
+          this.textNodes.set(target, [...target.childNodes]);
+          // The direct text node is compiler-owned; never edit a saved React node.
+          target.textContent = comparableValue as string;
+        } else {
+          updateTextContent(target, comparableValue as string);
+        }
       } else if (binding.kind === "style") {
         updateStyle(target, binding.name, value);
       } else {
@@ -11133,20 +12385,31 @@ export function createCompiledComponentWithFeatures<Props>(
     componentDidMount(): void {
       this.mounted = true;
       refreshListeners.add(this.refreshDefinition);
-      this.ensureBindingIndex();
-      this.primeHybridBindings();
+      // React replays this lifecycle when Activity/Suspense reappears. Publish
+      // the current committed props before rebuilding dependency tracking, and
+      // drain state queued while hidden through the ordinary update path.
+      this.componentDidUpdate();
     }
 
     getSnapshotBeforeUpdate(): boolean {
       const currentDefinition = definitionReference.current;
       const propValues = currentDefinition.readProps?.(this.props) || null;
-      return this.canReuseRenderedElement(currentDefinition, propValues);
+      if (this.canReuseRenderedElement(currentDefinition, propValues)) return true;
+      // Restore only at commit: a suspended or abandoned render must not
+      // roll back the visible DOM. React can now reconcile its own nodes.
+      this.textNodes.forEach((children, target) => {
+        target.textContent = "";
+        for (const child of children) target.appendChild(child);
+      });
+      this.textNodes.clear();
+      this.bindingValues.clear();
+      return false;
     }
 
     componentDidUpdate(
-      _previousProps: Readonly<Props>,
-      _previousState: Readonly<Record<string, never>>,
-      reusedRenderedElement = false,
+      previousProps?: Readonly<Props>,
+      _previousState?: Readonly<Record<string, never>>,
+      reusedRenderedElement?: boolean,
     ): void {
       const propValues = definitionReference.current.readProps?.(this.props) || null;
       if (propValues) {
@@ -11164,27 +12427,28 @@ export function createCompiledComponentWithFeatures<Props>(
             cell.flush();
           }
         }
-        this.flushBindingUpdates();
-        return;
       }
 
-      // Hand-authored definitions without prop cells retain the original
-      // React-owned prop reconciliation behavior.
-      this.ensureBindingIndex();
-      for (const binding of definitionReference.current.bindings) {
-        if (binding.kind !== "block") this.applyBinding(binding, true);
+      if (!reusedRenderedElement) {
+        this.ensureBindingIndex();
+        this.primeHybridBindings();
       }
+      // Hand-authored definitions without prop cells retain their prop update
+      // behavior. Initial/replayed mounts do not force redundant DOM writes.
+      if (!propValues && previousProps) {
+        for (const binding of definitionReference.current.bindings) {
+          this.applyBinding(binding, true);
+        }
+      }
+      if (this.dirtyState.size) this.flushBindingUpdates();
     }
 
     componentWillUnmount(): void {
       this.mounted = false;
-      this.root = null;
-      this.dirtyState.clear();
       this.inputSelection = null;
       this.blockRefreshListeners.clear();
-      this.blockRoots.clear();
-      this.blockRootElements.clear();
-      this.bindingTargets.clear();
+      // React 18 StrictMode replays lifecycles without detaching host refs.
+      // Root, conditional-block, and binding-target refs clear DOM references on real unmounts.
       this.bindingTargetRefs.clear();
       this.indexedDefinition = null;
       this.staticBindingsByDependency = [];
@@ -11193,6 +12457,10 @@ export function createCompiledComponentWithFeatures<Props>(
       this.trackedBindingsByDependency = [];
       this.trackedDependenciesByBinding.clear();
       this.bindingValues.clear();
+      // Hiding also calls this lifecycle: pending state and React-owned text
+      // snapshots belong to the retained component, not its active effects.
+      // Reconciliation clears snapshots; real unmount releases host refs and
+      // the global refresh listener, allowing this instance to be collected.
       this.activeBinding = null;
       this.activeDependencies = null;
       refreshListeners.delete(this.refreshDefinition);
@@ -11215,30 +12483,25 @@ export function createCompiledComponentWithFeatures<Props>(
       }
       let renderedElement: React.ReactElement;
       const captureCommittedRoot = (root: Element | null) => {
-        this.captureRoot(root);
-        if (!root) return;
-        renderCells.commit();
-        this.renderedDefinition = currentDefinition;
-        this.renderedElement = renderedElement;
+        this.root = root;
+        if (root) {
+          renderCells.commit();
+          this.renderedDefinition = currentDefinition;
+          this.renderedElement = renderedElement;
+        }
       };
-      if (element.type === this.blockRuntime.KeyedRanges) {
+      if (
+        element.type === this.blockRuntime.KeyedRanges ||
+        element.type === this.blockRuntime.ConditionalRanges ||
+        element.type === this.blockRuntime.MixedRanges
+      ) {
         renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerKeyedRangesBlockProps>,
-          {
-            rootRef: captureCommittedRoot,
-          },
-        );
-      } else if (element.type === this.blockRuntime.ConditionalRanges) {
-        renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerConditionalRangesBlockProps>,
+          element as React.ReactElement<
+            | CompilerKeyedRangesBlockProps
+            | CompilerConditionalRangesBlockProps
+            | CompilerMixedRangesBlockProps
+          >,
           { rootRef: captureCommittedRoot },
-        );
-      } else if (element.type === this.blockRuntime.MixedRanges) {
-        renderedElement = React.cloneElement(
-          element as React.ReactElement<CompilerMixedRangesBlockProps>,
-          {
-            rootRef: captureCommittedRoot,
-          },
         );
       } else if (typeof element.type !== "string") {
         throw new TypeError(

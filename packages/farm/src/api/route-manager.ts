@@ -1,9 +1,12 @@
+import { loadFarmDevModule } from "../dev-module";
 import { mergePluginAPIRoutes } from "./plugin-route-runtime";
 import type { FarmPlugin } from "../plugin";
 import * as fs from "fs";
 import * as path from "path";
 import type { ViteDevServer } from "vite";
+import { explainMissingOptionalPeer } from "../optional-peer";
 import { logger } from "../utils";
+import { toFileModuleUrl } from "../utils/file-module";
 import type { ProgrammaticApiRoute } from "../routes";
 import { createProgrammaticRouteModuleId } from "../routes-shared";
 import { findProgrammaticRouteFilesInDir } from "../routes.server";
@@ -14,6 +17,7 @@ import {
 } from "../route-runtime";
 import { _runWithFarmI18nRequest, type FarmI18nRuntime } from "../i18n/server";
 import {
+  API_ROUTE_METHODS,
   getAllowedAPIRouteMethods,
   invokeAPIRouteEndpoint,
   registerAPIRouteShape,
@@ -57,16 +61,7 @@ export class APIRouteConflictError extends Error {
   }
 }
 
-export const API_ROUTE_METHODS = [
-  "GET",
-  "HEAD",
-  "QUERY",
-  "POST",
-  "PUT",
-  "DELETE",
-  "PATCH",
-  "OPTIONS",
-] as const;
+export { API_ROUTE_METHODS };
 
 export class APIRouteManager {
   private plugins: readonly FarmPlugin[];
@@ -123,10 +118,9 @@ export class APIRouteManager {
         await this.loadProgrammaticApiRoutes(appDir);
       }
       this.routes = new Map(
-        mergePluginAPIRoutes([...this.routes.values()], this.plugins).map((route) => [
-          route.path,
-          route,
-        ]),
+        mergePluginAPIRoutes([...this.routes.values()], this.plugins, undefined, {
+          bodySizeLimit: this.bodySizeLimit,
+        }).map((route) => [route.path, route]),
       );
     } catch (error) {
       this.routes = previousRoutes;
@@ -283,7 +277,8 @@ export class APIRouteManager {
     }
   }
 
-  private handleLoadError(message: string, error: unknown): void {
+  private handleLoadError(message: string, loadError: unknown): void {
+    const error = explainMissingOptionalPeer(loadError, message.replace(/^Error loading /, ""));
     logger.error(`${message}: ${error}`);
     if (
       this.throwOnLoadError ||
@@ -319,11 +314,10 @@ export class APIRouteManager {
 
   private async loadModule(filePath: string): Promise<Record<string, unknown>> {
     if (this.viteServer) {
-      return await this.viteServer.ssrLoadModule(filePath);
+      return await loadFarmDevModule(this.viteServer, filePath);
     }
 
-    const fileUrl = `file://${filePath}`;
-    return await import(/* @vite-ignore */ fileUrl);
+    return await import(/* @vite-ignore */ toFileModuleUrl(filePath));
   }
 
   private addEndpoint(

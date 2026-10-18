@@ -123,6 +123,29 @@ describe("Farm cron", () => {
     }
   });
 
+  it("gives case-colliding cron names distinct wrappers", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-cron-case-"));
+    const prepared = await prepareFarmCronForNitro({
+      root,
+      cron: {
+        Daily: { schedule: "0 2 * * *", path: "/api/a" },
+        daily: { schedule: "0 3 * * *", path: "/api/b" },
+      },
+    });
+
+    const handlers = Object.values(prepared.tasks).map((task) => task.handler);
+    expect(handlers).toHaveLength(2);
+    // On a case-insensitive filesystem a shared name means both jobs run the
+    // same wrapper, so the paths must differ by more than case.
+    expect(new Set(handlers.map((handler) => handler.toLowerCase())).size).toBe(2);
+
+    // Each wrapper still targets its own job.
+    const first = await fs.readFile(prepared.tasks["farm:cron:Daily"].handler, "utf8");
+    const second = await fs.readFile(prepared.tasks["farm:cron:daily"].handler, "utf8");
+    expect(first).toContain('const path = "/api/a"');
+    expect(second).toContain('const path = "/api/b"');
+  });
+
   it("generates Nitro tasks, grouped schedules, and a portable manifest", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-cron-"));
     const prepared = await prepareFarmCronForNitro({
@@ -153,7 +176,8 @@ describe("Farm cron", () => {
     }
 
     const wrapper = await fs.readFile(prepared.tasks["farm:cron:dailyCleanup"].handler, "utf8");
-    expect(wrapper).toContain('import { defineTask, useNitroApp } from "nitro/runtime"');
+    expect(wrapper).toContain('import { useNitroApp } from "nitro/app"');
+    expect(wrapper).toContain('import { defineTask } from "nitro/task"');
     expect(wrapper).toContain('const path = "/api/maintenance/cleanup"');
     expect(wrapper).toContain('const secretEnv = "CRON_SECRET"');
     expect(wrapper).toContain('headers.set("authorization", "Bearer " + secret)');
@@ -270,6 +294,40 @@ describe("Farm cron", () => {
 
     const response = await handler(new Request("https://example.com/api/cleanup"));
     expect(response.status).toBe(401);
+  });
+
+  it("fails closed when NODE_ENV is unset and no secret is configured", async () => {
+    // Plenty of container images and serverless runtimes never set NODE_ENV.
+    // "Not production" must not be read as "development" for an open endpoint.
+    delete process.env.CRON_SECRET;
+    delete process.env.NODE_ENV;
+    const handler = cronRoute(async () => Response.json({ deleted: 3 }));
+
+    const response = await handler(new Request("https://example.com/api/cleanup"));
+    expect(response.status).toBe(401);
+  });
+
+  it("fails closed for an unrecognized NODE_ENV and stays open in development", async () => {
+    delete process.env.CRON_SECRET;
+    process.env.NODE_ENV = "staging";
+    const handler = cronRoute(async () => Response.json({ deleted: 3 }));
+    expect((await handler(new Request("https://example.com/api/cleanup"))).status).toBe(401);
+
+    // An explicitly declared development environment keeps working without a
+    // secret, which is what `farm dev` relies on.
+    process.env.NODE_ENV = "development";
+    expect((await handler(new Request("https://example.com/api/cleanup"))).status).toBe(200);
+  });
+
+  it("still allows an unsecured cron route when opted in explicitly", async () => {
+    delete process.env.CRON_SECRET;
+    delete process.env.NODE_ENV;
+    const handler = cronRoute(async () => Response.json({ deleted: 3 }), {
+      allowUnsecured: true,
+    });
+
+    const response = await handler(new Request("https://example.com/api/cleanup"));
+    expect(response.status).toBe(200);
   });
 
   it("authorizes Worker requests from runtime bindings and fails closed without one", async () => {

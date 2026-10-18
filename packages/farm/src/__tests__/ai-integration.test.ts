@@ -113,34 +113,40 @@ describe("ai integration", () => {
 
     const streamTextCalls: unknown[] = [];
     const manager = new APIRouteManager(appDir, {
-      ssrLoadModule: async (filePath: string) => {
-        expect(filePath).toBe(routeFile);
-        return {
-          POST: aiChatRoute({
-            model: "openai/gpt-4o-mini",
-            convertToModelMessages: async (messages) => {
-              expect(messages).toEqual(chatMessages);
-              return [
-                {
-                  role: "user",
-                  content: "Hello",
-                },
-              ] as any;
-            },
-            streamText: ((input: unknown) => {
-              streamTextCalls.push(input);
+      environments: {
+        ssr: {
+          runner: {
+            import: async (filePath: string) => {
+              expect(filePath).toBe(routeFile);
               return {
-                toUIMessageStreamResponse() {
-                  return new Response("next-ai-stream", {
-                    headers: {
-                      "content-type": "text/event-stream",
-                    },
-                  });
-                },
+                POST: aiChatRoute({
+                  model: "openai/gpt-4o-mini",
+                  convertToModelMessages: async (messages) => {
+                    expect(messages).toEqual(chatMessages);
+                    return [
+                      {
+                        role: "user",
+                        content: "Hello",
+                      },
+                    ] as any;
+                  },
+                  streamText: ((input: unknown) => {
+                    streamTextCalls.push(input);
+                    return {
+                      toUIMessageStreamResponse() {
+                        return new Response("next-ai-stream", {
+                          headers: {
+                            "content-type": "text/event-stream",
+                          },
+                        });
+                      },
+                    };
+                  }) as any,
+                }),
               };
-            }) as any,
-          }),
-        };
+            },
+          },
+        },
       },
     } as any);
 

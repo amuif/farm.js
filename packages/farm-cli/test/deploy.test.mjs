@@ -10,7 +10,30 @@ const {
   createFarmDeployPlan,
   formatFarmDeployPlan,
   resolveCloudflareAgentDeployPlan,
+  resolveDeployCliExecutable,
 } = require("../dist/index.js");
+
+test("resolves project-local deployment CLIs and Windows shims", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "farm-cli-deploy-cli-"));
+  try {
+    const bin = path.join(root, "node_modules", ".bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(path.join(bin, "wrangler"), "");
+    await writeFile(path.join(bin, "wrangler.cmd"), "");
+
+    assert.equal(
+      resolveDeployCliExecutable("wrangler", root, "darwin"),
+      path.join(bin, "wrangler"),
+    );
+    assert.equal(
+      resolveDeployCliExecutable("wrangler", root, "win32"),
+      path.join(bin, "wrangler.cmd"),
+    );
+    assert.equal(resolveDeployCliExecutable("vercel", root, "win32"), "vercel.cmd");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("resolves a deployment plan without building or invoking a platform CLI", async () => {
   let root;
@@ -225,8 +248,30 @@ test("reports Netlify deploys as production operations", async () => {
     const plan = await createFarmDeployPlan({ root });
 
     assert.equal(plan.production, true);
-    assert.equal(plan.deploy.command, "netlify deploy --prod --dir=.");
+    assert.equal(plan.deploy.command, "netlify deploy --prod --no-build --dir=dist");
+    assert.equal(plan.deploy.cwd, root);
     assert.match(formatFarmDeployPlan(plan), /Production: yes/);
+  } finally {
+    if (root) await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("points Netlify at the server function in a custom output directory", async () => {
+  let root;
+
+  try {
+    root = await mkdtemp(path.join(tmpdir(), "farm-cli-netlify-custom-output-"));
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      "export default { deploy: { target: 'netlify', output: '.output' } };\n",
+    );
+
+    const plan = await createFarmDeployPlan({ root });
+
+    assert.equal(
+      plan.deploy.command,
+      "netlify deploy --prod --no-build --dir=dist --functions=.output/server",
+    );
   } finally {
     if (root) await rm(root, { recursive: true, force: true });
   }
@@ -248,7 +293,13 @@ test("binds an untrusted Netlify site value to the intended option", async () =>
     const plan = await createFarmDeployPlan({ root });
 
     assert.equal(plan.deploy.executable, "netlify");
-    assert.deepEqual(plan.deploy.args, ["deploy", "--prod", "--dir=.", `--site=${site}`]);
+    assert.deepEqual(plan.deploy.args, [
+      "deploy",
+      "--prod",
+      "--no-build",
+      "--dir=dist",
+      `--site=${site}`,
+    ]);
     assert.match(
       plan.deploy.command,
       /'--site=--alias=attacker; touch \/tmp\/farm-deploy-injected'/,

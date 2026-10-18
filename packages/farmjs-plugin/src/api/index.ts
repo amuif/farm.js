@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "@farm.js/core/plugin";
 /**
  * Farm.js API Routes Plugin
  *
@@ -24,15 +25,33 @@
 
 import type { Plugin, ViteDevServer } from "vite";
 import { _withAfterNodeMiddleware } from "@farm.js/core/after";
-import { _runWithAPIRequestRuntime } from "@farm.js/core/internal/production-runtime";
-import { invokeAPIRouteEndpoint } from "@farm.js/core/api/runtime";
+import {
+  _runWithAPIRequestRuntime,
+  createFarmRequestBodyErrorResponse,
+  readNodeRequestBody,
+  resolveFarmServerConfig,
+} from "@farm.js/core/internal/production-runtime";
+import {
+  API_ROUTE_METHODS,
+  getAllowedAPIRouteMethods,
+  invokeAPIRouteEndpoint,
+  matchAPIRouteAtBasePath,
+  resolveAPIRouteEndpoint,
+} from "@farm.js/core/api/runtime";
 import { sendWebResponse } from "@farm.js/core/server";
+import {
+  createDevRequestHeaders,
+  resolveDevRequestURL,
+  resolveViteHtmlFallbackUrl,
+} from "../dev-request.js";
 
 export interface FarmApiOptions {
   /** Source directory containing the api folder (default: 'src') */
   srcDir?: string;
   /** Enable debug logging */
   debug?: boolean;
+  /** Maximum request body size, for example `"10mb"`. */
+  bodySizeLimit?: number | string;
 }
 
 export interface ApiRoute {
@@ -48,6 +67,9 @@ export interface ApiRoute {
 export default function farmApi(options: FarmApiOptions = {}): Plugin {
   const srcDir = options.srcDir ?? "src";
   const debug = options.debug ?? false;
+  const bodySizeLimit = resolveFarmServerConfig({
+    bodySizeLimit: options.bodySizeLimit,
+  }).bodySizeLimit;
 
   // API routes cache
   let apiRoutesCache: Map<string, ApiRoute> = new Map();
@@ -106,25 +128,32 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         const method = request.method;
         const pathname = url.pathname;
 
-        // Find matching route
-        const route = apiRoutesCache.get(pathname);
-        if (!route) {
+        // Match through core's matcher, the same one the production entry
+        // uses, so dynamic segments resolve here too. An exact Map lookup
+        // registers `src/api/users/[id]/route.ts` under the literal
+        // "/api/users/[id]" and 404s every real request for it.
+        const match = matchAPIRouteAtBasePath(apiRoutesCache, pathname);
+        if (!match) {
           return new Response(JSON.stringify({ error: "Not Found" }), {
             status: 404,
             headers: { "Content-Type": "application/json" },
           });
         }
 
-        const endpoint = route.endpoints[method];
+        const route = match.route;
+        const endpoint = resolveAPIRouteEndpoint(route, method);
         if (!endpoint) {
           return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
             status: 405,
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              Allow: getAllowedAPIRouteMethods(route).join(", "),
+              "Content-Type": "application/json",
+            },
           });
         }
 
         try {
-          return await invokeAPIRouteEndpoint(endpoint, request);
+          return await invokeAPIRouteEndpoint(endpoint, request, match.params);
         } catch (error: any) {
           return new Response(JSON.stringify({ error: error.message || "Internal Server Error" }), {
             status: 500,
@@ -143,20 +172,23 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
       const url = new URL(request.url);
       const method = request.method;
 
-      // Find matching route
-      const route = apiRoutesCache.get(url.pathname);
-      if (!route) {
+      // Same core matcher as above so dynamic segments resolve here too.
+      const match = matchAPIRouteAtBasePath(apiRoutesCache, url.pathname);
+      if (!match) {
         return new Response(JSON.stringify({ error: "Not Found" }), {
           status: 404,
           headers: { "Content-Type": "application/json" },
         });
       }
 
-      const endpoint = route.endpoints[method];
+      const endpoint = resolveAPIRouteEndpoint(match.route, method);
       if (!endpoint) {
         return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
           status: 405,
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            Allow: getAllowedAPIRouteMethods(match.route).join(", "),
+            "Content-Type": "application/json",
+          },
         });
       }
 
@@ -227,12 +259,11 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(filePath);
-            const methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"];
+            const routeModule = await loadFarmDevModule(server, filePath);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
-            for (const method of methods) {
+            for (const method of API_ROUTE_METHODS) {
               if (routeModule[method]) {
                 availableMethods.push(method);
                 endpoints[method] = routeModule[method];
@@ -269,7 +300,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         for (const routesFile of routesFiles) {
           if (fs.existsSync(routesFile)) {
             try {
-              const routesModule = await server.ssrLoadModule(routesFile);
+              const routesModule = await loadFarmDevModule(server, routesFile);
 
               // Look for exported endpoints with explicit paths
               for (const [exportName, exportValue] of Object.entries(routesModule)) {
@@ -329,13 +360,21 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
       // Add middleware to handle API requests
       return () => {
         const apiMiddleware = _withAfterNodeMiddleware(async (req, res, next) => {
-          const url = req.url || "/";
-          const pathname = url.split("?")[0];
+          // Route on the URL the client sent, not Vite's SPA fallback rewrite,
+          // and put the rewrite back for Vite when this is not an API request.
+          const fallbackUrl = req.url;
+          const requestedUrl = resolveViteHtmlFallbackUrl(req, server.config.base);
+          if (requestedUrl) req.url = requestedUrl;
+          const passThrough = () => {
+            if (requestedUrl && req.url === requestedUrl) req.url = fallbackUrl;
+            return next();
+          };
+          const pathname = resolveDevRequestURL(req).pathname;
           const method = req.method || "GET";
 
           // Only handle /api/ routes
           if (!pathname.startsWith("/api/")) {
-            return next();
+            return passThrough();
           }
 
           // Wait for discovery
@@ -344,7 +383,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
           }
 
           if (!apiRouterHandler) {
-            return next();
+            return passThrough();
           }
 
           const startTime = Date.now();
@@ -363,33 +402,27 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
               }
             }
 
-            // Convert Node request to Web Request
-            const fullUrl = `http://${req.headers.host || "localhost:3000"}${url}`;
-            const headers = new Headers();
-            for (const [key, value] of Object.entries(req.headers)) {
-              if (value) {
-                headers.set(key, Array.isArray(value) ? value.join(", ") : value);
-              }
-            }
+            // Convert Node request to Web Request. ctx.rewrite() updates
+            // req.url, so dispatch from the current value, not the one
+            // captured before middleware ran.
+            const fullUrl = resolveDevRequestURL(req);
+            const headers = createDevRequestHeaders(req.headers);
 
             // Get body for non-GET requests
-            let body: string | undefined;
+            let body: Buffer | undefined;
             if (method !== "GET" && method !== "HEAD") {
-              body = await new Promise<string>((resolve) => {
-                let data = "";
-                req.on("data", (chunk: any) => {
-                  data += chunk;
-                });
-                req.on("end", () => {
-                  resolve(data);
-                });
-              });
+              body = await readNodeRequestBody(req as any, bodySizeLimit);
             }
 
             const request = new Request(fullUrl, {
               method,
               headers,
-              body: body || undefined,
+              body: body
+                ? (body.buffer.slice(
+                    body.byteOffset,
+                    body.byteOffset + body.byteLength,
+                  ) as ArrayBuffer)
+                : undefined,
             });
 
             const response = await apiRouterHandler(request);
@@ -399,6 +432,11 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
 
             await sendWebResponse(res, response);
           } catch (error: any) {
+            const bodyErrorResponse = createFarmRequestBodyErrorResponse(error);
+            if (bodyErrorResponse) {
+              await sendWebResponse(res, bodyErrorResponse);
+              return;
+            }
             const duration = Date.now() - startTime;
             logResponse(method, pathname, 500, duration);
             console.error("[FARM] API error:", error);
@@ -442,7 +480,7 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         }
 
         try {
-          const routesModule = await server.ssrLoadModule(file);
+          const routesModule = await loadFarmDevModule(server, file);
 
           // Look for exported endpoints with explicit paths
           // Endpoints can be functions (from better-call) or objects
@@ -501,12 +539,11 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
         if (routePathToUpdate) {
           try {
             // Reload the module
-            const routeModule = await server.ssrLoadModule(file);
-            const methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"];
+            const routeModule = await loadFarmDevModule(server, file);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
-            for (const method of methods) {
+            for (const method of API_ROUTE_METHODS) {
               if (routeModule[method]) {
                 availableMethods.push(method);
                 endpoints[method] = routeModule[method];
@@ -538,12 +575,11 @@ export default function farmApi(options: FarmApiOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(file);
-            const methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"];
+            const routeModule = await loadFarmDevModule(server, file);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
-            for (const method of methods) {
+            for (const method of API_ROUTE_METHODS) {
               if (routeModule[method]) {
                 availableMethods.push(method);
                 endpoints[method] = routeModule[method];

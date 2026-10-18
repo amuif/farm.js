@@ -1,6 +1,7 @@
 "use client";
 
 import { readDeferredDataResponse } from "../deferred";
+import { createClientCancellation } from "../client-cancellation";
 import { notifyHistoryChange, notifyRouterHistoryChange } from "./history-sync";
 import {
   createFarmDeploymentMismatchError,
@@ -8,9 +9,10 @@ import {
   isFarmDeploymentMismatchResponse,
 } from "../deployment";
 import { getHashTargetElement } from "./hash-target";
-import { isFarmExternalNavigationURL } from "./navigation-url";
+import { isFarmExternalNavigationURL, resolveFarmNavigationURL } from "./navigation-url";
+import { applyFarmMetadataToDocument, type NavigationMetadata } from "./metadata-reconciler";
 import type { FarmClientNavigationSession, FarmClientPluginManager } from "./plugin";
-import { _hydrateFarmI18n, isFarmLocaleChangeHref } from "../i18n/client-runtime";
+import { _hydrateFarmI18n, isFarmLocaleChangeHref } from "../i18n/client-state";
 import type { FarmI18nClientSnapshot } from "../i18n/types";
 import type { FarmIslandStrategy } from "../island";
 import type { FarmRouteRenderPlan } from "../navigation/render-plan";
@@ -43,10 +45,7 @@ interface PageData {
     html: string;
     layoutPatterns: string[];
   };
-  metadata?: {
-    title?: string;
-    description?: string;
-  };
+  metadata?: NavigationMetadata;
   layoutModules?: string[];
   routeSlots?: RouteSlotPageData[];
   interception?: {
@@ -80,6 +79,21 @@ interface CacheEntry {
   data: PageData;
   timestamp: number;
 }
+
+interface PendingPrefetch {
+  data: Promise<PageData | undefined>;
+  resolve: (data: PageData | undefined) => void;
+  cacheable: boolean;
+}
+
+interface ViewportPrefetchTask {
+  href: string;
+  elements: Set<HTMLAnchorElement>;
+  cancelled: boolean;
+  started: boolean;
+}
+
+const MAX_CONCURRENT_VIEWPORT_PREFETCHES = 4;
 
 export interface FarmNavigationBlockerContext {
   from: string;
@@ -154,13 +168,23 @@ let routerInstance: SPARouter | null = null;
 export class SPARouter {
   private cache: Map<string, CacheEntry> = new Map();
   private prefetchingUrls: Set<string> = new Set();
-  private observers: Map<Element, IntersectionObserver> = new Map();
+  private pendingPrefetches: Map<string, PendingPrefetch> = new Map();
+  private cacheGeneration = 0;
+  private prefetchObserver?: IntersectionObserver;
+  private observedPrefetchLinks: Map<HTMLAnchorElement, string> = new Map();
   private prefetchTimers: Map<Element, ReturnType<typeof setTimeout>> = new Map();
+  private viewportPrefetchQueue: ViewportPrefetchTask[] = [];
+  private viewportPrefetchTasksByHref: Map<string, ViewportPrefetchTask> = new Map();
+  private viewportPrefetchTasksByElement: Map<HTMLAnchorElement, ViewportPrefetchTask> = new Map();
+  private activeViewportPrefetches = 0;
+  private destroyed = false;
   private blockers: Set<FarmNavigationBlocker> = new Set();
   private unloadBlockers: Map<FarmNavigationBlocker, () => boolean> = new Map();
   private navigationListeners: Set<FarmNavigationListener> = new Set();
   private navigationState: FarmNavigationState = IDLE_NAVIGATION_STATE;
   private currentHistoryPath: string | null = null;
+  private currentHistoryHash = "";
+  private currentInterceptFrom: unknown;
   private currentHistoryIndex: number | null = null;
   private suppressNextPopState = false;
   private navigationSequence = 0;
@@ -212,6 +236,8 @@ export class SPARouter {
       // Track the rendered location and its position in the history stack so
       // popstate can report a real `from` and revert blocked traversals.
       this.currentHistoryPath = window.location.pathname + window.location.search;
+      this.currentHistoryHash = window.location.hash;
+      this.currentInterceptFrom = window.history.state?.[FARM_INTERCEPT_FROM_KEY];
       const existingIndex = readHistoryIndex(window.history.state);
       if (existingIndex == null) {
         try {
@@ -236,11 +262,18 @@ export class SPARouter {
   /** Remove global listeners. Intended for tests and teardown. */
   destroy(): void {
     if (typeof window === "undefined") return;
+    this.destroyed = true;
     this.cancelActiveNavigation();
-    for (const observer of this.observers.values()) observer.disconnect();
+    this.clearCache();
+    this.prefetchObserver?.disconnect();
+    this.prefetchObserver = undefined;
     for (const timer of this.prefetchTimers.values()) clearTimeout(timer);
-    this.observers.clear();
+    this.observedPrefetchLinks.clear();
     this.prefetchTimers.clear();
+    for (const task of this.viewportPrefetchQueue) task.cancelled = true;
+    this.viewportPrefetchQueue.length = 0;
+    this.viewportPrefetchTasksByHref.clear();
+    this.viewportPrefetchTasksByElement.clear();
     window.removeEventListener("popstate", this.onPopState);
     window.removeEventListener("beforeunload", this.onBeforeUnload);
   }
@@ -271,8 +304,8 @@ export class SPARouter {
       refresh = false,
     } = options;
 
-    // Parse the URL
-    const url = new URL(href, window.location.origin);
+    // Relative targets resolve against the current document, not the origin.
+    const url = resolveFarmNavigationURL(href, window.location.href);
     const pathname = url.pathname;
     const search = url.search;
     const fullPath = pathname + search;
@@ -402,8 +435,9 @@ export class SPARouter {
    * Prefetch a URL
    */
   async prefetch(href: string): Promise<void> {
+    if (this.destroyed) return;
     if (isFarmLocaleChangeHref(href)) return;
-    const url = new URL(href, window.location.origin);
+    const url = resolveFarmNavigationURL(href, window.location.href);
     if (isFarmExternalNavigationURL(url, window.location.origin)) return;
     if (this.options.shouldUseDocumentNavigation(url.pathname)) return;
     const fullPath = url.pathname + url.search;
@@ -428,51 +462,119 @@ export class SPARouter {
    * Observe an element for viewport intersection (prefetch when visible)
    */
   observeForPrefetch(element: HTMLAnchorElement): void {
-    if (typeof IntersectionObserver === "undefined") return;
+    if (this.destroyed || typeof IntersectionObserver === "undefined") return;
 
     const href = element.getAttribute("href");
     if (!href || this.isExternalUrl(href)) return;
     this.unobserveForPrefetch(element);
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            if (this.observers.get(element) !== observer) continue;
-            // Delay prefetch slightly to avoid prefetching during scroll
-            const timer = setTimeout(() => {
-              if (this.prefetchTimers.get(element) !== timer) return;
-              this.prefetchTimers.delete(element);
-              void this.prefetch(href);
-            }, this.options.prefetchTimeout);
-            this.prefetchTimers.set(element, timer);
-
-            // Stop observing after first intersection
-            observer.unobserve(element);
-            this.observers.delete(element);
-          }
-        }
-      },
-      { rootMargin: "200px" }, // Start prefetching when 200px from viewport
-    );
-
+    const observer = this.getPrefetchObserver();
+    this.observedPrefetchLinks.set(element, href);
     observer.observe(element);
-    this.observers.set(element, observer);
   }
 
   /**
    * Stop observing an element
    */
   unobserveForPrefetch(element: HTMLAnchorElement): void {
-    const observer = this.observers.get(element);
-    if (observer) {
-      observer.unobserve(element);
-      this.observers.delete(element);
+    if (this.observedPrefetchLinks.delete(element)) {
+      this.prefetchObserver?.unobserve(element);
     }
     const timer = this.prefetchTimers.get(element);
     if (timer !== undefined) {
       clearTimeout(timer);
       this.prefetchTimers.delete(element);
+    }
+    this.cancelQueuedViewportPrefetch(element);
+  }
+
+  private getPrefetchObserver(): IntersectionObserver {
+    this.prefetchObserver ??= new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const element = entry.target as HTMLAnchorElement;
+          const href = this.observedPrefetchLinks.get(element);
+          if (!href) continue;
+
+          this.prefetchObserver?.unobserve(element);
+          this.observedPrefetchLinks.delete(element);
+          // Delay viewport work slightly so links passed during a scroll do not
+          // immediately compete with the active document for network slots.
+          const timer = setTimeout(() => {
+            if (this.prefetchTimers.get(element) !== timer) return;
+            this.prefetchTimers.delete(element);
+            this.enqueueViewportPrefetch(element, href);
+          }, this.options.prefetchTimeout);
+          this.prefetchTimers.set(element, timer);
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    return this.prefetchObserver;
+  }
+
+  private enqueueViewportPrefetch(element: HTMLAnchorElement, href: string): void {
+    if (this.destroyed) return;
+    let task = this.viewportPrefetchTasksByHref.get(href);
+    if (!task) {
+      task = { href, elements: new Set(), cancelled: false, started: false };
+      this.viewportPrefetchTasksByHref.set(href, task);
+      this.viewportPrefetchQueue.push(task);
+    }
+    task.elements.add(element);
+    this.viewportPrefetchTasksByElement.set(element, task);
+    this.drainViewportPrefetchQueue();
+  }
+
+  private cancelQueuedViewportPrefetch(element: HTMLAnchorElement): void {
+    const task = this.viewportPrefetchTasksByElement.get(element);
+    if (!task) return;
+    this.viewportPrefetchTasksByElement.delete(element);
+    task.elements.delete(element);
+    if (task.elements.size > 0) return;
+    if (task.started) return;
+    task.cancelled = true;
+    if (this.viewportPrefetchTasksByHref.get(task.href) === task) {
+      this.viewportPrefetchTasksByHref.delete(task.href);
+    }
+  }
+
+  private drainViewportPrefetchQueue(): void {
+    while (
+      !this.destroyed &&
+      this.activeViewportPrefetches < MAX_CONCURRENT_VIEWPORT_PREFETCHES &&
+      this.viewportPrefetchQueue.length > 0
+    ) {
+      const task = this.viewportPrefetchQueue.shift()!;
+      if (task.cancelled || task.elements.size === 0) {
+        if (this.viewportPrefetchTasksByHref.get(task.href) === task) {
+          this.viewportPrefetchTasksByHref.delete(task.href);
+        }
+        continue;
+      }
+
+      task.started = true;
+      this.activeViewportPrefetches += 1;
+      let prefetchResult: Promise<void> | void;
+      try {
+        prefetchResult = this.prefetch(task.href);
+      } catch {
+        prefetchResult = undefined;
+      }
+      void Promise.resolve(prefetchResult)
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.viewportPrefetchTasksByHref.get(task.href) === task) {
+            this.viewportPrefetchTasksByHref.delete(task.href);
+          }
+          for (const element of task.elements) {
+            if (this.viewportPrefetchTasksByElement.get(element) === task) {
+              this.viewportPrefetchTasksByElement.delete(element);
+            }
+          }
+          this.activeViewportPrefetches -= 1;
+          this.drainViewportPrefetchQueue();
+        });
     }
   }
 
@@ -532,9 +634,9 @@ export class SPARouter {
     state: unknown;
     url: URL;
   }): Promise<void> {
-    const historyUrl = new URL(
+    const historyUrl = resolveFarmNavigationURL(
       options.pageData.canonicalPath || options.fullPath,
-      window.location.origin,
+      window.location.href,
     );
     historyUrl.hash = options.url.hash;
     const historyPath = historyUrl.pathname + historyUrl.search + historyUrl.hash;
@@ -559,9 +661,10 @@ export class SPARouter {
       window.history.pushState(historyState, "", historyPath);
     }
     this.currentHistoryIndex = nextHistoryIndex;
-    this.currentHistoryPath =
-      new URL(historyPath, window.location.origin).pathname +
-      new URL(historyPath, window.location.origin).search;
+    const resolvedHistoryUrl = resolveFarmNavigationURL(historyPath, window.location.href);
+    this.currentHistoryPath = resolvedHistoryUrl.pathname + resolvedHistoryUrl.search;
+    this.currentHistoryHash = resolvedHistoryUrl.hash;
+    this.currentInterceptFrom = historyState[FARM_INTERCEPT_FROM_KEY];
     notifyRouterHistoryChange();
 
     this.updateDocumentMetadata(options.pageData.metadata);
@@ -582,7 +685,9 @@ export class SPARouter {
         window.scrollTo(0, 0);
       }
     } else if (this.options.scrollRestoration) {
-      this.restoreScrollPosition(this.currentHistoryPath ?? options.fullPath);
+      const restorePath = this.currentHistoryPath ?? options.fullPath;
+      this.restoreWindowScroll(restorePath);
+      this.restoreScrollElements(restorePath);
     }
   }
 
@@ -629,6 +734,72 @@ export class SPARouter {
     // Fetch from server. The active layout chain lets the server omit shared
     // shell HTML from the fragment without inspecting component source.
     const activeLayoutChain = getActiveLayoutChainHeader();
+    const prefetchKey = JSON.stringify([path, interceptFrom, activeLayoutChain]);
+    let generation = this.cacheGeneration;
+    const pending = this.pendingPrefetches.get(prefetchKey);
+    if (pending && recover) {
+      if (fresh) {
+        // An explicit refresh must not reuse, or later be overwritten by, old work.
+        pending.cacheable = false;
+        pending.resolve(undefined);
+        this.pendingPrefetches.delete(prefetchKey);
+      } else {
+        // Cancelling this navigation must not cancel the background prefetch.
+        const cancellation = createClientCancellation(signal);
+        try {
+          const data = await cancellation.run(() => pending.data);
+          cancellation.check();
+          if (data && pending.cacheable && generation === this.cacheGeneration) return data;
+        } finally {
+          cancellation.dispose();
+        }
+      }
+    }
+
+    // A cleared cache releases a waiter into a new, independently cacheable request.
+    generation = this.cacheGeneration;
+    let prefetch: PendingPrefetch | undefined;
+    if (!recover) {
+      let resolve!: PendingPrefetch["resolve"];
+      const data = new Promise<PageData | undefined>((done) => {
+        resolve = done;
+      });
+      prefetch = { data, resolve, cacheable: true };
+      this.pendingPrefetches.set(prefetchKey, prefetch);
+    }
+    const cacheData = (data: PageData) => {
+      if (!this.destroyed && generation === this.cacheGeneration && prefetch?.cacheable !== false) {
+        this.cachePageData(cacheKey, data);
+      }
+    };
+    try {
+      return await this.requestPageData(
+        path,
+        recover,
+        interceptFrom,
+        activeLayoutChain,
+        signal,
+        cacheData,
+        prefetch?.resolve,
+      );
+    } finally {
+      // Release joiners on failure too: navigation retries through its own recovery path.
+      prefetch?.resolve(undefined);
+      if (prefetch && this.pendingPrefetches.get(prefetchKey) === prefetch) {
+        this.pendingPrefetches.delete(prefetchKey);
+      }
+    }
+  }
+
+  private async requestPageData(
+    path: string,
+    recover: boolean,
+    interceptFrom: string | undefined,
+    activeLayoutChain: string | undefined,
+    signal: AbortSignal | undefined,
+    cacheData: (data: PageData) => void,
+    resolvePrefetch?: PendingPrefetch["resolve"],
+  ): Promise<PageData> {
     const response = await fetch(`/__farm/page-data?path=${encodeURIComponent(path)}`, {
       signal,
       headers: createFarmDeploymentRequestHeaders(this.options.deploymentId, {
@@ -655,15 +826,47 @@ export class SPARouter {
       throw new Error(`Failed to fetch page data: ${response.status}`);
     }
 
-    const data = await readDeferredDataResponse<PageData>(response);
+    const isDeferredResponse = (response.headers.get("Content-Type") || "")
+      .toLowerCase()
+      .startsWith("application/x-farm-deferred+json");
 
-    // Cache the result
-    this.cache.set(cacheKey, {
-      data,
-      timestamp: Date.now(),
+    if (!isDeferredResponse) {
+      const data = await readDeferredDataResponse<PageData>(response);
+      cacheData(data);
+      resolvePrefetch?.(data);
+      return data;
+    }
+
+    // Deferred streams keep independent ownership and abort behavior. Release
+    // navigation at the response headers; do not wait for deferred values.
+    resolvePrefetch?.(undefined);
+    // The first deferred stream line is available before its promises settle.
+    // Do not cache that object until the stream closes normally: an aborted
+    // navigation otherwise leaves rejected deferreds in the page-data cache.
+    let data: PageData | undefined;
+    let streamCompleted = false;
+    const markStreamComplete = () => {
+      streamCompleted = true;
+      if (data) cacheData(data);
+    };
+    data = await readDeferredDataResponse<PageData>(response, {
+      onComplete: markStreamComplete,
     });
+    if (streamCompleted) cacheData(data);
 
     return data;
+  }
+
+  private cachePageData(cacheKey: string, data: PageData): void {
+    // Expiry was previously only consulted on read, so a long-lived tab that
+    // navigates or prefetches many distinct routes grew this map without
+    // bound; sweeping on write bounds it to entries touched within the
+    // cacheMaxAge window.
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now - entry.timestamp >= this.options.cacheMaxAge) this.cache.delete(key);
+    }
+    this.cache.set(cacheKey, { data, timestamp: now });
   }
 
   /**
@@ -716,6 +919,21 @@ export class SPARouter {
     // describes `to`; the page still rendered is the tracked current path.
     const from = this.currentHistoryPath ?? path;
 
+    // Native fragment links and their Back/Forward entries also emit popstate.
+    // They stay in the current document: let the browser own anchor scrolling
+    // and history subscribers update local UI without refetching the route.
+    // A changed interception context still needs a route render.
+    if (
+      path === from &&
+      window.location.hash !== this.currentHistoryHash &&
+      event.state?.[FARM_INTERCEPT_FROM_KEY] === this.currentInterceptFrom
+    ) {
+      this.cancelActiveNavigation();
+      this.currentHistoryHash = window.location.hash;
+      this.currentHistoryIndex = readHistoryIndex(event.state);
+      return;
+    }
+
     if (
       await this.shouldBlockNavigation({
         from,
@@ -728,6 +946,8 @@ export class SPARouter {
     }
 
     this.currentHistoryPath = path;
+    this.currentHistoryHash = window.location.hash;
+    this.currentInterceptFrom = event.state?.[FARM_INTERCEPT_FROM_KEY];
     this.currentHistoryIndex = readHistoryIndex(event.state);
 
     const navigation = this.startNavigation({
@@ -770,9 +990,27 @@ export class SPARouter {
         await this.onNavigate(pageData);
       }
 
-      // Restore scroll position
+      // A fragment in the destination URL is an explicit scroll target for the
+      // window and takes precedence over the saved *window* scroll position,
+      // matching forward navigation and native browser back/forward. Element
+      // scroll positions are keyed without the hash (see
+      // getScrollElementStorageKey), so registered scroll containers are
+      // restored regardless of whether a fragment is present, even when the
+      // anchor resolves, so a persistent-layout scroll element is not left at
+      // the prior route's offset on a hash-destination popstate.
+      const destinationPath = window.location.pathname + window.location.search;
+      if (window.location.hash) {
+        const target = getHashTargetElement(window.location.hash);
+        if (target) {
+          target.scrollIntoView();
+        } else if (this.options.scrollRestoration) {
+          this.restoreWindowScroll(destinationPath);
+        }
+      } else if (this.options.scrollRestoration) {
+        this.restoreWindowScroll(destinationPath);
+      }
       if (this.options.scrollRestoration) {
-        this.restoreScrollPosition(window.location.pathname + window.location.search);
+        this.restoreScrollElements(destinationPath);
       }
 
       if (clientNavigation) {
@@ -838,20 +1076,9 @@ export class SPARouter {
   }
 
   private updateDocumentMetadata(metadata: PageData["metadata"]): void {
-    document.title = metadata?.title || "Farm.js App";
-
-    let description = document.querySelector('meta[name="description"]');
-    if (!metadata?.description) {
-      description?.remove();
-      return;
-    }
-
-    if (!description) {
-      description = document.createElement("meta");
-      description.setAttribute("name", "description");
-      document.head.appendChild(description);
-    }
-    description.setAttribute("content", metadata.description);
+    // Both call sites run after the history entry is committed, so the current
+    // pathname is the navigated-to page and drives the default canonical.
+    applyFarmMetadataToDocument(metadata, window.location.pathname);
   }
 
   private startNavigation(options: {
@@ -915,7 +1142,9 @@ export class SPARouter {
   ): void {
     if (typeof window === "undefined") return;
 
-    const url = href ? new URL(href, window.location.origin).toString() : window.location.href;
+    const url = href
+      ? resolveFarmNavigationURL(href, window.location.href).toString()
+      : window.location.href;
     const parsedUrl = new URL(url);
     const nextPath = parsedUrl.pathname + parsedUrl.search;
     const historyPath = nextPath + parsedUrl.hash;
@@ -935,6 +1164,8 @@ export class SPARouter {
         this.currentHistoryIndex == null ? null : this.currentHistoryIndex + 1;
     }
     this.currentHistoryPath = nextPath;
+    this.currentHistoryHash = parsedUrl.hash;
+    this.currentInterceptFrom = nextState[FARM_INTERCEPT_FROM_KEY];
 
     if (notify) notifyHistoryChange("page-state");
   }
@@ -960,15 +1191,27 @@ export class SPARouter {
   }
 
   /**
-   * Restore scroll position for a path
+   * Restore the saved window scroll position for a path.
    */
-  private restoreScrollPosition(path: string): void {
+  private restoreWindowScroll(path: string): void {
     try {
       const saved = sessionStorage.getItem(`farm-scroll-${path}`);
       if (saved) {
         const { x, y } = JSON.parse(saved);
         setTimeout(() => window.scrollTo(x, y), 0);
       }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /**
+   * Restore saved scroll positions for every registered scroll element. Keys
+   * are hash-stripped (see getScrollElementStorageKey), so this runs regardless
+   * of whether the destination URL carries a fragment.
+   */
+  private restoreScrollElements(path: string): void {
+    try {
       for (const [key, element] of this.scrollElements) {
         this.restoreScrollElement(path, key, element);
       }
@@ -995,7 +1238,13 @@ export class SPARouter {
    * Clear the page cache
    */
   clearCache(): void {
+    this.cacheGeneration += 1;
     this.cache.clear();
+    for (const pending of this.pendingPrefetches.values()) {
+      pending.cacheable = false;
+      pending.resolve(undefined);
+    }
+    this.pendingPrefetches.clear();
   }
 }
 

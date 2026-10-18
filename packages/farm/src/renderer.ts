@@ -1,6 +1,8 @@
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { FarmPresetRuntime } from "./deployment";
 
 /**
  * A rendering-library integration used by Farm's compiler, server renderer,
@@ -45,36 +47,217 @@ export interface FarmRenderer {
    * each option.
    */
   options?: Readonly<Record<string, unknown>>;
+  /**
+   * Module that configures each app instance the renderer creates, relative to the project
+   * root. Farm imports it in the server and client entries and passes its default export to
+   * the renderer's `configureApp()`, which both renderer runtime modules must export.
+   */
+  appSetup?: string;
 }
 
-export interface FarmRendererStreamingCapabilities {
+export type FarmRendererRuntime = Exclude<FarmPresetRuntime, "unknown">;
+
+export interface FarmRendererStreamingPrimitives {
   /** Supports Node.js writable streams through renderToPipeableStream(). */
   node: boolean;
   /** Supports WHATWG ReadableStream output through renderToReadableStream(). */
   web: boolean;
 }
 
+export interface FarmRendererStreamingCapabilities extends FarmRendererStreamingPrimitives {
+  /**
+   * Overrides the default stream primitives for a deployment runtime.
+   *
+   * The top-level values remain the fallback for development and unknown
+   * presets. Runtime overrides let a renderer describe packages whose exports
+   * change with bundler conditions, such as React DOM's Node and edge builds.
+   */
+  runtimes?: Partial<Record<FarmRendererRuntime, FarmRendererStreamingPrimitives>>;
+}
+
 export interface FarmRendererCapabilities {
   streaming: FarmRendererStreamingCapabilities;
+  /**
+   * Whether re-rendering an existing root diffs the new tree against the live
+   * DOM instead of rebuilding it.
+   *
+   * Virtual-DOM renderers (React, Preact, Vue) compare the incoming tree with
+   * what is mounted, so a client navigation that re-renders a shared layout
+   * keeps the matching DOM nodes, their focus, and their component state.
+   *
+   * Compile-time fine-grained renderers (Solid, Svelte) have no virtual DOM to
+   * diff against. Their updates flow through bindings created when elements
+   * were constructed, so handing them a freshly materialized tree replaces the
+   * nodes. That is a property of those runtimes, not a gap in their adapters,
+   * and callers that need state to survive a re-render must keep it in a root
+   * they do not re-render rather than expect reconciliation here.
+   */
+  reconcilesRerenders: boolean;
+  /**
+   * Whether this renderer can render a plain function component: one that
+   * takes props and returns an element tree, rather than a component built by
+   * the renderer's own compiler.
+   *
+   * React-shaped renderers do this natively. A compile-time renderer needs its
+   * adapter to recognize such a component and call it, because its own
+   * components are functions too and the two are otherwise indistinguishable.
+   * Farm uses this to decide whether integration provider components can be
+   * rendered at all, so it defaults to false and each adapter opts in once it
+   * handles them.
+   */
+  functionComponents: boolean;
 }
 
 export interface FarmRendererCapabilitiesInput {
-  streaming?: Partial<FarmRendererStreamingCapabilities>;
+  streaming?: Partial<FarmRendererStreamingPrimitives> & {
+    runtimes?: Partial<Record<FarmRendererRuntime, Partial<FarmRendererStreamingPrimitives>>>;
+  };
+  reconcilesRerenders?: boolean;
+  functionComponents?: boolean;
+}
+
+/** A client layout participating in a renderer-owned route update. */
+export interface FarmRendererRouteLayout {
+  /** Stable route pattern used to decide whether the mounted layout chain changed. */
+  pattern: string;
+  /** Renderer-native layout component. */
+  Component: unknown;
+}
+
+/**
+ * Renderer-neutral route state supplied during hydration and client navigation.
+ *
+ * Virtual-DOM renderers can ignore this and keep rendering `element`. A
+ * fine-grained renderer can implement `renderRoute()` and keep the matching
+ * layout chain mounted while it updates the page slot and route params through
+ * its native reactive primitives.
+ */
+export interface FarmRendererRouteState {
+  /** Fully composed fallback tree for renderers that only implement render(). */
+  element: unknown;
+  /** Applicable layouts in outermost-to-innermost order. */
+  layouts: readonly FarmRendererRouteLayout[];
+  /** Page boundary or page element placed in the innermost layout slot. */
+  page: unknown;
+  /** Current dynamic route params. */
+  params: Readonly<Record<string, string>>;
+  /** Framework wrappers, such as integration providers, applied outside layouts. */
+  wrap?: (element: unknown) => unknown;
+}
+
+/** Browser root contract implemented by renderer client adapters. */
+export interface FarmRendererClientRoot {
+  render(element: unknown): void;
+  /** Optional renderer-native route update that preserves matching layouts. */
+  renderRoute?(state: FarmRendererRouteState): void;
+  unmount(): void;
+}
+
+/** Browser entry exported by a renderer client module. */
+export interface FarmRendererClientRuntime {
+  createRoot(container: Element): FarmRendererClientRoot;
+  /**
+   * Non-React renderers receive route state as the optional third argument so
+   * a renderer-owned root can establish its native reactive route bindings
+   * during initial hydration.
+   */
+  hydrateRoot(
+    container: Element,
+    element: unknown,
+    routeState?: FarmRendererRouteState,
+  ): FarmRendererClientRoot;
 }
 
 const DEFAULT_RENDERER_CAPABILITIES: Readonly<FarmRendererCapabilities> = Object.freeze({
   streaming: Object.freeze({ node: false, web: false }),
+  // Conservative default: assume a re-render rebuilds until a renderer states
+  // otherwise, so callers do not silently rely on reconciliation.
+  reconcilesRerenders: false,
+  functionComponents: false,
 });
 
 export function getFarmRendererCapabilities(
   renderer?: Pick<FarmRenderer, "capabilities">,
 ): FarmRendererCapabilities {
+  const defaultStreaming = {
+    node: renderer?.capabilities?.streaming?.node ?? DEFAULT_RENDERER_CAPABILITIES.streaming.node,
+    web: renderer?.capabilities?.streaming?.web ?? DEFAULT_RENDERER_CAPABILITIES.streaming.web,
+  };
+  const runtimes = Object.fromEntries(
+    (["node", "edge"] as const).flatMap((runtime) => {
+      const override = renderer?.capabilities?.streaming?.runtimes?.[runtime];
+      if (!override) return [];
+      return [
+        [
+          runtime,
+          {
+            node: override.node ?? defaultStreaming.node,
+            web: override.web ?? defaultStreaming.web,
+          },
+        ],
+      ];
+    }),
+  ) as Partial<Record<FarmRendererRuntime, FarmRendererStreamingPrimitives>>;
+
   return {
     streaming: {
-      node: renderer?.capabilities?.streaming?.node ?? DEFAULT_RENDERER_CAPABILITIES.streaming.node,
-      web: renderer?.capabilities?.streaming?.web ?? DEFAULT_RENDERER_CAPABILITIES.streaming.web,
+      ...defaultStreaming,
+      ...(Object.keys(runtimes).length > 0 ? { runtimes } : {}),
     },
+    reconcilesRerenders:
+      renderer?.capabilities?.reconcilesRerenders ??
+      DEFAULT_RENDERER_CAPABILITIES.reconcilesRerenders,
+    functionComponents:
+      renderer?.capabilities?.functionComponents ??
+      DEFAULT_RENDERER_CAPABILITIES.functionComponents,
   };
+}
+
+export function getFarmRendererStreamingCapabilitiesForRuntime(
+  renderer: Pick<FarmRenderer, "capabilities"> | undefined,
+  runtime: FarmRendererRuntime | "unknown",
+): FarmRendererStreamingPrimitives {
+  const streaming = getFarmRendererCapabilities(renderer).streaming;
+  if (runtime === "unknown") return { node: streaming.node, web: streaming.web };
+  return streaming.runtimes?.[runtime] ?? { node: streaming.node, web: streaming.web };
+}
+
+export function assertFarmRendererStreamingRuntime(
+  name: string,
+  renderer: Pick<FarmRenderer, "capabilities"> | undefined,
+  runtimeModule: Pick<
+    Partial<FarmServerRendererRuntime>,
+    "capabilities" | "renderToPipeableStream" | "renderToReadableStream"
+  >,
+  runtime: FarmRendererRuntime | "unknown",
+): FarmRendererStreamingPrimitives {
+  const declared = getFarmRendererStreamingCapabilitiesForRuntime(renderer, runtime);
+  const runtimeDeclaration = runtimeModule.capabilities?.streaming;
+
+  if (runtimeDeclaration) {
+    const advertised = getFarmRendererStreamingCapabilitiesForRuntime(
+      { capabilities: { streaming: runtimeDeclaration } },
+      runtime,
+    );
+    if ((declared.node && !advertised.node) || (declared.web && !advertised.web)) {
+      throw new Error(
+        `Renderer \`${name}\` server module advertises ${JSON.stringify(advertised)} streaming for the ${runtime} runtime, which does not satisfy its descriptor ${JSON.stringify(declared)}.`,
+      );
+    }
+  }
+
+  if (declared.node && typeof runtimeModule.renderToPipeableStream !== "function") {
+    throw new Error(
+      `Renderer \`${name}\` advertises Node streaming for the ${runtime} runtime but its server module does not export renderToPipeableStream().`,
+    );
+  }
+  if (declared.web && typeof runtimeModule.renderToReadableStream !== "function") {
+    throw new Error(
+      `Renderer \`${name}\` advertises Web streaming for the ${runtime} runtime but its server module does not export renderToReadableStream().`,
+    );
+  }
+
+  return declared;
 }
 
 export const FARM_COMPONENT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"] as const;
@@ -99,6 +282,8 @@ export function getFarmRendererComponentExtensions(
 export interface FarmRendererViteModule {
   createFarmRendererPlugin(options?: {
     ssr?: boolean;
+    /** Shared only within a production build; aborted after all graphs close. */
+    buildLifetime?: AbortSignal;
     rendererOptions?: Readonly<Record<string, unknown>>;
   }): unknown | readonly unknown[] | Promise<unknown | readonly unknown[]>;
 }
@@ -111,6 +296,29 @@ export interface FarmServerRendererRuntime {
   isValidElement(value: unknown): boolean;
   /** Wraps a route-owned client tree so compiled leaf boundaries stay inside that React root. */
   wrapClientGraph?(element: unknown): unknown;
+  /** Lets a server-only page under a route-owned client tree render its own isolated islands. */
+  isolateServerPageGraph?(element: unknown): unknown;
+  /**
+   * Optional: tag a plain function component so a renderer that compiles its
+   * own components can tell the two apart. Renderers without the hook treat
+   * every component the same way and do not need it.
+   */
+  markFunctionComponent?<T>(component: T): T;
+  /**
+   * Optional: locate where a streamed chunk stops being the static shell.
+   *
+   * Partial prerendering caches everything before the first dynamic boundary
+   * and refreshes the rest on the client, so it has to know where that
+   * boundary is. The markers are renderer-specific (React streams Fizz
+   * boundary ids and `$RC`/`$RS` reveal calls, Solid streams `<template
+   * id="pl-N">` with `$df(N)`), so the renderer that emits them owns finding
+   * them. Returns the index to cut at, or -1 when the chunk is entirely
+   * static.
+   *
+   * A renderer that does not implement this gets no static shell at all:
+   * guessing would mean caching a per-request response as if it were shared.
+   */
+  findStaticShellBoundary?(chunk: string): number;
   renderToString(element: unknown): string | Promise<string>;
   /**
    * Optional variant for renderers whose components emit document-head markup
@@ -122,7 +330,7 @@ export interface FarmServerRendererRuntime {
     element: unknown,
   ): { html: string; head: string } | Promise<{ html: string; head: string }>;
   /** Optional runtime copy of the descriptor capabilities for diagnostics. */
-  readonly capabilities?: FarmRendererCapabilities;
+  readonly capabilities?: FarmRendererCapabilitiesInput;
   /** Optional bootstrap required before this renderer hydrates server markup. */
   generateHydrationScript?: () => string;
   /** Optional component used to render route-level failures. */
@@ -134,8 +342,14 @@ export interface FarmServerRendererRuntime {
       onShellReady(): void;
       onShellError(error: unknown): void;
       onError(error: unknown): void;
+      /** CSP nonce forwarded to renderer-owned inline streaming scripts. */
+      nonce?: string;
     },
-  ) => { pipe(destination: NodeJS.WritableStream): void };
+  ) => {
+    pipe(destination: NodeJS.WritableStream): void;
+    /** Stop rendering; pending boundaries report `reason` to `onError`. */
+    abort?(reason?: unknown): void;
+  };
   /** WHATWG streaming primitive used by Web-stream-capable renderers. */
   renderToReadableStream?: (
     element: unknown,
@@ -157,7 +371,13 @@ export const REACT_RENDERER: Readonly<FarmRenderer> = Object.freeze({
     "react/jsx-dev-runtime",
   ],
   capabilities: {
-    streaming: { node: true, web: false },
+    streaming: {
+      node: true,
+      web: false,
+      runtimes: { edge: { node: false, web: true } },
+    },
+    reconcilesRerenders: true,
+    functionComponents: true,
   },
 });
 
@@ -175,6 +395,13 @@ export function resolveFarmRenderer(renderer?: FarmRenderer): FarmRenderer {
     if (typeof resolved[field] !== "string" || resolved[field].trim().length === 0) {
       throw new TypeError(`Farm renderer \`${field}\` must be a non-empty string.`);
     }
+  }
+
+  if (
+    resolved.appSetup !== undefined &&
+    (typeof resolved.appSetup !== "string" || resolved.appSetup.trim().length === 0)
+  ) {
+    throw new TypeError("Farm renderer `appSetup` must be a non-empty module path.");
   }
 
   return {
@@ -208,21 +435,55 @@ export function isReactRenderer(renderer: Pick<FarmRenderer, "name"> | undefined
   return !renderer || renderer.name === "react";
 }
 
+/** Absolute path of the renderer's app setup module, or null when the app has none. */
+export function resolveFarmRendererAppSetup(
+  root: string,
+  renderer: Pick<FarmRenderer, "name" | "appSetup">,
+): string | null {
+  if (!renderer.appSetup) return null;
+  const filePath = path.resolve(root, renderer.appSetup);
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Renderer \`${renderer.name}\` app setup module was not found: ${filePath}`);
+  }
+  return filePath;
+}
+
 /** Resolve an optional renderer module from the application's dependency graph. */
 export function resolveFarmRendererModule(root: string, specifier: string): string {
   const requireFromApp = createRequire(path.join(path.resolve(root), "package.json"));
   return requireFromApp.resolve(specifier);
 }
 
+/**
+ * Compile React JSX with the automatic runtime even when the app has no tsconfig.json.
+ * esbuild only picks the runtime up from `compilerOptions.jsx`, so a hand-written app
+ * without one fell back to `React.createElement` and failed with "React is not defined".
+ * JSX settings in the app's own Vite config still win; a tsconfig's `jsxImportSource`
+ * still applies. Rolldown-based Vite compiles with oxc, which already defaults to the
+ * automatic runtime, so this leaves it alone.
+ */
+function createFarmReactJsxPlugin() {
+  return {
+    name: "farm:react-jsx",
+    config(
+      this: { meta?: { rolldownVersion?: string } } | void,
+      config: { esbuild?: false | { jsx?: unknown } },
+    ) {
+      if (this && this.meta?.rolldownVersion) return;
+      if (config.esbuild === false || config.esbuild?.jsx !== undefined) return;
+      return { esbuild: { jsx: "automatic" as const } };
+    },
+  };
+}
+
 export async function loadFarmRendererVitePlugins(
   renderer: FarmRenderer,
   root: string,
-  options: { ssr?: boolean } = {},
+  options: { ssr?: boolean; buildLifetime?: AbortSignal } = {},
 ): Promise<unknown[]> {
-  // React uses Vite's default automatic JSX transform today. Keep the legacy
-  // path dependency-free and avoid resolving Farm's own built package while
-  // running directly from source in the monorepo.
-  if (renderer.vite === REACT_RENDERER.vite) return [];
+  // React needs no renderer package. Keep this path dependency-free and avoid
+  // resolving Farm's own built package while running from source in the monorepo.
+  if (renderer.vite === REACT_RENDERER.vite) return [createFarmReactJsxPlugin()];
 
   const modulePath = resolveFarmRendererModule(root, renderer.vite);
   const rendererModule = (await import(pathToFileURL(modulePath).href)) as FarmRendererViteModule;

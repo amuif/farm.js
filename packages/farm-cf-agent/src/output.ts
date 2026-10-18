@@ -74,6 +74,7 @@ export async function writeCloudflareAgentOutput(
 
   const generatedConfig = createGeneratedWranglerConfig({
     config,
+    configPath,
     configDirectory,
     wrapperPath,
     publicDirectory,
@@ -120,9 +121,41 @@ function callFetch(worker, request, env, context, label) {
   return handler.call(worker, request, env, context);
 }
 
+// Nitro's module Worker always defines scheduled, email, queue, tail and trace, so a
+// plain spread would drop the agent's handlers. Run both, agent first, and rethrow the
+// first failure after both have run.
+function composeHandler(agentHandler, farmHandler) {
+  return async function composedHandler(...args) {
+    let failure;
+    for (const [owner, handler] of [
+      [agentWorker, agentHandler],
+      [farmWorker, farmHandler],
+    ]) {
+      try {
+        await handler.apply(owner, args);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
+  };
+}
+
+const handlers = {};
+for (const name of Object.keys(agentWorker ?? {})) {
+  if (
+    name !== "fetch" &&
+    typeof agentWorker[name] === "function" &&
+    typeof farmWorker?.[name] === "function"
+  ) {
+    handlers[name] = composeHandler(agentWorker[name], farmWorker[name]);
+  }
+}
+
 const worker = {
   ...agentWorker,
   ...farmWorker,
+  ...handlers,
   fetch(request, env, context) {
     const pathname = new URL(request.url).pathname;
     if (pathname === agentRoutePrefix || pathname.startsWith(agentRoutePrefix + "/")) {
@@ -138,6 +171,7 @@ export default worker;
 
 function createGeneratedWranglerConfig(input: {
   config: JsonObject;
+  configPath: string;
   configDirectory: string;
   wrapperPath: string;
   publicDirectory: string;
@@ -161,6 +195,12 @@ function createGeneratedWranglerConfig(input: {
       environments[input.environment],
       `Wrangler env.${input.environment}`,
     );
+    assertEnvironmentDeclaresAgentBindings({
+      environment: input.environment,
+      configPath: input.configPath,
+      config,
+      selected,
+    });
     generated.env = {
       ...environments,
       [input.environment]: {
@@ -214,6 +254,47 @@ function withNodeCompatibility(value: unknown): string[] {
     throw new Error("Wrangler compatibility_flags must be an array of strings.");
   }
   return value.includes("nodejs_compat") ? [...value] : [...value, "nodejs_compat"];
+}
+
+// `durable_objects` is one of Wrangler's non-inheritable keys: an environment
+// that declares none deploys with none, whatever the top level says, and
+// Wrangler only warns. An Agents Worker without its Durable Object binding
+// answers every agent request with an error, so refuse here rather than
+// shipping a Worker that cannot serve agents.
+function assertEnvironmentDeclaresAgentBindings(input: {
+  environment: string;
+  configPath: string;
+  config: JsonObject;
+  selected: JsonObject;
+}): void {
+  const { environment } = input;
+  const selected = readDurableObjects(
+    input.selected.durable_objects,
+    `Wrangler env.${environment}.durable_objects`,
+  );
+  if (selected.length) return;
+
+  const topLevel = readDurableObjects(input.config.durable_objects, "Wrangler durable_objects");
+  if (!topLevel.length) return;
+
+  const snippet = JSON.stringify({ bindings: topLevel });
+  throw new Error(
+    `Wrangler env.${environment} declares no Durable Object bindings, and Wrangler does not ` +
+      `inherit \`durable_objects\` into an environment, so deploying --env ${environment} would ` +
+      "ship an Agents Worker with no Durable Object bindings and every agent request would " +
+      `fail. Declare the bindings the environment should use in ${basename(input.configPath)}, ` +
+      `for example env.${environment}.durable_objects: ${snippet}`,
+  );
+}
+
+function readDurableObjects(value: unknown, label: string): JsonObject[] {
+  if (value === undefined) return [];
+  const bindings = readObject(value, label).bindings;
+  if (bindings === undefined) return [];
+  if (!Array.isArray(bindings)) {
+    throw new Error(`${label}.bindings must be an array.`);
+  }
+  return bindings.map((binding, index) => readObject(binding, `${label}.bindings[${index}]`));
 }
 
 function readObject(value: unknown, label: string): JsonObject {

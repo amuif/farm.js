@@ -10,9 +10,8 @@ import {
   resolveFarmRouteRuntimeConfig,
   resolveRouteRenderingConfig,
   scanProgrammaticPagePaths,
-  type FarmRouteRule,
-  type FarmRouteRuntimeConfig,
-} from "@farm.js/core";
+} from "@farm.js/core/internal/cli-runtime";
+import type { FarmRouteRule, FarmRouteRuntimeConfig } from "@farm.js/core";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import pc from "picocolors";
@@ -95,7 +94,7 @@ export async function explainFarmRoute(
 ): Promise<FarmRouteExplanation> {
   const root = path.resolve(options.root || process.cwd());
   const userConfig = await loadConfig(root, options.configPath, "production");
-  const config = await resolveConfig({ root, ...userConfig }, "production");
+  const config = await resolveConfig({ ...userConfig, root }, "production");
   const normalizedPathname = normalizePathname(pathname, config.basePath || "/");
   const candidates = discoverMatchingPages(config, normalizedPathname);
   const page = candidates.sort(
@@ -134,7 +133,7 @@ export async function explainFarmRoute(
   const matchingRules = Object.entries(config.routeRules)
     .filter(([pattern]) => farmRouteRuleMatches(pattern, normalizedPathname))
     .sort(([left], [right]) => routeSpecificity(left) - routeSpecificity(right));
-  const rendering = resolveRendering(pageSource, matchingRules);
+  const rendering = resolveRendering(pageSource, matchingRules, config.experimental?.ppr === true);
   const cache = resolveCaching(pageSource, matchingRules);
   const metadataSources = [...layoutSources, { filePath: page.filePath, source: pageSource }];
   const openGraphImage = findNearestSocialImage(config, normalizedPathname, "opengraph-image");
@@ -478,25 +477,28 @@ function readRuntimeExports(source: string): FarmRouteRuntimeConfig {
 function resolveRendering(
   pageSource: string,
   matchingRules: Array<[string, FarmRouteRule]>,
+  experimentalPPR: boolean,
 ): FarmRouteExplanation["rendering"] {
-  const pageRendering = resolveRouteRenderingConfig(
-    {
-      ...(readBooleanExport(pageSource, "ssg") !== undefined
-        ? { ssg: readBooleanExport(pageSource, "ssg") }
-        : {}),
-      ...(readBooleanExport(pageSource, "ppr") !== undefined
-        ? { ppr: readBooleanExport(pageSource, "ppr") }
-        : {}),
-      ...(readBooleanExport(pageSource, "experimental_ppr") !== undefined
-        ? { experimental_ppr: readBooleanExport(pageSource, "experimental_ppr") }
-        : {}),
-      ...(readNumberOrFalseExport(pageSource, "revalidate") !== undefined
-        ? { revalidate: readNumberOrFalseExport(pageSource, "revalidate") }
-        : {}),
-      ...(readDynamicExport(pageSource) ? { dynamic: readDynamicExport(pageSource) } : {}),
-    },
-    pageSource,
-  );
+  const pageModule = {
+    ...(readBooleanExport(pageSource, "ssg") !== undefined
+      ? { ssg: readBooleanExport(pageSource, "ssg") }
+      : {}),
+    ...(readBooleanExport(pageSource, "ppr") !== undefined
+      ? { ppr: readBooleanExport(pageSource, "ppr") }
+      : {}),
+    ...(readBooleanExport(pageSource, "experimental_ppr") !== undefined
+      ? { experimental_ppr: readBooleanExport(pageSource, "experimental_ppr") }
+      : {}),
+    ...(readNumberOrFalseExport(pageSource, "revalidate") !== undefined
+      ? { revalidate: readNumberOrFalseExport(pageSource, "revalidate") }
+      : {}),
+    ...(readDynamicExport(pageSource) ? { dynamic: readDynamicExport(pageSource) } : {}),
+  };
+  const pageRendering = resolveRouteRenderingConfig(pageModule, pageSource, { experimentalPPR });
+  const requestsDisabledPPR =
+    !experimentalPPR &&
+    !pageRendering.ppr &&
+    resolveRouteRenderingConfig(pageModule, pageSource, { experimentalPPR: true }).ppr;
   let mode: FarmRouteExplanation["rendering"]["mode"] = pageRendering.ssg
     ? "static"
     : pageRendering.ppr
@@ -508,7 +510,9 @@ function resolveRendering(
       ? "page static rendering declaration"
       : pageRendering.ppr
         ? "page PPR declaration"
-        : "default server rendering";
+        : requestsDisabledPPR
+          ? "page PPR declaration ignored (experimental.ppr disabled)"
+          : "default server rendering";
   let ppr = pageRendering.ppr;
 
   for (const [pattern, rule] of matchingRules) {

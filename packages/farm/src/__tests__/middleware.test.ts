@@ -11,7 +11,6 @@ import {
 import { createContext } from "../middleware/context";
 import { MiddlewareManager } from "../middleware/manager";
 import {
-  _setCurrentMiddlewareData,
   _clearCurrentMiddlewareData,
   getMiddlewareData,
   getMiddlewareContext,
@@ -70,6 +69,11 @@ function createTestRateLimitStorage(
 // Helper to create mock request/response
 function createMockRequest(url: string, method = "GET"): IncomingMessage {
   const socket = new Socket();
+  // A connected Node socket always reports a peer address, and the default
+  // rate-limit bucket is derived from it. An unconnected mock socket has none,
+  // which is the one case the limiter now refuses rather than bucketing every
+  // caller together.
+  Object.defineProperty(socket, "remoteAddress", { value: "203.0.113.5" });
   const req = new IncomingMessage(socket);
   req.url = url;
   req.method = method;
@@ -1035,7 +1039,7 @@ describe("Middleware Context", () => {
 
   it("should handle cookies", () => {
     const req = createMockRequest("/test");
-    req.headers.cookie = "session=abc123; user=john; preview=";
+    req.headers.cookie = "session=abc123; user=john; session=broader; preview=";
     const res = createMockResponse();
     const ctx = createContext(req, res);
 
@@ -1606,16 +1610,34 @@ describe("Parent Data Access (Cascading)", () => {
 });
 
 describe("URL Rewriting", () => {
+  it("preserves the trusted request origin when rewriting a relative URL", () => {
+    const req = createMockRequest("/old-path");
+    req.headers.host = "internal:3000";
+    req.headers["x-forwarded-host"] = "app.example.com";
+    req.headers["x-forwarded-proto"] = "https";
+    const ctx = createContext(req, createMockResponse(), undefined, undefined, {
+      trustProxy: true,
+    });
+
+    expect(ctx.url.href).toBe("https://app.example.com/old-path");
+
+    ctx.rewrite("/new-path?from=middleware");
+
+    expect(ctx.url.href).toBe("https://app.example.com/new-path?from=middleware");
+  });
+
   it("should update pathname when rewriting", () => {
     const req = createMockRequest("/old-path?foo=bar");
     const res = createMockResponse();
     const ctx = createContext(req, res);
 
     expect(ctx.pathname).toBe("/old-path");
+    expect(ctx.route).toBe("/old-path");
 
     ctx.rewrite("/new-path");
 
     expect(ctx.pathname).toBe("/new-path");
+    expect(ctx.route).toBe("/new-path");
     expect(ctx._rewriteUrl).toBe("/new-path");
     expect(req.url).toBe("/new-path");
   });
@@ -1700,7 +1722,7 @@ describe("Named request middleware", () => {
     expect(ctx.locals.get("payload")).toEqual({ message: "hello" });
   });
 
-  it("uses the same named-export runtime through the standalone Vite plugin", async () => {
+  it("uses the same named-export runtime beneath basePath through the standalone Vite plugin", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-named-middleware-"));
     const middlewareFile = path.join(root, "src", "app", "dashboard", "middleware.ts");
     await fs.mkdir(path.dirname(middlewareFile), { recursive: true });
@@ -1710,27 +1732,33 @@ describe("Named request middleware", () => {
       const server = {
         config: { root },
         hot: undefined,
-        ssrLoadModule: vi.fn().mockResolvedValue({
-          config: { matcher: "/dashboard/:path*" },
-          middleware(request: Request, context: RequestMiddlewareContext<DashboardContext>) {
-            context.set("requestPath", new URL(request.url).pathname);
-            context.set("session", { userId: "vite-user" });
+        environments: {
+          ssr: {
+            runner: {
+              import: vi.fn().mockResolvedValue({
+                config: { matcher: "/dashboard/:path*" },
+                middleware(request: Request, context: RequestMiddlewareContext<DashboardContext>) {
+                  context.set("requestPath", new URL(request.url).pathname);
+                  context.set("session", { userId: "vite-user" });
+                },
+              }),
+            },
           },
-        }),
+        },
         moduleGraph: { invalidateModule: vi.fn() },
         ws: { send: vi.fn() },
       };
-      const plugin = farmMiddlewarePlugin();
+      const plugin = farmMiddlewarePlugin({ basePath: "/console" });
       (plugin.configureServer as (server: any) => void)(server);
       await (server as any).__farmMiddleware__.waitForDiscovery();
 
-      const req = createMockRequest("/dashboard/settings");
+      const req = createMockRequest("/console/dashboard/settings");
       const handled = await (server as any).__farmMiddleware__.execute(req, createMockResponse());
 
       expect(handled).toBe(false);
       expect((req as any).__FARM_MIDDLEWARE_CONTEXT__).toEqual(
         new Map([
-          ["requestPath", "/dashboard/settings"],
+          ["requestPath", "/console/dashboard/settings"],
           ["session", { userId: "vite-user" }],
         ]),
       );
@@ -1747,10 +1775,16 @@ describe("Named request middleware", () => {
     await fs.writeFile(middlewareFile, "export {};\n");
     const handler = vi.fn();
     const viteServer = {
-      ssrLoadModule: vi
-        .fn()
-        .mockResolvedValueOnce({ default: handler })
-        .mockRejectedValueOnce(new SyntaxError("Unexpected token")),
+      environments: {
+        ssr: {
+          runner: {
+            import: vi
+              .fn()
+              .mockResolvedValueOnce({ default: handler })
+              .mockRejectedValueOnce(new SyntaxError("Unexpected token")),
+          },
+        },
+      },
     };
 
     try {
@@ -1773,7 +1807,9 @@ describe("Named request middleware", () => {
     await fs.mkdir(appDir, { recursive: true });
     await fs.writeFile(middlewareFile, "export {};\n");
     const viteServer = {
-      ssrLoadModule: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token")),
+      environments: {
+        ssr: { runner: { import: vi.fn().mockRejectedValue(new SyntaxError("Unexpected token")) } },
+      },
     };
 
     try {
@@ -1794,7 +1830,7 @@ describe("Named request middleware", () => {
     const loadError = new SyntaxError("Unexpected token");
     const server = {
       config: { root },
-      ssrLoadModule: vi.fn().mockRejectedValue(loadError),
+      environments: { ssr: { runner: { import: vi.fn().mockRejectedValue(loadError) } } },
       moduleGraph: { invalidateModule: vi.fn() },
       ws: { send: vi.fn() },
     };
@@ -1864,46 +1900,11 @@ describe("Named request middleware", () => {
 });
 
 describe("Middleware Data Access (getMiddlewareData)", () => {
-  it("should retrieve middleware data without props", () => {
-    // Set data
-    _setCurrentMiddlewareData({
-      user: { id: 1, name: "John" },
-      stats: { views: 100 },
-    });
-
-    // Test getMiddlewareData()
-    const data = getMiddlewareData();
-    expect(data.get("user")).toEqual({ id: 1, name: "John" });
-    expect(data.get("stats")).toEqual({ views: 100 });
-
-    // Test getMiddlewareValue()
-    const user = getMiddlewareValue("user");
-    expect(user).toEqual({ id: 1, name: "John" });
-
-    // Clean up
-    _clearCurrentMiddlewareData();
-  });
-
   it("should return empty map when no data is set", () => {
     _clearCurrentMiddlewareData();
 
     const data = getMiddlewareData();
     expect(data.size).toBe(0);
-  });
-
-  it("should handle data isolation between requests", () => {
-    // Request 1
-    _setCurrentMiddlewareData({ req1: "data1" });
-    const data1 = getMiddlewareData();
-    expect(data1.get("req1")).toBe("data1");
-    _clearCurrentMiddlewareData();
-
-    // Request 2 (should not have req1 data)
-    _setCurrentMiddlewareData({ req2: "data2" });
-    const data2 = getMiddlewareData();
-    expect(data2.get("req2")).toBe("data2");
-    expect(data2.get("req1")).toBeUndefined();
-    _clearCurrentMiddlewareData();
   });
 
   it("should isolate middleware data across concurrent async contexts", async () => {

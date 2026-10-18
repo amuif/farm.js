@@ -34,6 +34,7 @@ describe("scheduleFarmIslandHydration", () => {
           notifyVisibility = callback;
         }
         observe() {}
+        unobserve() {}
         disconnect() {
           disconnect();
         }
@@ -49,12 +50,69 @@ describe("scheduleFarmIslandHydration", () => {
 
     expect(hydrate).not.toHaveBeenCalled();
     notifyVisibility?.(
-      [{ isIntersecting: true } as IntersectionObserverEntry],
+      [{ isIntersecting: true, target: container.firstElementChild } as IntersectionObserverEntry],
       {} as IntersectionObserver,
     );
 
     await expect(scheduled).resolves.toBe("visible");
     expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("observes the children of a boxless boundary container", async () => {
+    // Isolated boundary markers render with display:contents, so the marker
+    // itself never produces a client rect and can never intersect (#565 e2e).
+    const observed: Element[] = [];
+    let notifyVisibility: IntersectionObserverCallback | undefined;
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          notifyVisibility = callback;
+        }
+        observe(target: Element) {
+          observed.push(target);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    document.body.innerHTML =
+      '<farm-client-boundary id="boundary" style="display:contents"><button type="button">Reveal</button></farm-client-boundary>';
+    const container = document.getElementById("boundary")!;
+    const hydrate = vi.fn(() => "visible");
+    const scheduled = scheduleFarmIslandHydration({
+      container,
+      strategy: "visible",
+      hydrate,
+    });
+
+    expect(observed).toEqual([container.querySelector("button")]);
+    expect(hydrate).not.toHaveBeenCalled();
+    notifyVisibility?.(
+      [{ isIntersecting: true, target: container.firstElementChild } as IntersectionObserverEntry],
+      {} as IntersectionObserver,
+    );
+    await expect(scheduled).resolves.toBe("visible");
+  });
+
+  it("hydrates a visible boundary with no observable children immediately", async () => {
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    document.body.innerHTML =
+      '<farm-client-boundary id="boundary" style="display:contents"></farm-client-boundary>';
+    const container = document.getElementById("boundary")!;
+    const hydrate = vi.fn(() => "visible");
+
+    await expect(
+      scheduleFarmIslandHydration({ container, strategy: "visible", hydrate }),
+    ).resolves.toBe("visible");
+    expect(hydrate).toHaveBeenCalledOnce();
   });
 
   it("hydrates interaction boundaries and replays their first button click", async () => {
@@ -260,6 +318,7 @@ describe("scheduleFarmIslandHydration", () => {
           notifyVisibility = callback;
         }
         observe() {}
+        unobserve() {}
         disconnect() {
           disconnect();
         }
@@ -313,7 +372,7 @@ describe("scheduleFarmIslandHydration", () => {
     for (const controller of controllers) controller.abort();
     await Promise.all(scheduled);
     notifyVisibility?.(
-      [{ isIntersecting: true } as IntersectionObserverEntry],
+      [{ isIntersecting: true, target: visible.firstElementChild } as IntersectionObserverEntry],
       {} as IntersectionObserver,
     );
     notifyIdle?.();

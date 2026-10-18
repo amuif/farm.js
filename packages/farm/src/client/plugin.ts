@@ -1,9 +1,6 @@
 "use client";
 
-import {
-  createFarmRuntimeErrorOverlay,
-  type FarmRuntimeErrorOverlay,
-} from "./runtime-error-overlay";
+import type { FarmRuntimeErrorOverlay } from "./runtime-error-overlay";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -214,7 +211,7 @@ export class FarmClientPluginManager {
   private started = false;
   private closed = false;
   private readonly reportedErrors = new WeakSet<object>();
-  private readonly runtimeErrorOverlay?: FarmRuntimeErrorOverlay;
+  private runtimeErrorOverlay?: FarmRuntimeErrorOverlay;
 
   private readonly handleWindowError = (event: ErrorEvent) => {
     const error = event.error ?? new Error(event.message || "Unknown browser error");
@@ -231,7 +228,12 @@ export class FarmClientPluginManager {
     );
   };
 
-  private readonly handlePageHide = () => {
+  private readonly handlePageHide = (event: PageTransitionEvent) => {
+    // A persisted pagehide means the page is entering the back/forward cache and
+    // may be restored. close() is terminal — start() refuses to run again once
+    // closed — so tearing down here would hand the restored page dead scripts,
+    // PWA, and observability plugins with nothing able to revive them.
+    if (event.persisted) return;
     void this.close("pagehide");
   };
 
@@ -246,11 +248,6 @@ export class FarmClientPluginManager {
       isProd: options.isProd ?? !options.isDev,
       window: options.window ?? (typeof window !== "undefined" ? window : undefined),
     };
-    if (this.options.isDev && this.options.window) {
-      this.runtimeErrorOverlay = createFarmRuntimeErrorOverlay({
-        window: this.options.window,
-      });
-    }
   }
 
   start(): Promise<void> {
@@ -425,6 +422,7 @@ export class FarmClientPluginManager {
     }
 
     if (!this.started && !this.starting) await this.start();
+    if (this.closed) return;
     await this.runErrorHooks({ error, phase, navigation, location }, undefined, sourceEvent);
   }
 
@@ -443,6 +441,24 @@ export class FarmClientPluginManager {
 
   private async startInternal(): Promise<void> {
     if (this.started || this.closed) return;
+
+    // Keep the entire diagnostics graph behind a build-time guard. A static
+    // import leaves the overlay and source-map helpers in published bundles,
+    // even when every production caller passes isDev: false.
+    if (process.env.NODE_ENV !== "production" && this.options.isDev && this.options.window) {
+      try {
+        const { createFarmRuntimeErrorOverlay } =
+          await import("@farm.js/core/internal/client-error-overlay");
+        this.runtimeErrorOverlay = createFarmRuntimeErrorOverlay({ window: this.options.window });
+      } catch (error) {
+        // Diagnostics must not prevent hydration or application error hooks
+        // from starting when their development chunk cannot be loaded.
+        this.logHookError("farm:runtime-error-overlay", "load", error);
+      }
+    }
+
+    // Errors reported while diagnostics load must await start(), whereas
+    // errors from a plugin's setup hook must not await their own start promise.
     this.starting = true;
 
     try {
@@ -488,9 +504,10 @@ export class FarmClientPluginManager {
       clientWindow.addEventListener("error", this.handleWindowError);
       clientWindow.addEventListener("unhandledrejection", this.handleUnhandledRejection);
     }
-    clientWindow.addEventListener("pagehide", this.handlePageHide, {
-      once: true,
-    });
+    // Not `once`: a persisted pagehide is ignored above, and the page can be
+    // restored and then genuinely unloaded later. close() is idempotent, so
+    // keeping the listener costs nothing and never disposes twice.
+    clientWindow.addEventListener("pagehide", this.handlePageHide);
   }
 
   private installPerformanceObservers(): void {

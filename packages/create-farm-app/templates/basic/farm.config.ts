@@ -1,6 +1,8 @@
 import { defineConfig } from "@farm.js/core";
+import { devtools } from "@farm.js/devtools";
 
 export default defineConfig({
+  plugins: [devtools()],
   theme: {
     default: "dark",
   },
@@ -9,8 +11,5 @@ export default defineConfig({
   // language-agnostic fallback/manifest); content lives in src/app/docs.
   docs: {
     enabled: true,
-  },
-  deploy: {
-    target: "vercel",
   },
 });

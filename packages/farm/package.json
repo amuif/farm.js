@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/core",
-  "version": "0.1.0-beta.95",
+  "version": "0.1.26",
   "description": "Core Farm.js framework for modern integrated apps",
   "keywords": [
     "@farm.js/core",
@@ -45,6 +45,9 @@
       "integrations": [
         "./dist/integrations.d.ts"
       ],
+      "schema": [
+        "./dist/schema.d.ts"
+      ],
       "cache": [
         "./dist/cache.d.ts"
       ],
@@ -80,6 +83,9 @@
       ],
       "app-markdown": [
         "./dist/app-markdown.d.ts"
+      ],
+      "internal/app-markdown-runtime": [
+        "./dist/internal/app-markdown-runtime.d.ts"
       ],
       "observability": [
         "./dist/observability.d.ts"
@@ -132,6 +138,9 @@
       "agent-runtime": [
         "./dist/agent-runtime.d.ts"
       ],
+      "json-ld": [
+        "./dist/json-ld.d.ts"
+      ],
       "css": [
         "./types/css.d.ts"
       ],
@@ -144,6 +153,9 @@
       ],
       "image/sharp": [
         "./dist/image/sharp.d.ts"
+      ],
+      "og": [
+        "./dist/og.d.ts"
       ],
       "i18n": [
         "./dist/i18n/index.d.ts"
@@ -160,11 +172,20 @@
       "internal/product-telemetry-runtime": [
         "./dist/internal/product-telemetry-runtime.d.ts"
       ],
+      "internal/infra-analytics-runtime": [
+        "./dist/internal/infra-analytics-runtime.d.ts"
+      ],
       "internal/metadata-image-runtime": [
         "./dist/internal/metadata-image-runtime.d.ts"
       ],
+      "internal/docs-precompiled-runtime": [
+        "./dist/internal/docs-precompiled-runtime.d.ts"
+      ],
       "internal/client-runtime": [
         "./dist/internal/client-runtime.d.ts"
+      ],
+      "internal/client-error-overlay": [
+        "./dist/internal/client-error-overlay.d.ts"
       ],
       "internal/isolated-boundary": [
         "./dist/internal/isolated-boundary.d.ts"
@@ -178,6 +199,12 @@
       "internal/production-node-env": [
         "./dist/internal/production-node-env.d.ts"
       ],
+      "internal/cli-runtime": [
+        "./dist/index.d.ts"
+      ],
+      "internal/request-cookies": [
+        "./dist/internal/request-cookies.d.ts"
+      ],
       "config": [
         "./dist/config.d.ts"
       ],
@@ -190,6 +217,9 @@
       "api": [
         "./types/api.d.ts",
         "./dist/api.d.ts"
+      ],
+      "api/client": [
+        "./dist/api/client.d.ts"
       ],
       "api/route-manager": [
         "./dist/api/route-manager.d.ts"
@@ -290,6 +320,11 @@
       "types": "./dist/integrations.d.ts",
       "import": "./dist/integrations.mjs",
       "require": "./dist/integrations.cjs"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.mjs",
+      "require": "./dist/schema.cjs"
     },
     "./cache": {
       "types": "./dist/cache.d.ts",
@@ -476,6 +511,11 @@
       "import": "./dist/api.mjs",
       "require": "./dist/api.cjs"
     },
+    "./api/client": {
+      "types": "./dist/api/client.d.ts",
+      "import": "./dist/api/client.mjs",
+      "require": "./dist/api/client.cjs"
+    },
     "./api/route-manager": {
       "types": "./dist/api/route-manager.d.ts",
       "import": "./dist/api/route-manager.mjs",
@@ -511,6 +551,11 @@
       "import": "./dist/agent-runtime.mjs",
       "require": "./dist/agent-runtime.cjs"
     },
+    "./json-ld": {
+      "types": "./dist/json-ld.d.ts",
+      "import": "./dist/json-ld.mjs",
+      "require": "./dist/json-ld.cjs"
+    },
     "./css": {
       "types": "./types/css.d.ts"
     },
@@ -528,6 +573,11 @@
       "types": "./dist/image/sharp.d.ts",
       "import": "./dist/image/sharp.mjs",
       "require": "./dist/image/sharp.cjs"
+    },
+    "./og": {
+      "types": "./dist/og.d.ts",
+      "import": "./dist/og.mjs",
+      "require": "./dist/og.cjs"
     },
     "./i18n": {
       "types": "./dist/i18n/index.d.ts",
@@ -554,15 +604,40 @@
       "import": "./dist/internal/product-telemetry-runtime.mjs",
       "require": "./dist/internal/product-telemetry-runtime.cjs"
     },
+    "./internal/infra-analytics-runtime": {
+      "types": "./dist/internal/infra-analytics-runtime.d.ts",
+      "import": "./dist/internal/infra-analytics-runtime.mjs",
+      "require": "./dist/internal/infra-analytics-runtime.cjs"
+    },
     "./internal/metadata-image-runtime": {
       "types": "./dist/internal/metadata-image-runtime.d.ts",
       "import": "./dist/internal/metadata-image-runtime.mjs",
       "require": "./dist/internal/metadata-image-runtime.cjs"
     },
+    "./internal/app-markdown-runtime": {
+      "types": "./dist/internal/app-markdown-runtime.d.ts",
+      "import": "./dist/internal/app-markdown-runtime.mjs",
+      "require": "./dist/internal/app-markdown-runtime.cjs"
+    },
+    "./internal/docs-precompiled-runtime": {
+      "types": "./dist/internal/docs-precompiled-runtime.d.ts",
+      "import": "./dist/internal/docs-precompiled-runtime.mjs",
+      "require": "./dist/internal/docs-precompiled-runtime.cjs"
+    },
+    "./internal/compression-runtime": {
+      "types": "./dist/internal/compression-runtime.d.ts",
+      "import": "./dist/internal/compression-runtime.mjs",
+      "require": "./dist/internal/compression-runtime.cjs"
+    },
     "./internal/client-runtime": {
       "types": "./dist/internal/client-runtime.d.ts",
       "import": "./dist/internal/client-runtime.mjs",
       "require": "./dist/internal/client-runtime.cjs"
+    },
+    "./internal/client-error-overlay": {
+      "types": "./dist/internal/client-error-overlay.d.ts",
+      "import": "./dist/internal/client-error-overlay.mjs",
+      "require": "./dist/internal/client-error-overlay.cjs"
     },
     "./internal/isolated-boundary": {
       "types": "./dist/internal/isolated-boundary.d.ts",
@@ -583,6 +658,16 @@
       "types": "./dist/internal/production-node-env.d.ts",
       "import": "./dist/internal/production-node-env.mjs",
       "require": "./dist/internal/production-node-env.cjs"
+    },
+    "./internal/cli-runtime": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/internal/cli-runtime.mjs",
+      "require": "./dist/internal/cli-runtime.cjs"
+    },
+    "./internal/request-cookies": {
+      "types": "./dist/internal/request-cookies.d.ts",
+      "import": "./dist/internal/request-cookies.mjs",
+      "require": "./dist/internal/request-cookies.cjs"
     }
   },
   "publishConfig": {
@@ -601,71 +686,79 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@farming-labs/docs": "^0.2.44",
-    "@farming-labs/orm": "0.0.62",
-    "@farming-labs/orm-runtime": "0.0.62",
+    "@farming-labs/orm": "0.0.65",
+    "@farming-labs/orm-runtime": "0.0.65",
     "@formatjs/icu-messageformat-parser": "3.5.15",
     "@jridgewell/trace-mapping": "0.3.31",
     "@mdx-js/mdx": "^3.1.1",
     "@opentelemetry/api": "1.9.1",
-    "@scalar/api-reference": "^1.38.1",
-    "@scalar/openapi-parser": "^0.22.3",
-    "@tailwindcss/vite": "4.1.18",
-    "@vercel/og": "0.11.1",
-    "@vitejs/plugin-react": "^4.2.1",
     "better-call": "^1.0.19",
     "db0": "^0.3.4",
     "es-module-lexer": "2.0.0",
-    "esbuild": "^0.28.0",
     "fast-glob": "^3.3.2",
-    "h3": "2.0.1-rc.5",
-    "image-size": "^2.0.2",
+    "h3": "2.0.1-rc.32",
+    "image-size": "^2.0.4",
     "intl-messageformat": "11.2.12",
     "marked": "^12.0.2",
-    "nitro": "3.0.1-alpha.0",
+    "nitro": "3.0.260903-beta",
     "pg": "^8.20.0",
     "picocolors": "^1.0.0",
     "remark-gfm": "^4.0.1",
-    "sirv": "^2.0.4",
+    "rolldown": "^1.2.7",
     "sugar-high": "^0.9.5",
     "supports-color": "^10.2.2",
-    "tailwindcss": "4.1.18",
-    "unstorage": "^2.0.0-alpha.3",
-    "vite": "^5.0.10",
+    "unstorage": "2.0.0-alpha.10",
+    "vite": "8.3.4",
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@clerk/react": "^6.1.0",
-    "@farm.js/otel": "workspace:*",
+    "@clerk/react": "^6.4.3",
     "@farm.js/renderer-tests": "workspace:*",
+    "@farming-labs/docs": "^0.2.118",
     "@opentelemetry/sdk-node": "0.221.0",
     "@opentelemetry/sdk-trace-base": "2.10.0",
+    "@tailwindcss/vite": "4.3.3",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",
-    "@vitest/coverage-v8": "^3.2.7",
+    "@vercel/og": "1.0.1",
+    "@vitest/coverage-v8": "5.0.5",
+    "esbuild": "^0.28.0",
     "jsdom": "^25.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "sharp": "^0.35.5",
+    "tailwindcss": "4.3.3",
     "tsup": "^8.3.5",
     "typescript": "^5.3.3",
-    "vitest": "^3.2.7"
+    "vitest": "5.0.5"
   },
   "peerDependencies": {
+    "@farming-labs/docs": "^0.2.118",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vercel/og": "^1.0.1",
     "react": "^18.2.0 || ^19.0.0",
-    "react-dom": "^18.2.0 || ^19.0.0"
+    "react-dom": "^18.2.0 || ^19.0.0",
+    "sharp": "^0.35.5"
   },
   "peerDependenciesMeta": {
+    "@farming-labs/docs": {
+      "optional": true
+    },
+    "@tailwindcss/vite": {
+      "optional": true
+    },
+    "@vercel/og": {
+      "optional": true
+    },
     "react": {
       "optional": true
     },
     "react-dom": {
       "optional": true
+    },
+    "sharp": {
+      "optional": true
     }
-  },
-  "optionalDependencies": {
-    "rolldown": "1.2.0",
-    "sharp": "^0.34.5",
-    "vite-rolldown": "npm:vite@8.1.5"
   },
   "engines": {
     "node": ">=22.13.0"

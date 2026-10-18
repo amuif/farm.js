@@ -1,3 +1,5 @@
+import type { FarmSchemaConfig } from "./schema";
+import { assertPluginDependencies } from "./plugin-dependencies";
 import type {
   FarmConfig as BaseFarmConfig,
   FarmMigrationCommand,
@@ -48,6 +50,7 @@ import {
   type FarmLayerEntry,
   type ResolvedFarmLayer,
 } from "./layers";
+import { bundleNodeModule } from "./build/node-module-bundle";
 import path from "path";
 import { logger } from "./utils";
 import { normalizeFarmDeploymentId } from "./deployment";
@@ -72,9 +75,16 @@ import {
   type FarmAuthUserConfig,
   type ResolvedFarmAuthConfig,
 } from "./auth-config";
+import {
+  resolveFarmMCPConfig,
+  resolveFarmMCPPlugin,
+  type FarmMCPUserConfig,
+  type ResolvedFarmMCPConfig,
+} from "./mcp-config";
 import { resolveFarmPerformanceConfig, type ResolvedFarmPerformanceConfig } from "./preload";
 import { validateConfigRouteSource } from "./plugins/route-pattern";
 import {
+  farmCspBlocksFrameworkInlineScripts,
   getFarmSecurityHeader,
   resolveFarmSecurityConfig,
   type FarmCspConfig,
@@ -87,7 +97,9 @@ import {
 } from "./security";
 import { isFarmRedirectStatus } from "./navigation-errors";
 import { resolveFarmThemeConfig } from "./theme/config";
+import { resolveFarmAgentConfig, type ResolvedFarmAgentConfig } from "./agent-config";
 import type { ResolvedFarmThemeConfig } from "./theme/types";
+import type { OpenAPISecurityMode } from "./openapi/types";
 import { isReactRenderer, resolveFarmRenderer } from "./renderer";
 import type { FarmRenderer } from "./renderer";
 import { applyFarmDocsFrameworkAutoDetection } from "./docs/framework-detect";
@@ -181,6 +193,19 @@ export type {
   ResolvedFarmAuthConfig,
 } from "./auth-config";
 export type {
+  FarmMCPAuthorization,
+  FarmMCPEndpoint,
+  FarmMCPToolDefinition,
+  FarmMCPStandaloneTool,
+  FarmMCPExecuteContext,
+  FarmMCPTool,
+  FarmMCPServer,
+  FarmMCPAuthorizeContext,
+  FarmMCPConfig,
+  FarmMCPUserConfig,
+  ResolvedFarmMCPConfig,
+} from "./mcp-config";
+export type {
   FarmCspConfig,
   FarmCspDirectives,
   FarmCspDirectiveValue,
@@ -193,7 +218,9 @@ export type {
   FarmRenderer,
   FarmRendererCapabilities,
   FarmRendererCapabilitiesInput,
+  FarmRendererRuntime,
   FarmRendererStreamingCapabilities,
+  FarmRendererStreamingPrimitives,
 } from "./renderer";
 export { defineRenderer } from "./renderer";
 export type {
@@ -232,9 +259,18 @@ export type I18nConfig = FarmI18nUserConfig;
 export interface OpenAPIConfig {
   enabled?: boolean;
   route?: string;
+  /**
+   * Path where the raw OpenAPI spec is served as JSON, so agents and API tools
+   * can fetch it at a predictable URL. Set to `false` to disable.
+   *
+   * @default "/openapi.json"
+   */
+  specRoute?: string | false;
   title?: string;
   description?: string;
   version?: string;
+  /** Default authentication requirement for operations without an endpoint override. */
+  security?: OpenAPISecurityMode;
   servers?: Array<{
     url: string;
     description?: string;
@@ -307,6 +343,8 @@ export interface FarmUserConfig extends Omit<BaseFarmConfig, "vite" | "docs" | "
    * `@farm.js/auth/client`.
    */
   auth?: FarmAuthUserConfig;
+  /** Compose opted-in API routes and standalone tools through an authenticated MCP transport. */
+  mcp?: FarmMCPUserConfig;
   /** Shared application data, route, ISR, and PPR cache. */
   cache?: FarmCacheUserConfig;
   migrations?: FarmMigrationsUserConfig;
@@ -357,6 +395,31 @@ export interface FarmUserConfig extends Omit<BaseFarmConfig, "vite" | "docs" | "
   [key: string]: any;
 }
 
+/** Validate the app's schema rules while the config loads. */
+function resolveSchemaConfig(config: FarmSchemaConfig | undefined): FarmSchemaConfig {
+  if (config === undefined) return {};
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new TypeError("`schema` in farm.config must be an object.");
+  }
+  for (const key of ["allowExtend", "allowForeignKeys"] as const) {
+    const entries = config[key];
+    if (entries === undefined) continue;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+      throw new TypeError(
+        `\`schema.${key}\` must map a plugin's migrate name to a list of model or table names.`,
+      );
+    }
+    for (const [owner, tables] of Object.entries(entries)) {
+      if (!Array.isArray(tables) || tables.some((table) => typeof table !== "string")) {
+        throw new TypeError(
+          `\`schema.${key}.${owner}\` must be a list of model or table names, such as ["user"].`,
+        );
+      }
+    }
+  }
+  return config;
+}
+
 export interface ResolvedFarmConfig extends Required<
   Omit<
     FarmUserConfig,
@@ -379,12 +442,15 @@ export interface ResolvedFarmConfig extends Required<
     | "images"
     | "i18n"
     | "auth"
+    | "mcp"
     | "performance"
     | "security"
     | "theme"
     | "renderer"
+    | "agent"
   >
 > {
+  agent: ResolvedFarmAgentConfig;
   /** @internal Tracks whether `context` came from user/layer config instead of the default noop. */
   [FARM_RESOLVED_CUSTOM_CONTEXT]?: boolean;
   root: string;
@@ -408,6 +474,7 @@ export interface ResolvedFarmConfig extends Required<
   images: ResolvedFarmImageConfig;
   i18n: ResolvedFarmI18nConfig;
   auth: ResolvedFarmAuthConfig;
+  mcp: ResolvedFarmMCPConfig;
   performance: ResolvedFarmPerformanceConfig;
   security: ResolvedFarmSecurityConfig;
   theme: ResolvedFarmThemeConfig;
@@ -469,6 +536,9 @@ export function getDeployTargetForPreset(preset?: string): FarmDeployTarget | un
   return undefined;
 }
 
+/** Netlify's build and CLI pick up functions from this directory without configuration. */
+export const NETLIFY_INTERNAL_FUNCTIONS_DIR = ".netlify/functions-internal";
+
 export function getDefaultDeployOutputDir(
   target: FarmDeployTarget | undefined,
   preset: string | undefined,
@@ -476,6 +546,11 @@ export function getDefaultDeployOutputDir(
 ): string {
   const normalizedTarget = normalizeDeployTarget(target) || getDeployTargetForPreset(preset);
   if (normalizedTarget === "vercel") return ".vercel/output";
+  // Netlify discovers the server function only in its internal functions directory,
+  // so a Git-connected site deploys it without a `netlify.toml` functions setting.
+  if (normalizedTarget === "netlify" && (!preset || preset === "netlify")) {
+    return NETLIFY_INTERNAL_FUNCTIONS_DIR;
+  }
   return `${distDir}/.output`;
 }
 
@@ -497,7 +572,8 @@ export function detectPlatformDeployTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): FarmDeployTarget | undefined {
   for (const [key, target] of PLATFORM_BUILD_ENV_TARGETS) {
-    if (env[key]) return target;
+    const value = env[key]?.trim().toLowerCase();
+    if (value === "1" || value === "true") return target;
   }
   return undefined;
 }
@@ -548,10 +624,19 @@ export function resolveDeployConfig(
       }
     }
   }
+  // A CLI --target override governs the preset too: keep a configured preset
+  // only when it targets the same platform, otherwise derive the preset from
+  // the override target. Mirrors how a --preset override recomputes the target
+  // above, so `farm build --target netlify` never ships Vercel-shaped output.
+  const configuredPreset = deploy.preset || config.preset;
+  const overrideTargetPreset =
+    overrideTarget && getDeployTargetForPreset(configuredPreset) !== overrideTarget
+      ? getPresetForDeployTarget(overrideTarget)
+      : undefined;
   const preset =
     overrides.preset ||
-    deploy.preset ||
-    config.preset ||
+    overrideTargetPreset ||
+    configuredPreset ||
     getPresetForDeployTarget(target) ||
     "node-server";
   const resolvedTarget = target || getDeployTargetForPreset(preset);
@@ -681,6 +766,12 @@ function cloneSerializable(value: unknown, seen = new WeakSet<object>()): any {
   return undefined;
 }
 
+function omitUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as Partial<T>;
+}
+
 function sanitizeDocsConfig(config: Partial<DocsConfig>): Partial<DocsConfig> {
   return cloneSerializable(config) || {};
 }
@@ -727,7 +818,6 @@ export async function loadDocsConfig(
       return { config: JSON.parse(content), configPath: resolvedPath };
     }
 
-    const { build } = await import("esbuild");
     const configCacheDir = path.join(root, ".farm", ".config-loader");
     await fs.mkdir(configCacheDir, { recursive: true });
     const modulePath = path.join(
@@ -735,18 +825,12 @@ export async function loadDocsConfig(
       `docs-config-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`,
     );
 
-    await build({
-      absWorkingDir: root,
-      entryPoints: [resolvedPath],
+    await bundleNodeModule({
+      root,
+      entry: resolvedPath,
       outfile: modulePath,
-      bundle: true,
-      format: "esm",
-      platform: "node",
       target: `node${process.versions.node.split(".")[0]}`,
-      packages: "external",
-      jsx: "automatic",
-      logLevel: "silent",
-      sourcemap: "inline",
+      externalPackages: true,
     });
 
     const moduleUrl = pathToFileURL(modulePath).href + `?t=${Date.now()}`;
@@ -820,6 +904,19 @@ export async function resolveDocsConfig(
     ...inlineDocsConfig,
     ...directDocsConfig,
   };
+  // The adapter runs in this process, so it gets the config as written, React elements
+  // and functions included; serializing it is the adapter's call.
+  const runtimeDocsConfig: Partial<DocsConfig> = {
+    ...(loadedConfig?.config || {}),
+    ...(isRecord(docsOptions.config) ? docsOptions.config : {}),
+    ...omitUndefined({
+      ...docsOptions,
+      adapter: undefined,
+      enabled: undefined,
+      config: undefined,
+      configPath: undefined,
+    }),
+  };
 
   const explicitRoute = typeof docsOptions.entry === "string" ? docsOptions.entry : undefined;
   const configuredDocsPath =
@@ -851,6 +948,13 @@ export async function resolveDocsConfig(
       docsPath: entryRoute,
       ...(contentDir ? { contentDir } : {}),
     },
+    runtimeConfig: {
+      ...runtimeDocsConfig,
+      entry: docsEntry,
+      docsPath: entryRoute,
+      ...(contentDir ? { contentDir } : {}),
+    },
+    configOverrides: { ...inlineDocsConfig, ...directDocsConfig },
   };
 }
 
@@ -927,6 +1031,14 @@ export async function resolveConfig(
   const routeRuleHeaders = routeRulesToHeaders(routeRules);
   const security = resolveFarmSecurityConfig(userConfig.security);
   const securityHeader = getFarmSecurityHeader(security);
+  if (farmCspBlocksFrameworkInlineScripts(security)) {
+    logger.warn(
+      "security.csp blocks the inline scripts Farm injects for theming and hydration. " +
+        "Set security.csp.nonce to true for managed dynamic nonces and prerendered hashes, " +
+        "or make the governing script directive allow 'unsafe-inline' without a nonce, " +
+        "hash, or 'strict-dynamic' source.",
+    );
+  }
 
   const deploy = resolveDeployConfig(userConfig);
   const root = userConfig.root || process.cwd();
@@ -938,6 +1050,7 @@ export async function resolveConfig(
   setEnv(env);
   const api = await resolveFarmAPIConfig(userConfig.api, { root, mode, env });
   const auth = resolveFarmAuthConfig(userConfig.auth);
+  const mcp = resolveFarmMCPConfig(userConfig.mcp);
   if (auth.enabled && userConfig.integrations?.auth) {
     throw new Error(
       "Choose either the top-level `auth` config or `integrations.auth`; they cannot both own the auth route.",
@@ -947,6 +1060,12 @@ export async function resolveConfig(
     root,
     mode,
   });
+  const nativeMCPPlugin = await resolveFarmMCPPlugin(mcp, { root });
+  if (nativeMCPPlugin && userConfig.plugins?.some((plugin) => plugin?.name === "farm:api-mcp")) {
+    throw new Error(
+      "Choose either the top-level `mcp` config or `apiMcp()` in `plugins`; they configure the same MCP transport.",
+    );
+  }
   const integrations = nativeAuthIntegration
     ? { ...userConfig.integrations, auth: nativeAuthIntegration }
     : userConfig.integrations || {};
@@ -962,13 +1081,14 @@ export async function resolveConfig(
   const openapi = {
     enabled: false,
     route: "/docs/reference",
+    specRoute: "/openapi.json" as string | false,
     title: "API Documentation",
     description: "Auto-generated API documentation",
     version: "1.0.0",
-    servers: [{ url: "http://localhost:3000", description: "Development server" }],
     ...userConfig.openapi,
   };
   if (openapi.route !== undefined) validateConfigRouteSource(openapi.route, "openapi.route");
+  if (openapi.specRoute) validateConfigRouteSource(openapi.specRoute, "openapi.specRoute");
 
   const resolved: ResolvedFarmConfig = {
     [FARM_RESOLVED_CUSTOM_CONTEXT]: typeof userConfig.context === "function",
@@ -990,18 +1110,27 @@ export async function resolveConfig(
     api,
     observability: userConfig.observability ?? false,
     telemetry: userConfig.telemetry !== false,
+    analytics: userConfig.analytics !== false,
     devtools: resolveFarmDevtoolsConfig(userConfig.devtools, mode),
     storage: userConfig.storage || {},
+    schema: resolveSchemaConfig(userConfig.schema),
     cache: userConfig.cache || {},
     auth,
+    mcp,
     suppressLintOnLink: userConfig.suppressLintOnLink ?? false,
     experimental: {
       serverComponents: false,
       serverActions: false,
       isolatedClientHydration: "off",
+      ppr: false,
       ...userConfig.experimental,
     },
-    plugins: [...resolveIntegrationPlugins(integrations), ...(userConfig.plugins || [])],
+    agent: resolveFarmAgentConfig(userConfig.agent),
+    plugins: [
+      ...resolveIntegrationPlugins(integrations),
+      ...(nativeMCPPlugin ? [nativeMCPPlugin] : []),
+      ...(userConfig.plugins || []),
+    ],
     integrations,
     trailingSlash: userConfig.trailingSlash ?? false,
     redirects: () => [...redirects, ...routeRuleRedirects],
@@ -1035,7 +1164,28 @@ export async function resolveConfig(
     vite: typeof userConfig.vite === "function" ? userConfig.vite({}) : userConfig.vite || {},
   };
 
+  // Every plugin is known now, including those integrations contribute.
+  assertPluginDependencies(resolved.plugins, resolved.integrations as never);
+
   return resolved;
+}
+
+function formatConfigLoadError(error: unknown): string {
+  if (error && (typeof error === "object" || typeof error === "function")) {
+    for (const property of ["message", "stack", "name"] as const) {
+      try {
+        const value = Reflect.get(error, property);
+        if (typeof value === "string" && value) return value;
+      } catch {
+        // Continue to the next diagnostic when an exotic getter throws.
+      }
+    }
+  }
+  try {
+    return String(error);
+  } catch {
+    return "Unknown config loader error";
+  }
 }
 
 export async function loadConfig(
@@ -1094,9 +1244,12 @@ export async function loadConfig(
 
       const loadedConfig = await loadFarmConfigFile<FarmUserConfig>(normalizedPath, { root });
       return loadedConfig.root === undefined ? { ...loadedConfig, root } : loadedConfig;
-    } catch (error: any) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to load config from ${relativePath}: ${message}`);
+    } catch (error) {
+      const configError = new Error(
+        `Failed to load config from ${relativePath}: ${formatConfigLoadError(error)}`,
+      );
+      (configError as Error & { cause?: unknown }).cause = error;
+      throw configError;
     }
   }
   return undefined;

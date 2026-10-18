@@ -3,7 +3,7 @@
 React renderer integration for FARMJS, including the experimental AOT compiler.
 
 React remains the default renderer and needs no package or configuration. Install this package only
-when opting into the compiler experiment:
+when opting into the compiler:
 
 ```bash
 pnpm add @farm.js/react
@@ -15,15 +15,32 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
 });
 ```
 
 `compiler: true` uses inference: every application TSX/JSX component is considered, eligible
 components are compiled with hybrid reactivity, and everything else keeps the normal React path.
+
+The compiler is experimental and stays off when this option is omitted or `false`. The former
+`react({ experimental: { compiler } })` spelling remains a deprecated alias with the same options
+and a one-time warning. Do not configure both spellings, even when one is `false`.
+
+### Compatibility and upgrades
+
+`react({ compiler })`, `ReactCompilerOptions`, and `List` from `@farm.js/react/list` are the
+application-facing API. Both inference and annotation mode, static and hybrid reactivity, fallback
+diagnostics, and coverage reporting remain supported. Annotation and static mode are advanced
+options, not separate experimental APIs. The package is independently versioned; a prerelease
+version remains a beta until its stable release is published.
+
+The compiler and `@farm.js/react/compiler-runtime` ship together. Generated definitions must use
+the runtime from the same installed package version; they are not a cross-version interchange
+format. Upgrade the package and rebuild the complete app, including SSR and browser output,
+together. Do not copy generated compiler output between package versions or deploy a new server
+with an old browser build. Existing runtime exports remain available, but prefer ordinary React
+source over hand-authored compiler definitions.
 
 Hybrid reactivity starts from the compiler's proven state-to-binding dependency lists, then marks
 only multi-state short-circuit bindings for runtime read tracking. For
@@ -40,22 +57,24 @@ automatic and does not add a configuration option or asynchronous runtime loadin
 `createCompiledComponent` export remains a complete compatibility entry for hand-authored
 definitions, while generated code uses the tree-shakable feature entry.
 
+Plain keyed lists with filter hints and only identity-based selection also use the single-kind
+target runtime. Filtering keeps its existing native-method checks and fallback; mixed Set/Map
+targets, conditional rows, and nested host blocks keep their existing runtime capabilities.
+
 The persisted production-size fixtures and regression gate live in
-[`RUNTIME_SIZE_RESULTS.md`](./RUNTIME_SIZE_RESULTS.md). The recorded direct-only runtime premium is
-82.6% smaller than the complete compatibility runtime premium; the feature-heavy keyed benchmark
-application removes 6,185 gzip bytes from its previous compiler-on build.
+[`RUNTIME_SIZE_RESULTS.md`](./RUNTIME_SIZE_RESULTS.md). The recorded compiler-selected core runtime
+premium is 85.4% smaller than the complete compatibility runtime premium; the feature-heavy keyed
+benchmark application removes 6,185 gzip bytes from its previous compiler-on build.
 
 For selective adoption, use annotation mode:
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      mode: "annotation",
-      directive: "use compiler",
-      onUnsupported: "warn",
-      reactivity: "hybrid",
-    },
+  compiler: {
+    mode: "annotation",
+    directive: "use compiler",
+    onUnsupported: "warn",
+    reactivity: "hybrid",
   },
 }),
 ```
@@ -270,6 +289,18 @@ itself, and failed runtime checks use complete keyed reconciliation. A key that 
 collection prevents hint emission entirely. The compiler report exposes the emitted-site count as
 `keyedArrayAppendHints`.
 
+When all keyed-row plans in a component are plain, target-free rows and the only emitted update
+hints are appends, the compiler selects a smaller append-only runtime. This omits unused map-update
+and keyed-target fast paths, not support for other state changes: opaque updates and rejected hints
+still use complete keyed reconciliation. Mixed hints, targeted bindings, conditional rows, and host
+blocks keep their existing runtime. No additional option is required.
+
+The same component-wide proof selects a smaller removal-only runtime when the only emitted
+update hints are `filter()` and/or `slice()`. It omits unused append, map-update, and keyed-target
+fast paths while retaining complete keyed reconciliation for opaque updates or rejected hints.
+A sibling list requiring broader hints, targeted bindings, conditional rows, or host blocks keeps
+the existing combined runtime. This changes bundle selection, not native array or React semantics.
+
 Adjacent removal and append setters can share the same committed-row proof:
 
 ```tsx
@@ -354,6 +385,13 @@ When an adjacent filter or bounded slice runs first, the compiler also carries t
 positions into the prepend. The runtime removes only rejected rows, preserves every surviving DOM
 node, and creates only the final prefix instead of rescanning and rebinding the whole result.
 Multiple adjacent prepends share the same proof.
+
+When every keyed list in a component is plain and has no targeted bindings, and prepend is
+the only emitted update hint, Farm selects a smaller prepend-only runtime. It omits unused
+target and map/append fast paths, but keeps the same prepend validation and complete keyed
+reconciliation for opaque or rejected updates. Mixed hints, conditional/host rows, and targeted
+bindings on any sibling list keep their existing runtime. This changes bundle size, not the
+supported update semantics or the prepend algorithm.
 
 The setter may be concise or use a block containing exactly one direct value-returning `return`.
 Extra statements, conditional returns, and missing returns keep complete keyed reconciliation.
@@ -496,7 +534,11 @@ through one document fragment. It then removes only the replaced window. When th
 has the same length and the same keys in the same order, Farm prepares every binding read and
 changed DOM target across the complete window first, patches the existing rows in place, and
 updates the stored row objects used by later events. That path creates no descriptors or DOM rows,
-and preserves row identity, focus, and selection. A window may instead grow or shrink while it
+and preserves row identity, focus, and selection. Validated same-key row and window refreshes also
+keep the existing row map and element lookup, and skip redundant cache cleanup instead of
+rebuilding whole-list bookkeeping. Source and key validation still run, and each flush commits the
+new collection token for subsequent updates. Structural changes retain index rebuilding and cache
+cleanup. A window may instead grow or shrink while it
 reorders keys from inside its own removed interval and mixes them with globally fresh keys. Farm
 prepares all reused binding updates, new descriptors, binding snapshots, and detached rows before
 the first DOM write. It removes only retired rows, preserves each reused row, batches adjacent new
@@ -562,12 +604,15 @@ subclassed behavior, structural calls after reordering, an unhinted intermediate
 React-owned rows, and failed checks keep complete keyed reconciliation.
 
 A compiler-safe `filter()` or bounded `slice()` prefix may precede the native reorder suffix in a
-concise updater or exact one-return block:
+concise updater or exact one-return block. A filter predicate may be concise or contain exactly one
+direct value-returning `return`:
 
 ```tsx
 setItems((current) =>
   current
-    .filter((item) => item.visible)
+    .filter((item) => {
+      return item.visible;
+    })
     .toSorted((left, right) => left.rank - right.rank)
     .toReversed(),
 );
@@ -809,17 +854,22 @@ setItems((current) => current.filter((item) => item.id !== removedId));
 setItems((current) => {
   return current.filter((item) => item.id !== removedId);
 });
+setItems((current) =>
+  current.filter((item) => {
+    return item.id !== removedId;
+  }),
+);
 ```
 
 For compiler-owned host rows whose render and key do not observe the row index, Farm validates the
 native filter chain, every surviving item identity, and every surviving key before removing only
 the rejected DOM rows. It does not recreate descriptors or reread bindings for unchanged rows,
 and queued filters compose before one compiler flush. Index-aware rows or predicates, updater blocks
-with extra statements, directives, conditional returns, or no value-returning `return`, block-bodied
-predicates, custom filter methods, sparse or subclassed arrays, collection-reading bindings or keys,
-React-owned row structures, mixed dirty dependencies, and failed validation use complete keyed
-reconciliation. No option or new component is required. The compiler report exposes the emitted-site
-count as `keyedArrayFilterHints`.
+with extra statements, directives, conditional returns, or no value-returning `return`, predicate
+blocks with those unsupported shapes, custom filter methods, sparse or subclassed arrays,
+collection-reading bindings or keys, React-owned row structures, mixed dirty dependencies, and
+failed validation use complete keyed reconciliation. No option or new component is required. The
+compiler report exposes the emitted-site count as `keyedArrayFilterHints`.
 
 An otherwise eligible host row may also contain an inline synchronous React event:
 
@@ -908,6 +958,12 @@ including multiple ranges separated by static host siblings. Inner events or for
 components, fragments, refs, SVG, spreads, dangerous HTML, and index keys keep the complete outer
 row on React's fallback. Additional keyed levels that satisfy the same host-only contract are
 analyzed recursively instead of using a fixed nesting limit.
+
+When every inner key stays in the same order, the nested scope reuses its row table and skips
+position-map construction and LIS planning. It still validates all keys and updates every child
+scope and binding. Insertions, removals, and reorders keep the existing structural reconciliation;
+duplicate keys or an invalid child scope keep the existing React fallback. This also applies to
+keyed ranges next to host-only conditions inside a nested mixed range.
 
 For example, `boards → columns → cards → tags` becomes a tree of keyed scopes. Each stable parent
 key owns its child key table and LIS pass. Moving a board carries its column, card, and tag scopes;

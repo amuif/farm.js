@@ -14,6 +14,7 @@ export {
   FarmDeployError,
   formatFarmDeployPlan,
   resolveCloudflareAgentDeployPlan,
+  resolveDeployCliExecutable,
   type CloudflareAgentDeployPlan,
   type FarmDeployCommand,
   type FarmDeployErrorCode,
@@ -32,7 +33,10 @@ export {
   parsePreviewPublicUrl,
   previewFarm,
   resolvePreviewTarget,
+  runPreviewTunnel,
   type PreviewFarmOptions,
+  type PreviewFarmGatewayPlan,
+  type PreviewFarmGatewaySession,
   type PreviewFarmResult,
   type PreviewTarget,
   type PreviewTunnelPlan,
@@ -53,12 +57,42 @@ export {
   type RunNativePreviewTunnelOptions,
 } from "./preview-native";
 export {
+  authorizePreviewGatewayPlan,
+  formatPreviewExpiration,
+  loadPreviewAuthConfig,
+  parsePreviewDuration,
+  previewCredentialFromEnvironment,
+  previewSignInStatus,
+  signInToPreviewGateway,
+  signOutOfPreviewGateway,
+  type AuthorizePreviewPlanOptions,
+  type PreviewSignInMode,
+  type PreviewSignInStatus,
+  type PreviewProject,
+  type PreviewEnvironmentCredential,
+  type PreviewAuthPublicConfig,
+  type PreviewAuthRuntime,
+  type PreviewCredentialStore,
+} from "./preview-auth";
+export {
+  loginToFarmPreview,
+  logoutOfFarmPreview,
+  whoamiFarmPreview,
+  type PreviewAccountOptions,
+} from "./preview-account";
+export {
   escapeDoubleQuoted,
   escapeSqlString,
   FarmGeneratedArtifactsStaleError,
   generateFarmArtifacts,
   type GenerateFarmOptions,
 } from "./generate";
+export {
+  formatFarmAgentCheckReport,
+  runFarmAgentCheck,
+  type FarmAgentCheckOptions,
+  type FarmAgentCheckReport,
+} from "./agent-check";
 export {
   formatFarmDoctorReport,
   runFarmDoctor,
@@ -96,6 +130,14 @@ export {
   type FrameworkMigrationPlan,
 } from "./migrate";
 export { migrateFarmAuth, type MigrateFarmAuthOptions } from "./auth";
+export {
+  listSchemaTableOwners,
+  askToConfirm,
+  migrateAllSchemas,
+  migrateSchema,
+  type MigrateSchemaOptions,
+} from "./schema-migrate";
+export { formatSchemaCheck, runSchemaCheck, type CheckSchemaOptions } from "./schema-check";
 export {
   createFarmUpgradePlan,
   detectFarmPackageManager,

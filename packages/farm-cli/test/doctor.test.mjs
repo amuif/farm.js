@@ -9,7 +9,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { formatFarmDoctorReport, runFarmDoctor } = require("../dist/index.js");
+const {
+  formatFarmDoctorReport,
+  generateFarmArtifacts,
+  runFarmDoctor,
+} = require("../dist/index.js");
 const execFileAsync = promisify(execFile);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const cliBin = path.resolve(testDir, "../bin/farm.js");
@@ -53,6 +57,41 @@ test("uses the running DevTools snapshot as the source of truth", async () => {
   assert.equal(report.runtime.pages, 8);
   assert.equal(report.target.devtoolsUrl, "http://localhost:4319/__farm/devtools");
   assert.ok(report.checks.some((check) => check.code === "EPHEMERAL_PRODUCTION_STORAGE"));
+});
+
+test("preserves live runtime health without matching diagnostics", async () => {
+  for (const [health, status] of [
+    ["attention", "warn"],
+    ["error", "fail"],
+  ]) {
+    const report = await runFarmDoctor({
+      url: "http://localhost:4319",
+      fetch: async () =>
+        Response.json({
+          health,
+          project: { name: "storefront", root: "/repo/storefront" },
+          deployment: { target: "node", preset: "node-server" },
+          counts: {
+            pages: 1,
+            layouts: 1,
+            apiRoutes: 0,
+            middleware: 0,
+            integrations: 0,
+            storageMounts: 0,
+            cronJobs: 0,
+            workflows: 0,
+          },
+          diagnostics: [],
+        }),
+    });
+
+    assert.equal(report.health, health);
+    assert.ok(
+      report.checks.some(
+        (check) => check.code === "LIVE_RUNTIME_HEALTH" && check.status === status,
+      ),
+    );
+  }
 });
 
 test("inspects a project without starting its runtime", async () => {
@@ -114,6 +153,458 @@ test("enforces the Node 22.13 runtime baseline", async () => {
   }
 });
 
+test("reports conflicting package-manager signals and an unsupported pnpm version", async () => {
+  const root = await createTempProject();
+
+  try {
+    const packagePath = path.join(root, "package.json");
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.packageManager = "pnpm@7.33.0";
+    await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    await writeFile(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '6.0'\n");
+    await writeFile(path.join(root, "package-lock.json"), "{}\n");
+
+    const report = await runFarmDoctor({
+      root,
+      offline: true,
+      env: { npm_config_user_agent: "pnpm/7.33.0 npm/? node/v22.13.0" },
+    });
+
+    assert.ok(report.checks.some((check) => check.code === "PACKAGE_MANAGER_CONFLICT"));
+    assert.ok(
+      report.checks.some((check) => check.code === "PNPM_UNSUPPORTED" && check.status === "fail"),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolves workspace protocol dependencies from a workspace root", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-doctor-workspace-"));
+
+  try {
+    await mkdir(path.join(root, "packages/core"), { recursive: true });
+    await mkdir(path.join(root, "src/app"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "doctor-workspace",
+        packageManager: "pnpm@8.12.1",
+        dependencies: { "@farm.js/core": "workspace:*" },
+      }),
+    );
+    await writeFile(path.join(root, "pnpm-workspace.yaml"), 'packages:\n  - "packages/*"\n');
+    await writeFile(
+      path.join(root, "packages/core/package.json"),
+      JSON.stringify({ name: "@farm.js/core", version: "0.1.0-beta.106" }),
+    );
+    await writeFile(path.join(root, "farm.config.mjs"), "export default {};\n");
+    await writeFile(path.join(root, "src/app/page.tsx"), "export default () => null;\n");
+    await writeFile(
+      path.join(root, "src/app/layout.tsx"),
+      "export default ({ children }) => children;\n",
+    );
+    await generateFarmArtifacts({ root });
+
+    const report = await runFarmDoctor({ root, offline: true });
+
+    assert.ok(report.checks.some((check) => check.code === "LOCAL_PACKAGES_RESOLVED"));
+    assert.ok(!report.checks.some((check) => check.code === "LOCAL_PACKAGES_MISSING"));
+    assert.ok(report.checks.some((check) => check.code === "PNPM_SUPPORTED"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fails when a workspace protocol dependency has no local package", async () => {
+  const root = await createTempProject();
+
+  try {
+    const packagePath = path.join(root, "package.json");
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.packageManager = "pnpm@8.12.1";
+    packageJson.dependencies["@farm.js/core"] = "workspace:*";
+    await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    await writeFile(path.join(root, "pnpm-workspace.yaml"), 'packages:\n  - "packages/*"\n');
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const check = report.checks.find((entry) => entry.code === "LOCAL_PACKAGES_MISSING");
+
+    assert.equal(report.health, "error");
+    assert.equal(check?.status, "fail");
+    assert.match(check?.message || "", /@farm\.js\/core \(workspace:\*\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("detects stale generated artifacts without changing them", async () => {
+  const root = await createTempProject();
+  const typesPath = path.join(root, "src/farm.d.ts");
+
+  try {
+    const staleSource = `${await readFile(typesPath, "utf8")}\n// stale\n`;
+    await writeFile(typesPath, staleSource);
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const check = report.checks.find((entry) => entry.code === "GENERATED_ARTIFACTS_STALE");
+
+    assert.equal(check?.status, "fail");
+    assert.match(check?.message || "", /src\/farm\.d\.ts/);
+    assert.equal(await readFile(typesPath, "utf8"), staleSource);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports missing renderer entrypoints without importing them", async () => {
+  const root = await createTempProject();
+
+  try {
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      `export default {
+  renderer: {
+    name: "missing",
+    vite: "missing-renderer/vite",
+    server: "missing-renderer/server",
+    client: "missing-renderer/client",
+    componentExtensions: [".tsx"],
+  },
+};
+`,
+    );
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const check = report.checks.find((entry) => entry.code === "RENDERER_ENTRYPOINTS_MISSING");
+
+    assert.equal(check?.status, "fail");
+    assert.match(check?.message || "", /missing-renderer\/server/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports loaded integrations and declared Farm packages that are not installed", async () => {
+  const root = await createTempProject();
+
+  try {
+    const packagePath = path.join(root, "package.json");
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.dependencies["@farm.js/missing-provider"] = "0.1.0-beta.1";
+    await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      `export default {
+  integrations: {
+    billing: {
+      kind: "farm-integration",
+      category: "payments",
+      type: "stripe",
+      instance: {},
+    },
+  },
+};
+`,
+    );
+    await generateFarmArtifacts({ root });
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const integrationCheck = report.checks.find(
+      (entry) => entry.code === "INTEGRATION_ENTRYPOINTS_READY",
+    );
+    const packageCheck = report.checks.find(
+      (entry) => entry.code === "FARM_PACKAGES_NOT_INSTALLED",
+    );
+
+    assert.equal(integrationCheck?.status, "pass");
+    assert.match(integrationCheck?.message || "", /billing \(stripe\)/);
+    assert.equal(packageCheck?.status, "warn");
+    assert.match(packageCheck?.message || "", /@farm\.js\/missing-provider/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reports an optional feature package the app uses but has not installed", async () => {
+  const root = await createTempProject();
+
+  try {
+    await writeFile(path.join(root, "src/app/globals.css"), '@import "tailwindcss";\n');
+
+    const missing = await runFarmDoctor({ root, offline: true });
+    const missingCheck = missing.checks.find((entry) => entry.code === "OPTIONAL_PACKAGE_MISSING");
+    assert.equal(missingCheck?.status, "warn");
+    assert.equal(missingCheck?.title, "@tailwindcss/vite is not installed");
+    assert.match(missingCheck?.message || "", /src\/app\/globals\.css imports tailwindcss/);
+    assert.equal(
+      missingCheck?.action,
+      'Install "@tailwindcss/vite" to enable built-in Tailwind CSS support: pnpm add -D @tailwindcss/vite',
+    );
+
+    const packageDir = path.join(root, "node_modules/@tailwindcss/vite");
+    await mkdir(packageDir, { recursive: true });
+    await writeFile(
+      path.join(packageDir, "package.json"),
+      JSON.stringify({
+        name: "@tailwindcss/vite",
+        version: "4.3.3",
+        exports: { ".": "./index.mjs" },
+      }),
+    );
+
+    const installed = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      installed.checks.some((entry) => entry.code === "OPTIONAL_PACKAGE_MISSING"),
+      false,
+    );
+    assert.equal(
+      installed.checks.find((entry) => entry.code === "OPTIONAL_PACKAGE_INSTALLED")?.title,
+      "@tailwindcss/vite is installed",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fails when the app renders OG images without @vercel/og", async () => {
+  for (const [file, source, use] of [
+    [
+      "src/app/opengraph-image.tsx",
+      "export default () => <div>card</div>;\n",
+      /src\/app\/opengraph-image\.tsx renders a metadata image/,
+    ],
+    [
+      "src/app/api/card/route.tsx",
+      'import { ImageResponse } from "@farm.js/core/og";\nexport const GET = () => new ImageResponse(<div />);\n',
+      /src\/app\/api\/card\/route\.tsx imports @farm\.js\/core\/og/,
+    ],
+  ]) {
+    const root = await createTempProject();
+    try {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), source);
+
+      const report = await runFarmDoctor({ root, offline: true });
+      const check = report.checks.find(
+        (entry) =>
+          entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("@vercel/og"),
+      );
+      assert.equal(check?.status, "fail");
+      assert.match(check?.message || "", use);
+      assert.equal(
+        check?.action,
+        'Install "@vercel/og" to render OG and metadata images: pnpm add @vercel/og',
+      );
+      assert.equal(report.health, "error");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("reports image optimization without sharp by provider", async () => {
+  const root = await createTempProject();
+  try {
+    await writeFile(
+      path.join(root, "src/app/hero.tsx"),
+      'import { Image } from "@farm.js/core/image";\nexport const Hero = () => <Image src="/a.png" width={10} height={10} alt="" />;\n',
+    );
+    const sharpCheck = (report) =>
+      report.checks.find(
+        (entry) => entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("sharp"),
+      );
+
+    const auto = await runFarmDoctor({ root, offline: true });
+    assert.equal(sharpCheck(auto)?.status, "warn");
+    assert.match(
+      sharpCheck(auto)?.message || "",
+      /src\/app\/hero\.tsx imports @farm\.js\/core\/image/,
+    );
+    assert.equal(sharpCheck(auto)?.action, 'Install "sharp" to optimize images: pnpm add sharp');
+
+    const configPath = path.join(root, "farm.config.mjs");
+    const source = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  images: { provider: 'node' },"),
+    );
+    assert.equal(sharpCheck(await runFarmDoctor({ root, offline: true }))?.status, "fail");
+
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  images: { provider: 'none' },"),
+    );
+    assert.equal(sharpCheck(await runFarmDoctor({ root, offline: true })), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fails when docs are enabled without @farming-labs/docs", async () => {
+  const root = await createTempProject();
+  try {
+    const configPath = path.join(root, "farm.config.mjs");
+    const source = await readFile(configPath, "utf8");
+    await writeFile(
+      configPath,
+      source.replace("export default {", "export default {\n  docs: true,"),
+    );
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const check = report.checks.find(
+      (entry) =>
+        entry.code === "OPTIONAL_PACKAGE_MISSING" && entry.title.startsWith("@farming-labs/docs"),
+    );
+    assert.equal(check?.status, "fail");
+    assert.match(check?.message || "", /docs is enabled at \/docs/);
+    assert.equal(
+      check?.action,
+      'Install "@farming-labs/docs" to use the docs engine: pnpm add @farming-labs/docs',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skips optional feature packages the app does not use", async () => {
+  const root = await createTempProject();
+
+  try {
+    await writeFile(path.join(root, "src/app/globals.css"), "body { margin: 0; }\n");
+    const plain = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      plain.checks.some((entry) => entry.code.startsWith("OPTIONAL_PACKAGE_")),
+      false,
+    );
+
+    // A project PostCSS config owns Tailwind, so Farm's built-in plugin is unused.
+    await writeFile(path.join(root, "src/app/globals.css"), '@import "tailwindcss";\n');
+    await writeFile(path.join(root, "postcss.config.mjs"), "export default { plugins: {} };\n");
+    const postcss = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      postcss.checks.some((entry) => entry.code.startsWith("OPTIONAL_PACKAGE_")),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checks beta registry tags only when requested and reports a stale beta", async () => {
+  const root = await createTempProject();
+  const typesPath = path.join(root, "src/farm.d.ts");
+  const before = await readFile(typesPath, "utf8");
+  const requests = [];
+
+  try {
+    const report = await runFarmDoctor({
+      root,
+      offline: true,
+      registry: true,
+      fetch: async (input) => {
+        requests.push(String(input));
+        return Response.json({
+          "dist-tags": { beta: "0.1.0-beta.107" },
+          versions: { "0.1.0-beta.107": {} },
+        });
+      },
+    });
+
+    assert.deepEqual(requests, [
+      "https://registry.npmjs.org/%40farm.js%2Fcore",
+      "https://registry.npmjs.org/%40farm.js%2Fcreate-app",
+    ]);
+    assert.ok(report.checks.some((check) => check.code === "REGISTRY_BETA_RESOLVED"));
+    assert.ok(report.checks.some((check) => check.code === "FARM_BETA_STALE"));
+    assert.equal(await readFile(typesPath, "utf8"), before);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compares registry versions by precedence across the beta and latest tags", async () => {
+  const root = await createTempProject();
+  const packagePath = path.join(root, "package.json");
+  const signals = [];
+  const runWithDeclared = async (declared) => {
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+    packageJson.dependencies["@farm.js/core"] = declared;
+    await writeFile(packagePath, JSON.stringify(packageJson), "utf8");
+    const report = await runFarmDoctor({
+      root,
+      offline: true,
+      registry: true,
+      fetch: async (_input, init) => {
+        signals.push(init?.signal);
+        return Response.json({
+          "dist-tags": { beta: "0.1.3-beta.0", latest: "0.1.17" },
+          versions: { "0.1.3-beta.0": {}, "0.1.17": {} },
+        });
+      },
+    });
+    return report.checks.find((check) => check.code === "FARM_BETA_STALE");
+  };
+
+  try {
+    assert.equal(await runWithDeclared("0.1.17"), undefined);
+    assert.equal(await runWithDeclared("0.1.18-beta.0"), undefined);
+
+    const stale = await runWithDeclared("0.1.16");
+    assert.equal(stale?.status, "warn");
+    assert.match(stale?.message || "", /declares 0\.1\.16; registry latest is 0\.1\.17/);
+    assert.match(stale?.action || "", /^Run farm upgrade,/);
+
+    assert.ok(signals.length > 0);
+    assert.ok(signals.every((signal) => signal instanceof AbortSignal));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("resolves unscoped workspace aliases and flow-style workspace packages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-doctor-workspace-alias-"));
+
+  try {
+    await mkdir(path.join(root, "packages/core"), { recursive: true });
+    await mkdir(path.join(root, "packages/bar"), { recursive: true });
+    await mkdir(path.join(root, "src/app"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "doctor-workspace-alias",
+        packageManager: "pnpm@8.12.1",
+        dependencies: { "@farm.js/core": "workspace:*", "bar-alias": "workspace:bar@*" },
+      }),
+    );
+    await writeFile(path.join(root, "pnpm-workspace.yaml"), "packages: ['packages/*']\n");
+    await writeFile(
+      path.join(root, "packages/core/package.json"),
+      JSON.stringify({ name: "@farm.js/core", version: "0.1.0-beta.106" }),
+    );
+    await writeFile(
+      path.join(root, "packages/bar/package.json"),
+      JSON.stringify({ name: "bar", version: "1.0.0" }),
+    );
+    await writeFile(path.join(root, "farm.config.mjs"), "export default {};\n");
+    await writeFile(path.join(root, "src/app/page.tsx"), "export default () => null;\n");
+    await writeFile(
+      path.join(root, "src/app/layout.tsx"),
+      "export default ({ children }) => children;\n",
+    );
+    await generateFarmArtifacts({ root });
+
+    const report = await runFarmDoctor({ root, offline: true });
+    const missing = report.checks.find((check) => check.code === "LOCAL_PACKAGES_MISSING");
+    const resolved = report.checks.find((check) => check.code === "LOCAL_PACKAGES_RESOLVED");
+
+    assert.equal(missing, undefined, missing?.message);
+    assert.match(resolved?.message || "", /@farm\.js\/core, bar-alias/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("reports missing cron routes and ephemeral serverless storage", async () => {
   const root = await createTempProject({
     target: "vercel",
@@ -167,6 +658,28 @@ test("prints a machine-readable report through the CLI", async () => {
     assert.equal(report.source, "project");
     assert.equal(report.health, "ready");
     assert.equal(report.project.root, root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exits non-zero with a machine-readable report when a check fails", async () => {
+  const root = await createTempProject();
+
+  try {
+    const typesPath = path.join(root, "src/farm.d.ts");
+    await writeFile(typesPath, `${await readFile(typesPath, "utf8")}\n// stale\n`);
+
+    await assert.rejects(
+      execFileAsync(process.execPath, [cliBin, "doctor", "--offline", "--root", root, "--json"]),
+      (error) => {
+        const report = JSON.parse(error.stdout);
+        assert.equal(error.code, 1);
+        assert.equal(report.health, "error");
+        assert.ok(report.checks.some((check) => check.code === "GENERATED_ARTIFACTS_STALE"));
+        return true;
+      },
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -368,7 +881,7 @@ async function createTempProject(options = {}) {
     path.join(root, "package.json"),
     JSON.stringify({
       name: "doctor-fixture",
-      dependencies: { "@farm.js/core": "workspace:*" },
+      dependencies: { "@farm.js/core": "0.1.0-beta.106" },
     }),
     "utf8",
   );
@@ -400,5 +913,6 @@ async function createTempProject(options = {}) {
     "export function GET() { return Response.json({ ok: true }); }\n",
     "utf8",
   );
+  await generateFarmArtifacts({ root });
   return root;
 }

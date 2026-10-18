@@ -89,6 +89,57 @@ beforeEach(() => {
 });
 
 describe("createAPIClient", () => {
+  it("keeps URLSearchParams contents distinct in default cache keys", async () => {
+    type SearchRouter = {
+      items: {
+        get: {
+          __types: {
+            body: never;
+            query: URLSearchParams;
+            response: { url: string };
+          };
+        };
+      };
+    };
+    const fetchMock = vi.fn(async (url: string) => buildResponse({ url }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<SearchRouter>({
+      baseURL: "http://example.com",
+      credentials: "omit",
+    });
+    const cache = { policy: "cache-first" as const, staleTime: 10_000 };
+
+    const apples = await api.items.get({ query: new URLSearchParams("q=apples") }, { cache });
+    const oranges = await api.items.get({ query: new URLSearchParams("q=oranges") }, { cache });
+
+    expect(apples.data).toEqual({ url: "http://example.com/api/items?q=apples" });
+    expect(oranges.data).toEqual({ url: "http://example.com/api/items?q=oranges" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends bigint query primitives without failing cache-key construction", async () => {
+    type BigIntRouter = {
+      items: {
+        get: {
+          __types: {
+            body: never;
+            query: { id: bigint };
+            response: { url: string };
+          };
+        };
+      };
+    };
+    const fetchMock = vi.fn(async (url: string) => buildResponse({ url }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<BigIntRouter>({ baseURL: "http://example.com" });
+
+    const result = await api.items.get({ query: { id: 1n } });
+
+    expect(result.error).toBeNull();
+    expect(result.data).toEqual({ url: "http://example.com/api/items?id=1" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("sends typed QUERY bodies and caches each representation separately", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
@@ -210,6 +261,53 @@ describe("createAPIClient", () => {
     );
   });
 
+  it("does not let Promise assimilation turn route proxies into /then requests", async () => {
+    const fetchMock = vi.fn(async () => buildResponse({ ok: true }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<{
+      users: { get: { __types: { body: never; query: never; response: { ok: true } } } };
+      "/then": { get: { __types: { body: never; query: never; response: { ok: true } } } };
+    }>({ baseURL: "https://api.example.com" });
+    const users = api.users;
+
+    await expect(Promise.resolve(users)).resolves.toBe(users);
+    await expect(Promise.resolve(api)).resolves.toBe(api);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await api["/then"].get();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.com/api/then",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("does not treat inherited Object properties as integration aliases", async () => {
+    const fetchMock = vi.fn(async () => buildResponse({ ok: true }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<{
+      constructor: {
+        get: { __types: { body: never; query: never; response: { ok: true } } };
+      };
+      toString: {
+        get: { __types: { body: never; query: never; response: { ok: true } } };
+      };
+    }>({ baseURL: "https://api.example.com" });
+
+    await api.constructor.get();
+    await api.toString.get();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://api.example.com/api/constructor",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.example.com/api/toString",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
   it("serializes array query inputs as repeated parameters", async () => {
     const fetchMock = vi.fn(async () => buildResponse({ posts: [] }));
     globalThis.fetch = fetchMock as any;
@@ -219,6 +317,35 @@ describe("createAPIClient", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.example.com/api/posts?tag=react&tag=vite",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("rejects nested query values instead of serializing them as object strings", async () => {
+    const fetchMock = vi.fn(async () => buildResponse({ users: [] }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<APIRouter>({ baseURL: "https://api.example.com" });
+
+    const result = await (api.users.get as any)({ query: { filter: { active: true } } });
+
+    expect(result.error).toMatchObject({
+      message: expect.stringContaining('API query parameter "filter"'),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves URLSearchParams duplicates and encoding", async () => {
+    const fetchMock = vi.fn(async () => buildResponse({ posts: [] }));
+    globalThis.fetch = fetchMock as any;
+    const api = createAPIClient<APIRouter>({ baseURL: "https://api.example.com" });
+    const query = new URLSearchParams();
+    query.append("tag", "react & vite");
+    query.append("tag", "farm");
+
+    await (api.posts.get as any)({ query });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.com/api/posts?tag=react+%26+vite&tag=farm",
       expect.objectContaining({ method: "GET" }),
     );
   });

@@ -26,7 +26,6 @@ import { z } from "zod";
 
 export const POST = createEndpoint(
   {
-    method: "POST",
     body: z.object({
       name: z.string().min(1),
     }),
@@ -37,10 +36,54 @@ export const POST = createEndpoint(
 );
 ```
 
+The export name sets the HTTP method, so route files don't pass `method`. An endpoint without
+schemas or other options can take the handler alone:
+
+**src/app/api/stars/route.ts**
+
+```ts
+import { createEndpoint } from "@farm.js/core/api";
+
+export const GET = createEndpoint(async () =>
+  Response.json(await getStars(), {
+    headers: { "cache-control": "public, s-maxage=600, stale-while-revalidate=3600" },
+  }),
+);
+```
+
+`method` only matters for endpoints created with an explicit path, such as
+`createEndpoint("/api/settings", { method: "POST" }, handler)`, which have no export name to read it
+from. There it defaults to `GET`.
+
 Use [`createApiClients()`](/docs/api-client) in one shared `src/lib/api.ts` to return `{ api, apiClient }`
 from the generated router. Both callers reuse this route definition: `api` dispatches locally on
 the server and `apiClient` sends HTTP requests. Endpoint middleware runs for both; outer HTTP
 middleware is not replayed by direct calls. Never import endpoint modules into the shared caller file.
+
+## MCP tool opt-in
+
+When `@farm.js/mcp` is installed, a typed endpoint can opt into the authenticated MCP transport
+with `mcp: true` or explicit tool metadata:
+
+```ts
+export const GET = createEndpoint(
+  {
+    mcp: {
+      name: "list_projects",
+      description: "List projects visible to the current user.",
+      readOnlyHint: true,
+    },
+  },
+  async () => ({ projects: await listProjects() }),
+);
+```
+
+The route still owns validation and endpoint middleware. The top-level `mcp` config separately owns
+transport authentication in `farm.config.ts`. Alternatively, select explicitly pathed endpoint
+instances in `mcp.tools` and return allowed tool names from `mcp.authorize` to control discovery
+and invocation per caller. The same list can include standalone `defineTool()` definitions from
+`@farm.js/mcp` for operations without an HTTP route. See the [API MCP guide](/docs/plugins/mcp)
+for mixed composition, generated names, and security boundaries.
 
 ## Next-style exports
 
@@ -97,7 +140,6 @@ This also applies to production RSC builds. They support `QUERY` exports, prefer
 ```ts
 export const GET = createEndpoint(
   {
-    method: "GET",
     query: z.object({
       q: z.string().optional(),
       page: z.coerce.number().int().positive().default(1),
@@ -113,8 +155,23 @@ export const GET = createEndpoint(
 ```
 
 Farm parses and validates `body`, `query`, and `headers` before middleware or handler code runs. Header schema keys use the lower-case names exposed by the Fetch `Headers` API. Invalid input returns a `400` response with structured validation issues.
-Malformed `application/json` and `application/*+json` bodies also return `400` before endpoint
-middleware or handler code executes, including when the endpoint does not declare a body schema.
+
+Generated callers use the schema's **input** type for body and query values; middleware and
+handlers receive its parsed **output** type. For example, a field declared as
+`z.string().transform(Number)` is sent as a string and received by the handler as a number.
+Defaulted fields may be omitted by the caller. The same distinction applies to multipart
+`toFormData(...)` inputs, Standard Schema input/output types, and both `api` and `apiClient`
+from `createApiClients()`. Validation still runs on the server; this does not send schemas or
+transforms to the browser. Existing endpoints without transforms retain their input types.
+
+Malformed `application/json` and `application/*+json` bodies return `400` before endpoint middleware
+or handler code executes, including when the endpoint does not declare a body schema. Empty declared
+JSON receives the same response for non-QUERY methods. A bodyless `QUERY` remains valid
+because QUERY requires `Content-Type` and generated clients attach `application/json` even when the
+endpoint declares no body. Malformed `multipart/form-data` also returns `400` instead of becoming an
+absent body; an empty `application/x-www-form-urlencoded` body is a valid empty form and parses as an
+empty object. Callers that omit `Content-Type` retain the permissive JSON parsing path for
+compatibility.
 If an upload is aborted while Farm is buffering its body, Farm rejects it before invoking the
 endpoint. This does not roll back work in a handler that has already started.
 On Node, finishing an upload is not an abort: only an interrupted upload or an early response
@@ -182,7 +239,6 @@ type ImportEvent = { phase: "accepted"; bytes: number } | { phase: "complete"; i
 
 export const POST = createEndpoint(
   {
-    method: "POST",
     body: importBody,
   },
   async ({ body }) => {
@@ -259,7 +315,6 @@ async function loadProject({
 
 export const PATCH = createEndpoint(
   {
-    method: "PATCH",
     body: z.object({ name: z.string().min(1) }),
     middleware: [requireAuth, requireRole("admin"), loadProject],
   },
@@ -298,7 +353,6 @@ Declare failures that are part of an endpoint's public contract, then return the
 ```ts
 export const POST = createEndpoint(
   {
-    method: "POST",
     body: z.object({
       name: z.string().min(1),
     }),
@@ -381,7 +435,6 @@ endpoint instead of repeating client-side invalidation:
 ```ts
 export const PATCH = createEndpoint(
   {
-    method: "PATCH",
     body: z.object({
       id: z.string(),
       name: z.string().min(1),

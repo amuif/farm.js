@@ -1,4 +1,43 @@
 import { validateConfigRouteSource } from "./plugins/route-pattern";
+import { defineSchema } from "./schema";
+import type {
+  FarmSchema,
+  FarmSchemaConstraint,
+  FarmSchemaField,
+  FarmSchemaFieldType,
+  FarmSchemaModel,
+  FarmSchemaModelExtension,
+  FarmSchemaModelOverride,
+  FarmSchemaReference,
+} from "./schema";
+
+// Keep the schema types available from the integrations entrypoint as well.
+// Integration declarations reference these types, and exporting them here
+// keeps those declarations nameable for consumers that import integration
+// helpers directly.
+export type {
+  FarmSchema,
+  FarmSchemaConstraint,
+  FarmSchemaField,
+  FarmSchemaFieldType,
+  FarmSchemaModel,
+  FarmSchemaModelExtension,
+  FarmSchemaModelOverride,
+  FarmSchemaReference,
+} from "./schema";
+
+// Origin validation for integration auth routes is part of the integration
+// contract, so it is re-exported here alongside defineIntegration rather than
+// only from the package root.
+export {
+  describeIntegrationOriginRejection,
+  resolveIntegrationAllowedOrigins,
+  validateIntegrationRequestOrigin,
+  type IntegrationOriginPolicy,
+  type IntegrationOriginRejection,
+  type IntegrationOriginResult,
+} from "./integration-request-security";
+
 import type { ComponentType, ReactNode } from "react";
 import { api as integrationApi, defineIntegrationAPIOperation } from "./integration-api";
 import type {
@@ -12,7 +51,7 @@ import type {
 } from "./integration-api";
 import type { InferFarmIntegrationOrmClient } from "./integration-orm";
 import { setFarmPluginIntegrationContext } from "./plugin-integration-context";
-import { decodeRouteSegment } from "./utils/decode";
+import { canonicalizeRequestPathname, canonicalizeRequestPathSegments } from "./utils/decode";
 import {
   assertTerminalCatchAll,
   assertUniqueRouteParameters,
@@ -33,7 +72,7 @@ import {
   hasRequestContext,
   setRequestContext,
 } from "./request-context";
-import { sendWebResponse } from "./server/response";
+import { applyWebResponseHeaders, sendWebResponse } from "./server/response";
 import type { FarmRequest } from "./types";
 import {
   bufferFarmRequestBody,
@@ -138,6 +177,70 @@ export interface FarmIntegrationRouteInputSchemas<TBody = unknown, TQuery = unkn
 export type FarmIntegrationRequestContextStore = FarmRequestStore;
 
 export const FARM_INTEGRATION_INTERNAL_DISPATCH_CONTEXT_KEY = "farm.integration.internalDispatch";
+
+/**
+ * Request-context key under which an integration middleware can hand
+ * `Set-Cookie` values to the runtime when it returns `void` (i.e. lets the
+ * request continue to the downstream route/page handler). The runtime reads
+ * this key back after a `void` middleware return and forwards the cookies onto
+ * the response it ultimately sends, so a server-side session refresh (or any
+ * other cookie rotation) reaches the browser instead of being dropped.
+ */
+export const FARM_INTEGRATION_SET_COOKIES_KEY = "farm:integration:set-cookies";
+
+/**
+ * Forward `Set-Cookie` values from an integration middleware that returns
+ * `void` (the authenticated/passthrough branch) to the runtime, so they are
+ * merged onto the response the runtime sends for the matched route. This is
+ * the passthrough counterpart to appending `Set-Cookie` to a `Response` the
+ * middleware returns directly (e.g. a failure redirect): both paths can rotate
+ * auth cookies, and both must be able to reach the browser.
+ */
+export function forwardIntegrationSetCookies(
+  context: Pick<FarmIntegrationHandlerContext, "req">,
+  cookies: string[],
+): void {
+  if (cookies.length === 0) return;
+  const existing = context.req.get<string[]>(FARM_INTEGRATION_SET_COOKIES_KEY) ?? [];
+  context.req.set(FARM_INTEGRATION_SET_COOKIES_KEY, [...existing, ...cookies]);
+}
+
+/**
+ * Read and clear the forwarded `Set-Cookie` values an integration middleware
+ * stashed on the request context. Reading-and-clearing guarantees each batch
+ * is applied at most once even when several middleware run for one request.
+ */
+function takeForwardedIntegrationSetCookies(
+  context: Pick<FarmIntegrationHandlerContext, "req">,
+): string[] {
+  const cookies = context.req.get<string[]>(FARM_INTEGRATION_SET_COOKIES_KEY);
+  if (cookies && cookies.length > 0) {
+    context.req.delete(FARM_INTEGRATION_SET_COOKIES_KEY);
+    return cookies;
+  }
+  if (cookies) {
+    context.req.delete(FARM_INTEGRATION_SET_COOKIES_KEY);
+  }
+  return [];
+}
+
+/**
+ * Return a copy of `response` carrying the forwarded `Set-Cookie` values, or
+ * `response` unchanged when there is nothing to forward. Existing `Set-Cookie`
+ * headers on the response are preserved (appended to, not replaced).
+ */
+function appendIntegrationForwardedCookies(response: Response, cookies: string[]): Response {
+  if (cookies.length === 0) return response;
+  const headers = new Headers(response.headers);
+  for (const cookie of cookies) {
+    headers.append("set-cookie", cookie);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
 
 export type FarmIntegrationRouteDb<TSchema extends FarmIntegrationSchema | undefined> =
   InferFarmIntegrationOrmClient<TSchema>;
@@ -361,85 +464,36 @@ export interface FarmIntegrationDocumentNavigation {
   matcher: string | readonly string[];
 }
 
-export type FarmIntegrationSchemaFieldType =
-  | "id"
-  | "uuid"
-  | "string"
-  | "text"
-  | "boolean"
-  | "integer"
-  | "number"
-  | "datetime"
-  | "json"
-  | "enum";
+// The data schema is renderer- and feature-neutral: it now lives in ./schema
+// so applications can declare one without reaching into the integration API.
+// These aliases keep every shipped `*IntegrationSchema*` name working.
 
-export interface FarmIntegrationSchemaReference {
-  model: string;
-  field: string;
-  relation?: "belongsTo" | "hasOne" | "hasMany";
-  onDelete?: "cascade" | "restrict" | "setNull" | "noAction";
-  enforced?: "db" | "app" | "none";
-}
+/** @deprecated Use `FarmSchemaFieldType`. */
+export type FarmIntegrationSchemaFieldType = FarmSchemaFieldType;
 
-export interface FarmIntegrationSchemaField {
-  type: FarmIntegrationSchemaFieldType;
-  name?: string;
-  description?: string;
-  required?: boolean;
-  nullable?: boolean;
-  primaryKey?: boolean;
-  unique?: boolean;
-  index?: boolean;
-  list?: boolean;
-  default?: unknown;
-  values?: readonly string[];
-  reference?: FarmIntegrationSchemaReference;
-  meta?: Record<string, unknown>;
-}
+/** @deprecated Use `FarmSchemaReference`. */
+export type FarmIntegrationSchemaReference = FarmSchemaReference;
 
-export interface FarmIntegrationSchemaConstraint {
-  type: "unique" | "index";
-  fields: readonly string[];
-  name?: string;
-  meta?: Record<string, unknown>;
-}
+/** @deprecated Use `FarmSchemaField`. */
+export type FarmIntegrationSchemaField = FarmSchemaField;
 
-export interface FarmIntegrationSchemaModel {
-  name?: string;
-  description?: string;
-  fields: Record<string, FarmIntegrationSchemaField>;
-  constraints?: readonly FarmIntegrationSchemaConstraint[];
-  meta?: Record<string, unknown>;
-}
+/** @deprecated Use `FarmSchemaConstraint`. */
+export type FarmIntegrationSchemaConstraint = FarmSchemaConstraint;
 
-export interface FarmIntegrationSchemaModelExtension {
-  name?: string;
-  description?: string;
-  fields?: Record<string, FarmIntegrationSchemaField>;
-  constraints?: readonly FarmIntegrationSchemaConstraint[];
-  meta?: Record<string, unknown>;
-}
+/** @deprecated Use `FarmSchemaModel`. */
+export type FarmIntegrationSchemaModel = FarmSchemaModel;
 
-export interface FarmIntegrationSchemaModelOverride {
-  name?: string;
-  description?: string;
-  fields?: Record<string, Partial<FarmIntegrationSchemaField>>;
-  constraints?: readonly FarmIntegrationSchemaConstraint[];
-  meta?: Record<string, unknown>;
-}
+/** @deprecated Use `FarmSchemaModelExtension`. */
+export type FarmIntegrationSchemaModelExtension = FarmSchemaModelExtension;
 
-export interface FarmIntegrationSchema {
-  models: Record<string, FarmIntegrationSchemaModel>;
-  meta?: Record<string, unknown>;
-  extend?: Record<string, FarmIntegrationSchemaModelExtension>;
-  override?: Record<string, FarmIntegrationSchemaModelOverride>;
-}
+/** @deprecated Use `FarmSchemaModelOverride`. */
+export type FarmIntegrationSchemaModelOverride = FarmSchemaModelOverride;
 
-export function defineIntegrationSchema<TSchema extends FarmIntegrationSchema>(
-  schema: TSchema,
-): TSchema {
-  return schema;
-}
+/** @deprecated Use `FarmSchema`. */
+export type FarmIntegrationSchema = FarmSchema;
+
+/** @deprecated Use `defineSchema`. This is an exact alias, not a wrapper. */
+export const defineIntegrationSchema = defineSchema;
 
 export type FarmIntegrationLogPhase =
   | "registered"
@@ -1377,6 +1431,12 @@ export function matchIntegrationRoute(
     return null;
   }
 
+  const method = normalizeIntegrationRequestMethod(input.method);
+  if (!method) {
+    return null;
+  }
+  const pathSegments = canonicalizeRequestPathSegments(input.pathname);
+
   for (const [key, integration] of Object.entries(integrations)) {
     if (!integration || !isFarmIntegration(integration)) {
       continue;
@@ -1385,11 +1445,11 @@ export function matchIntegrationRoute(
     const routes = normalizeIntegrationRoutes(integration.routes || []);
 
     for (const route of routes) {
-      if (!matchesMethod(route.methods, input.method)) {
+      if (!matchesMethod(route.methods, method)) {
         continue;
       }
 
-      const params = extractPathParams(route.path, input.pathname);
+      const params = matchPathSegments(route[INTEGRATION_ROUTE_SEGMENTS], pathSegments);
       if (!params) {
         continue;
       }
@@ -1476,9 +1536,9 @@ function getIntegrationRuntimeEnv(): Record<string, string | undefined> {
   return typeof process !== "undefined" ? process.env : {};
 }
 
-function isIntegrationConfigDefinition(
-  value: unknown,
-): value is FarmIntegrationConfigDefinition<unknown> {
+function isIntegrationConfigDefinition<TConfig, TSchema extends FarmIntegrationSchema | undefined>(
+  value: FarmIntegrationConfigInput<TConfig, TSchema>,
+): value is FarmIntegrationConfigDefinition<TConfig, TSchema> {
   return (
     !!value &&
     typeof value === "object" &&
@@ -1890,6 +1950,8 @@ function createIntegrationPlugin(integrationKey: string, integration: FarmIntegr
       const fullUrl = `http://${req.headers.host || "localhost"}${req.url || "/"}`;
       const url = new URL(fullUrl);
       const pathname = url.pathname;
+      const pathSegments = canonicalizeRequestPathSegments(pathname);
+      const method = normalizeIntegrationRequestMethod(req.method);
       const requestId = getRequestId(req);
       let bodyLoaded = false;
       let requestBody: Buffer | undefined;
@@ -1959,6 +2021,23 @@ function createIntegrationPlugin(integrationKey: string, integration: FarmIntegr
 
         try {
           const response = await entry.handler(request, handlerContext);
+
+          // A middleware that returns `void` lets the request continue to the
+          // downstream route/page handler, so its rotated `Set-Cookie` values
+          // cannot ride on its own response. It hands them to the runtime via
+          // forwardIntegrationSetCookies; merge them onto the Node response now
+          // (appending, so a later short-circuit Response or the page renderer
+          // can add its own Set-Cookie without dropping these). Read-and-clear
+          // so multiple middleware for one request each forward at most once.
+          const forwardedCookies = takeForwardedIntegrationSetCookies(handlerContext);
+          if (forwardedCookies.length > 0) {
+            const setCookieHeaders = new Headers();
+            for (const cookie of forwardedCookies) {
+              setCookieHeaders.append("set-cookie", cookie);
+            }
+            applyWebResponseHeaders(res, setCookieHeaders, { appendSetCookie: true });
+          }
+
           if (response) {
             await sendWebResponse(res, response);
             await emitIntegrationLog(integration, {
@@ -2017,9 +2096,10 @@ function createIntegrationPlugin(integrationKey: string, integration: FarmIntegr
       }
 
       for (const route of routes) {
-        const params = matchesMethod(route.methods, req.method)
-          ? extractPathParams(route.path, pathname)
-          : null;
+        const params =
+          method && matchesMethod(route.methods, method)
+            ? matchPathSegments(route[INTEGRATION_ROUTE_SEGMENTS], pathSegments)
+            : null;
         if (!params) {
           continue;
         }
@@ -2238,12 +2318,29 @@ function createIntegrationHandlerContext(input: {
 type NormalizedIntegrationRoute = Omit<FarmIntegrationRoute, "method" | "methods"> & {
   methods: readonly string[];
   __operation?: FarmIntegrationAPIOperation<any, any, any, any, any>;
+  [INTEGRATION_ROUTE_SEGMENTS]: readonly string[];
 };
+
+const INTEGRATION_ROUTE_SEGMENTS = Symbol("farm.integrationRouteSegments");
+const EMPTY_NORMALIZED_INTEGRATION_ROUTES: NormalizedIntegrationRoute[] = [];
+const normalizedIntegrationRoutesCache = new WeakMap<
+  readonly FarmIntegrationRoute[],
+  NormalizedIntegrationRoute[]
+>();
 
 function normalizeIntegrationRoutes(
   routes: readonly FarmIntegrationRoute[],
 ): NormalizedIntegrationRoute[] {
-  return routes
+  if (routes.length === 0) {
+    return EMPTY_NORMALIZED_INTEGRATION_ROUTES;
+  }
+
+  const cached = normalizedIntegrationRoutesCache.get(routes);
+  if (cached) {
+    return cached;
+  }
+
+  const normalized = routes
     .map((route, index) => {
       // Raw FarmIntegration objects and direct dispatch also pass through here.
       assertUniqueRouteParameters(route.path, "api");
@@ -2253,6 +2350,7 @@ function normalizeIntegrationRoutes(
           ...route,
           methods: normalizeIntegrationRouteMethods(route),
           input: normalizeIntegrationRouteInputSchemas(route),
+          [INTEGRATION_ROUTE_SEGMENTS]: splitPath(route.path),
         },
         specificity: getRoutePatternSpecificity(route.path, "api"),
       };
@@ -2262,6 +2360,9 @@ function normalizeIntegrationRoutes(
         compareRouteSpecificity(left.specificity, right.specificity) || left.index - right.index,
     )
     .map(({ route }) => route);
+
+  normalizedIntegrationRoutesCache.set(routes, normalized);
+  return normalized;
 }
 
 function normalizeIntegrationRouteMethods(route: Pick<FarmIntegrationRoute, "method" | "methods">) {
@@ -2751,6 +2852,15 @@ export async function dispatchIntegrationRequest(
     currentRequest?: Request;
     data?: FarmIntegrationData;
     internal?: boolean;
+    /**
+     * Receives `Set-Cookie` values that a middleware forwarded via
+     * forwardIntegrationSetCookies while returning `void`, when this dispatch
+     * ends without a Response of its own. The request continues downstream, so
+     * the caller owns merging them onto whatever response it finally produces.
+     * Only called on the `null` return path: a Response returned from here has
+     * already had the forwarded cookies appended.
+     */
+    onForwardedCookies?: (cookies: string[]) => void;
   } = {},
 ): Promise<Response | null> {
   try {
@@ -2772,7 +2882,17 @@ export async function dispatchIntegrationRequest(
     options.currentRequest?.headers.get("x-request-id") ||
     String(Date.now());
   const routes = normalizeIntegrationRoutes(integration.routes || []);
+  const pathSegments = canonicalizeRequestPathSegments(pathname);
+  const method = normalizeIntegrationRequestMethod(request.method);
   const middleware = [...(integration.middleware || [])];
+
+  // Cookies an integration middleware forwards via forwardIntegrationSetCookies
+  // while returning `void` (letting the request continue). They are merged onto
+  // whichever Response this dispatch ultimately returns so a server-side
+  // refresh/rotation reaches the browser instead of being dropped. Top-level
+  // and per-route middleware both contribute here; read-and-clear keeps each
+  // batch applied at most once.
+  const forwardedSetCookies: string[] = [];
 
   for (const entry of middleware) {
     const params = resolveMatcherParams(entry.matcher, pathname);
@@ -2814,6 +2934,7 @@ export async function dispatchIntegrationRequest(
 
     try {
       const response = await entry.handler(request, handlerContext);
+      forwardedSetCookies.push(...takeForwardedIntegrationSetCookies(handlerContext));
       if (response) {
         await emitIntegrationLog(integration, {
           category: integration.category,
@@ -2831,7 +2952,7 @@ export async function dispatchIntegrationRequest(
           durationMs: Date.now() - startedAt,
           context: handlerContext.req.snapshot(),
         });
-        return response;
+        return appendIntegrationForwardedCookies(response, forwardedSetCookies);
       }
 
       await emitIntegrationLog(integration, {
@@ -2871,9 +2992,10 @@ export async function dispatchIntegrationRequest(
   }
 
   for (const route of routes) {
-    const params = matchesMethod(route.methods, request.method)
-      ? extractPathParams(route.path, pathname)
-      : null;
+    const params =
+      method && matchesMethod(route.methods, method)
+        ? matchPathSegments(route[INTEGRATION_ROUTE_SEGMENTS], pathSegments)
+        : null;
     if (!params) {
       continue;
     }
@@ -2929,12 +3051,13 @@ export async function dispatchIntegrationRequest(
           durationMs: Date.now() - startedAt,
           context: handlerContext.req.snapshot(),
         });
-        return validation.response;
+        return appendIntegrationForwardedCookies(validation.response, forwardedSetCookies);
       }
       handlerContext.input = validation.input;
 
       for (const middlewareEntry of route.middleware || []) {
         const middlewareResponse = await middlewareEntry.handler(request, handlerContext);
+        forwardedSetCookies.push(...takeForwardedIntegrationSetCookies(handlerContext));
         if (middlewareResponse) {
           await emitIntegrationLog(integration, {
             category: integration.category,
@@ -2952,7 +3075,7 @@ export async function dispatchIntegrationRequest(
             durationMs: Date.now() - startedAt,
             context: handlerContext.req.snapshot(),
           });
-          return middlewareResponse;
+          return appendIntegrationForwardedCookies(middlewareResponse, forwardedSetCookies);
         }
       }
 
@@ -2980,7 +3103,7 @@ export async function dispatchIntegrationRequest(
           durationMs: Date.now() - startedAt,
           context: handlerContext.req.snapshot(),
         });
-        return response;
+        return appendIntegrationForwardedCookies(response, forwardedSetCookies);
       }
 
       const handlerResponse = await route.handler(request, handlerContext);
@@ -3006,7 +3129,7 @@ export async function dispatchIntegrationRequest(
         durationMs: Date.now() - startedAt,
         context: handlerContext.req.snapshot(),
       });
-      return response;
+      return appendIntegrationForwardedCookies(response, forwardedSetCookies);
     } catch (error) {
       await emitIntegrationLog(integration, {
         category: integration.category,
@@ -3028,7 +3151,76 @@ export async function dispatchIntegrationRequest(
     }
   }
 
+  // Nothing here produced a Response, so the request continues downstream. A
+  // middleware that returned `void` may still have rotated auth cookies; hand
+  // them to the caller instead of dropping them, because the response they
+  // belong on is the one the page/API handler is about to produce.
+  if (forwardedSetCookies.length > 0) {
+    options.onForwardedCookies?.(forwardedSetCookies);
+  }
+
   return null;
+}
+
+/**
+ * Run every configured integration's middleware and routes for one request.
+ *
+ * Integration middleware is not route scoped: it is the mechanism behind
+ * `protectedRoutes` guards and provider session refresh, so it has to run for
+ * ordinary page and API requests that match no integration route at all. That
+ * makes this, not `matchIntegrationRoute`, the correct entry point for a
+ * runtime dispatching integrations for every request.
+ *
+ * The first integration that produces a Response short-circuits the rest.
+ * `Set-Cookie` values forwarded by middleware that returned `void` are
+ * collected: they ride the short-circuiting Response when there is one, and are
+ * otherwise handed back so the caller can merge them onto the downstream
+ * response.
+ */
+export async function dispatchIntegrationRequests(
+  integrations: FarmIntegrationsUserConfig | undefined,
+  runtime: Omit<RegisteredIntegrationRuntime, "integration">,
+  request: Request,
+  options: { currentRequest?: Request } = {},
+): Promise<{ response: Response | null; setCookies: string[] }> {
+  const setCookies: string[] = [];
+  if (!integrations) {
+    return { response: null, setCookies };
+  }
+
+  for (const integration of Object.values(integrations)) {
+    if (!integration || !isFarmIntegration(integration)) {
+      continue;
+    }
+
+    // Skip integrations that mount no request handlers at all so they do not
+    // pay for body buffering on every request.
+    const hasMiddleware = (integration.middleware || []).length > 0;
+    const hasRoutes = normalizeIntegrationRoutes(integration.routes || []).length > 0;
+    if (!hasMiddleware && !hasRoutes) {
+      continue;
+    }
+
+    const response = await dispatchIntegrationRequest(
+      { ...runtime, integration },
+      // Each dispatch buffers the body it is given, so hand every integration
+      // its own clone rather than a Request another dispatch already read.
+      request.clone(),
+      {
+        currentRequest: options.currentRequest,
+        onForwardedCookies: (cookies) => setCookies.push(...cookies),
+      },
+    );
+
+    if (response) {
+      return {
+        response: appendIntegrationForwardedCookies(response, setCookies),
+        setCookies: [],
+      };
+    }
+  }
+
+  return { response: null, setCookies };
 }
 
 (globalThis as GlobalWithIntegrationRuntimeRegistry)[INTEGRATION_REQUEST_DISPATCHER_KEY] =
@@ -3200,16 +3392,12 @@ function createWebRequest(req: FarmRequest, fullUrl: string, body?: Buffer): Req
   });
 }
 
-function matchesMethod(methods: readonly string[], method: string | undefined): boolean {
-  if (!method) {
-    return false;
-  }
+function normalizeIntegrationRequestMethod(method: string | undefined): string | undefined {
+  return method ? method.toUpperCase() : undefined;
+}
 
-  const normalizedMethod = method.toUpperCase();
-  return methods.some((item) => {
-    const candidate = item.toUpperCase();
-    return candidate === "ALL" || candidate === normalizedMethod;
-  });
+function matchesMethod(methods: readonly string[], normalizedMethod: string): boolean {
+  return methods.some((candidate) => candidate === "ALL" || candidate === normalizedMethod);
 }
 
 function matchesMatcher(
@@ -3228,18 +3416,28 @@ function resolveMatcherParams(
   }
 
   const list = Array.isArray(matcher) ? matcher : [matcher];
+  // An integration matcher is a guard (`protectedRoutes` compiles straight into
+  // one), so it has to see the same pathname the route matchers do. Comparing
+  // the raw pathname let `/%64ashboard` miss a `/dashboard` matcher while the
+  // page router still served the protected page. Resolved on first use so a
+  // match-everything matcher stays allocation free.
+  let canonicalPathname: string | undefined;
+  let canonicalSegments: string[] | undefined;
+
   for (const item of list) {
     if (item === "/(.*)" || item === "*") {
       return {};
     }
     if (item.endsWith("(.*)")) {
+      canonicalPathname ??= canonicalizeRequestPathname(pathname);
       const prefix = item.slice(0, -4);
-      if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
+      if (canonicalPathname === prefix || canonicalPathname.startsWith(`${prefix}/`)) {
         return {};
       }
       continue;
     }
-    const params = extractPathParams(item, pathname);
+    canonicalSegments ??= canonicalizeRequestPathSegments(pathname);
+    const params = matchPathSegments(splitPath(item), canonicalSegments);
     if (params) {
       return params;
     }
@@ -3248,13 +3446,17 @@ function resolveMatcherParams(
   return null;
 }
 
-function matchesPath(pattern: string, pathname: string): boolean {
-  return extractPathParams(pattern, pathname) !== null;
-}
-
-function extractPathParams(pattern: string, pathname: string): FarmIntegrationRouteParams | null {
-  const routeSegments = splitPath(pattern);
-  const pathSegments = splitPath(pathname);
+/**
+ * Walk an integration route pattern against already-canonical request segments.
+ *
+ * `pathSegments` arrive decoded exactly once, so nothing here decodes again: a
+ * second pass would turn a literal `%2541BC` segment into `ABC` and resolve a
+ * record the request never asked for.
+ */
+function matchPathSegments(
+  routeSegments: readonly string[],
+  pathSegments: readonly string[],
+): FarmIntegrationRouteParams | null {
   const params: FarmIntegrationRouteParams = {};
 
   let routeIndex = 0;
@@ -3265,14 +3467,12 @@ function extractPathParams(pattern: string, pathname: string): FarmIntegrationRo
     const pathSegment = pathSegments[pathIndex];
 
     if (isCatchAllSegment(routeSegment)) {
-      params[getSegmentParamName(routeSegment)] = pathSegments
-        .slice(pathIndex)
-        .map((segment) => decodeRouteSegment(segment));
+      params[getSegmentParamName(routeSegment)] = pathSegments.slice(pathIndex);
       return params;
     }
 
     if (isDynamicSegment(routeSegment)) {
-      params[getSegmentParamName(routeSegment)] = decodeRouteSegment(pathSegment);
+      params[getSegmentParamName(routeSegment)] = pathSegment;
       routeIndex += 1;
       pathIndex += 1;
       continue;

@@ -13,11 +13,14 @@ Call app API routes with apiClient.hello.get style inference, cache policies, in
 **src/lib/api.ts**
 
 ```ts
-import { createApiClients } from "@farm.js/core/client";
+import { createApiClients } from "@farm.js/core/api/client";
 import { apiRoutes, type APIRouter } from "./api.generated";
 
 export const { api, apiClient } = createApiClients<APIRouter>({ routes: apiRoutes });
 ```
+
+`@farm.js/core/api/client` is the renderer-neutral entry for typed API callers. The existing
+`@farm.js/core/client` export remains supported for React apps that also use Farm's client hooks.
 
 Define each endpoint once in a file route or plugin. This shared module imports only generated
 paths/methods and types, never server handlers or credentials. Import `api` in server code and
@@ -264,11 +267,16 @@ await apiClient.posts.get({ query: { tag: ["react", "vite"] } });
 ```
 
 This is the same array representation that API route query schemas receive.
+Query values must be strings, numbers, booleans, bigints, or arrays of those scalar values;
+`null` and `undefined` entries are omitted. Nested objects are rejected instead of being silently
+encoded as `[object Object]`. Untyped callers may also pass `URLSearchParams` directly when they
+need its native ordering, duplicate-key, and encoding semantics.
 
 ## Scoped dynamic routes
 
-`farm generate`, development startup, and production builds emit `apiRoutes` alongside
-`APIRouter` in `src/lib/api.generated.ts`. Pass that manifest to enable parameter resolution:
+Once an app has API routes, `farm generate`, development startup, and production builds emit
+`apiRoutes` alongside `APIRouter` in `src/lib/api.generated.ts`. An app without API routes gets no
+such file. Pass that manifest to enable parameter resolution:
 
 ```ts
 import { createApiClients } from "@farm.js/core/client";
@@ -450,12 +458,66 @@ const product = await createProduct.mutateAsync({
 ```
 
 The return value includes `data`, `error`, `variables`, `status`, `pending`, and `reset`. Pass the
-existing API-client cache, retry, invalidation, and optimistic options through `request`. Local
-`optimistic` state on `useMutation` is separate from an API cache update: it controls
-`mutation.data`, while `request.optimistic` updates shared cached queries.
+existing API-client cache, retry, invalidation, and optimistic options through `request`. A
+server-function target honors `request.retry`, `request.optimistic`, and `request.invalidate`
+with the same shapes; the remaining `request` options describe API-route transport and continue
+to apply to API routes only. Local `optimistic` state on `useMutation` is separate from an API
+cache update: it controls `mutation.data`, while `request.optimistic` updates shared cached
+queries.
+
+For a server-function target, optimistic updates and invalidations name explicit structured cache
+keys, since the shared cache is the surface a server function can reach:
+
+```tsx
+const rename = useMutation(renameProduct, {
+  request: {
+    optimistic: {
+      update: [[["product", id], (current) => ({ ...current, name })]],
+      rollbackOnError: true,
+    },
+    invalidate: [["product", id]],
+  },
+});
+```
+
+The updater applies to the shared client cache before the server function runs, so a
+`useServerQuery` watching `["product", id]` renders the new name immediately. On success the
+update commits and the invalidation travels the shared invalidation bus, exactly like a
+server-declared `invalidates`; on failure `rollbackOnError` restores the previous entry, and
+without it the touched entry is marked stale. Route-reference tuples such as
+`[apiClient.products.get]` need an API caller's route identity and are skipped for
+server-function targets; server-side keys the client cannot know about belong in the server
+function's own `invalidates`.
 Each local optimistic callback receives the latest scheduled mutation data, even when multiple
 submissions occur before React rerenders. With `rollbackOnError: true`, a failed latest submission
 restores the snapshot captured immediately before that submission's optimistic update.
+
+### Pause offline submissions
+
+By default a mutation dispatches regardless of connectivity and a submission with no network
+fails after its retries. Opt into offline awareness with `networkMode: "online"`:
+
+```tsx
+const createProduct = useMutation(apiClient.products.post, {
+  networkMode: "online",
+});
+
+// createProduct.paused is true while the browser is offline;
+// the submission dispatches automatically on the `online` event.
+```
+
+While the browser reports offline, a new submission waits in a `paused` state instead of
+dispatching, and a dispatch that failed with a connectivity error while offline pauses and
+rides the next reconnect instead of surfacing that error. `pending` stays true and `status`
+stays `"pending"` for a paused submission; the new `paused` flag distinguishes "waiting for
+connection" from "on the wire" so the UI can say so. Paused submissions resume in submission
+order on the `online` event. `reset()` rejects paused submissions immediately rather than
+leaving them waiting, and a disowned submission never dispatches after a later reconnect.
+Optimistic state applied before the pause stays visible while waiting.
+
+The pause window is in-memory: a reload drops paused submissions, so keep them short-lived and
+surface `paused` to the user. `useFetcher` accepts the same option and exposes the same flag.
+The default `networkMode: "always"` preserves existing behavior exactly.
 
 For overlapping submissions, `status`, `data`, and `error` describe the latest submission.
 Older completions do not replace its result or run completion callbacks. `pending` separately
@@ -506,12 +568,22 @@ export function CreateProductForm() {
 }
 ```
 
-The fetcher exposes `state` (`idle` or `submitting`), `status`, `pending`, `data`, `error`,
+The fetcher exposes `state` (`idle` or `submitting`), `status`, `pending`, `paused`, `data`, `error`,
 `variables`, the active `formData`, `submit`, `submitAsync`, `Form`, and `reset`. It uses the same
 optimistic updates, rollback, callbacks, typed errors, and API-client request options as
 `useMutation`.
 
-Generated API forms map fields to `{ body: ... }` by default, or `{ query: ... }` for GET routes.
+Generated API forms map text fields to a JSON `{ body: ... }` by default, or `{ query: ... }`
+for GET/HEAD routes. For body methods, `<fetcher.Form encType="multipart/form-data">` preserves
+the FormData body, including repeated fields and files. A submit button's `formEncType` can
+override the form encoding. Imperative `submit(formData)` / `submitAsync(formData)` also preserve
+multipart data when it contains a File or Blob; text-only imperative input keeps the JSON default.
+For a text-only multipart endpoint, pass `{ body: toFormData(values) }` directly or use a mapper
+that returns `{ body: formData }`. Unsafe field names are filtered without mutating the original
+FormData. `mapFormData` overrides these defaults, and server functions still receive FormData
+directly. Native file-upload forms should declare `encType="multipart/form-data"` so their
+pre-hydration fallback also transmits files.
+
 Use `mapFormData` when the validated input needs coercion or a different shape:
 
 ```tsx
@@ -548,11 +620,14 @@ callbacks under `request` still receive only API-client errors, not local mappin
 
 ## Client options
 
-- cache: choose cache-first, network-only, or stale-while-revalidate.
-- retry: retry transient failures with count and delay.
+- cache: choose cache-first, network-only, or stale-while-revalidate; `persist` allows the
+  configured [client cache adapter](#persist-the-client-cache) to store the read.
+- retry: retry transient failures with a non-negative integer count and a finite delay from 0 through 2,147,483,647 milliseconds.
 - invalidate: mark typed route keys stale after mutations.
 - optimistic: update cached query data before the server response returns.
 - onRequest, onResponse, onSuccess, onError, onSettled, and onStatus: observe the full client lifecycle.
+
+Lifecycle callbacks are non-awaited observers. Farm reports synchronous throws and rejected promises without changing the request result, retry decision, optimistic update, or settlement.
 
 `onResponse` is a transport observer. If it throws or returns a rejected promise, Farm reports that
 failure through the platform `reportError` hook (or the console fallback) without retrying or
@@ -585,9 +660,17 @@ public cache key. Invalidate session-specific reads when the same client logs in
 Private caches follow the lifetime of their caller: on runtimes with `WeakRef`, the shared
 invalidation channel does not keep an abandoned cache alive. Cleanup occurs during finalization
 or a later invalidation, not on a guaranteed schedule. Keep reusable callers at module scope;
-`gcTime` controls lazy expiration of individual entries, not caller disposal. Older runtimes
+`gcTime` controls expiration of individual entries, not caller disposal: an expired entry is
+evicted on its next read, and a periodic background sweep also removes expired entries that no
+consumer is watching, so unread keys do not accumulate in long-lived sessions. Older runtimes
 without `WeakRef` retain the existing strong subscription, so avoid repeatedly creating callers
 there. Request-local server caches do not subscribe to the global invalidation channel.
+Lazy expiry checks ownership only for the expired key and its aliases. Unrelated subscriptions
+and requests are not scanned on each expired read; aliases and invalidation metadata remain
+available while a related consumer or request still owns them.
+Explicit entry deletion follows the same metadata cleanup rules: unowned aliases and invalidation
+marks are released, while observed keys retain them until their last owner leaves. Deleting a key
+that has never held an entry does not discard an explicit invalidation made before its first write.
 
 Use `scope: "shared"` only for public data requested with `credentials: "omit"` and no custom
 headers that intentionally shares a structured key with route data or another API client:
@@ -688,6 +771,201 @@ Background refetch resolves current header defaults, does not reuse the old call
 or per-call callbacks, and never repeats optimistic updates or mutation invalidations. Shared
 lifecycle hooks still observe it. A failed refetch leaves the entry stale and does not fail the
 already successful mutation. Read recipes expire or are removed with their cache entries.
+
+## Cross-tab invalidation
+
+By default, invalidations stay inside the tab that produced them: a mutation in one tab marks
+keys stale there, while a second tab keeps its cached reads until its own focus or reconnect
+refresh fires. Opt into same-origin cross-tab propagation with
+`enableCrossTabCacheInvalidation`:
+
+```ts
+"use client";
+
+import { enableCrossTabCacheInvalidation } from "@farm.js/core/client";
+
+// Call once during client startup; returns a disposer.
+enableCrossTabCacheInvalidation();
+```
+
+Invalidations from mutations, server functions, and explicit cache invalidation are posted to a
+`BroadcastChannel` and applied in every other tab through the normal invalidation path, so
+mounted stale queries there refetch on their own. Only invalidation keys cross the channel,
+never cached data or responses, which leaves private and credentialed cache scoping untouched.
+Each tab refetches through its own credentials.
+
+The call is idempotent, safe during server rendering, and a no-op in environments without
+`BroadcastChannel`. Pass `channelName` to isolate multiple Farm apps served from one origin;
+enabling two different channel names in the same tab is an error.
+
+## Live invalidation across clients
+
+Cross-tab propagation stays inside one browser. To make a write in one user's session invalidate
+mounted reads in other connected sessions, expose an app-owned server-sent event route. Authenticate
+the request before creating the stream, and filter every key to the tenant or user allowed to
+observe it:
+
+```ts title="src/app/api/cache-events/route.ts"
+import { createFarmCacheInvalidationStream } from "@farm.js/core/cache";
+import { requireSession } from "../../../auth/server";
+
+export async function GET(request: Request) {
+  const session = await requireSession(request);
+
+  return createFarmCacheInvalidationStream({
+    signal: request.signal,
+    filter: (key) => key.startsWith(`org:${session.orgId}:`),
+  });
+}
+```
+
+Connect once during browser startup:
+
+```ts
+"use client";
+
+import { enableLiveCacheInvalidation } from "@farm.js/core/client";
+
+const dispose = enableLiveCacheInvalidation({
+  url: "/api/cache-events",
+});
+```
+
+Farm batches invalidations emitted in the same microtask, sends only encoded cache keys, and applies
+them through the ordinary client invalidation path. Mounted stale queries therefore refetch using
+their existing inputs, cache policy, and current browser credentials. Native `EventSource`
+reconnection handles transient disconnects; Farm's existing focus and reconnect revalidation covers
+events missed while the browser was offline.
+
+The stream is best-effort, not a durable event log: reconnects do not replay missed keys.
+To bound memory for slow clients, Farm limits queued encoded output to 64 KiB and each pending
+microtask batch to 1,024 distinct keys / 64 KiB of UTF-16 key data. Overflow (including an oversized
+key or encoded batch) errors the stream and releases its listener and heartbeat; EventSource can
+reconnect normally. Heartbeats are skipped while output is queued. Apps requiring guaranteed
+delivery should use a durable event source and explicitly resynchronize reads after reconnecting.
+
+The stream forwards events from the current server process. A multi-instance deployment needs a
+shared pub/sub backplane feeding each instance's invalidation bus. That is intentionally outside the
+first version of this API. The selected deployment target must also support a long-lived streaming
+response. Do not expose a broad stream or put sensitive tenant data in unscoped cache keys: event
+payloads contain keys, not cached values, but key names can still reveal information.
+
+`enableLiveCacheInvalidation` shares one `EventSource` for repeated calls with the same URL and
+credentials and closes it after the final disposer. Live events are not echoed through the optional
+cross-tab bridge, because every connected tab receives the server event directly. Set
+`withCredentials: true` only for a cross-origin endpoint that accepts credentialed EventSource
+requests.
+
+## Persist the client cache
+
+The browser cache is in memory: a reload starts cold. Opt into persistence by pointing
+`cache.client.adapter` at a client module and marking the reads that may be stored:
+
+```ts title="farm.config.ts"
+export default defineConfig({
+  cache: {
+    client: {
+      adapter: "./src/cache-adapter",
+    },
+  },
+});
+```
+
+The path resolves from the project root and the module is bundled into the browser entry — the
+server never imports it. Its default export implements five callbacks over any storage:
+
+```ts title="src/cache-adapter.ts"
+import { defineClientCacheAdapter, type PersistedEntry } from "@farm.js/core/client";
+
+const PREFIX = "farm-cache:";
+
+export default defineClientCacheAdapter({
+  async keys() {
+    return Object.keys(localStorage)
+      .filter((key) => key.startsWith(PREFIX))
+      .map((key) => key.slice(PREFIX.length));
+  },
+  async get(key) {
+    const raw = localStorage.getItem(PREFIX + key);
+    return raw ? (JSON.parse(raw) as PersistedEntry) : null;
+  },
+  async set(key, entry) {
+    localStorage.setItem(PREFIX + key, JSON.stringify(entry));
+  },
+  async delete(key) {
+    localStorage.removeItem(PREFIX + key);
+  },
+  async clear() {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(PREFIX)) localStorage.removeItem(key);
+    }
+  },
+});
+```
+
+Farm owns every policy decision — what may be stored, when writes flush, how entries load — and
+the adapter is plain keyed storage. `set` is an upsert; there is no separate create. An adapter
+over IndexedDB, OPFS, or a native bridge has the same shape, and the optional `setMany`/`getMany`
+batch methods let it use one transaction per flush. `storageClientCacheAdapter` wraps any
+Farm/unstorage-style key-value client into this contract, mirroring the server's
+`storageCacheAdapter`, so one KV implementation can serve both caches — against two physically
+separate stores.
+
+### Nothing persists without opting in
+
+Persisted data lives on the device, so persistence is allowlist-only. Mark reads where they are
+declared:
+
+```ts
+export const catalogQuery = createServerQuery({
+  key: () => ["catalog", "featured"],
+  staleTime: "5m",
+  persist: true,
+  async handler() {
+    return loadCatalog();
+  },
+});
+```
+
+```ts
+await apiClient.products.get(
+  { query: { category } },
+  {
+    cache: {
+      key: ["products", category],
+      policy: "stale-while-revalidate",
+      staleTime: 30_000,
+      persist: true,
+    },
+  },
+);
+```
+
+Only successful, `persist`-flagged entries in the shared cache are written, debounced in the
+background. Private and credentialed API caches never reach the adapter regardless of the flag.
+`cache.client` also accepts `version` — a build or deploy id salted into every entry so a deploy
+drops incompatible data — and an optional coarse `persistKey` filter on the engine.
+
+### Lifecycle and limits
+
+On startup, persisted entries load **stale-but-visible**: the data renders immediately and the
+normal stale-while-revalidate path refreshes it on first read, so freshness semantics do not
+change. Expired and version-mismatched entries are dropped during load. Deletes, garbage
+collection, and `clear()` mirror to the adapter. If the adapter fails — quota, private browsing,
+a broken driver — persistence disables itself for the session and the app continues memory-only;
+the cache is disposable by design.
+
+Call `clearPersistedCache()` on logout or any session change so the next visitor on a shared
+device cannot warm-start into another user's data:
+
+```ts
+import { clearPersistedCache } from "@farm.js/core/client";
+
+await clearPersistedCache();
+```
+
+Persistence stores confirmed reads only. Pending optimistic updates and in-flight mutations are
+never written; a reload drops them.
 
 ## Result shape
 
@@ -861,6 +1139,12 @@ HTTP routes; it only leaves integration access to the separate caller module.
 ## Server Function Form Actions
 
 `createServerFn` pairs with `useServerFn` when a mutation is naturally a form action. Use `optimistic` to show the next UI state immediately, then let the server result replace it when the action completes.
+
+Both hooks accept `retry` with the API client's shape, `{ count, delay }`, where `delay` is a
+fixed wait or an `(attempt) => ms` backoff starting at attempt `1`. The default remains a single
+attempt. Retries rerun the whole submission against the server function, so keep retried handlers
+idempotent. `reset()` stops a waiting retry: the submission rejects with its last error and no
+further attempts start.
 
 For both `useServerFn` and `useAction`, `reset()` restores `initialResult` (or `null`), clears
 the error, and returns the hook to idle. It does not cancel server work: promises from earlier
@@ -1076,6 +1360,12 @@ status. Unexpected exceptions remain sanitized as a generic `ServerActionError`,
 message, stack, or custom properties.
 
 Action references identify which function to execute; they are not authorization tokens. Check authentication, roles, tenant ownership, and resource access inside every action that reads or changes private data.
+
+### Call server functions from agents
+
+Add `mcp: { name: "..." }` to a server function or query and list it in `mcp.tools` to make it an
+[MCP tool](/docs/plugins/mcp#server-functions-and-queries). Agents then call the same function as
+your UI, through its own schema and middleware, without the browser action transport.
 
 ## Production notes
 

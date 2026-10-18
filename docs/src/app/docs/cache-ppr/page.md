@@ -13,6 +13,20 @@ Use shared runtime cache helpers, tag/path invalidation, ISR-style revalidation,
 Farm uses its process-local memory cache when `cache.adapter` is not configured. For multiple
 servers or ephemeral deployments, configure one shared adapter in `farm.config.ts`:
 
+The memory cache retains at most 1,024 entries by default and evicts the least recently used entry
+when it reaches that limit. Set `cache.maxEntries` to a larger positive integer when one process
+must keep a larger working set:
+
+```ts
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  cache: {
+    maxEntries: 4_096,
+  },
+});
+```
+
 ```bash
 pnpm add @farm.js/cache-redis ioredis
 ```
@@ -42,6 +56,11 @@ its original caller, but it cannot populate the newly configured cache.
 When a shared adapter is present, Farm uses it as the authoritative cache instead of adding an
 incoherent process-local front cache.
 
+The `cache` option also carries the browser-side counterpart: `cache.client.adapter` points at a
+client module that persists opt-in reads on the device. See
+[persist the client cache](/docs/api-client#persist-the-client-cache); the two adapters configure
+different caches on different machines and never share a store.
+
 ## Cache data
 
 **server data**
@@ -59,8 +78,47 @@ const products = await cache.getOrSet(key, () => fetchProducts(), {
 });
 ```
 
+`revalidate` is measured in seconds and must be a finite, non-negative number. `0` makes an entry
+immediately stale, while `false` explicitly disables time-based expiry. Invalid numeric values are
+rejected instead of being treated as an indefinite cache lifetime.
+
 `clear()` invalidates entries and any fills already in progress. Existing callers still receive
 their result, but an older fill cannot repopulate the cache after it has been cleared.
+
+## Memoize a function
+
+`unstable_cache()` wraps an async function so its results are cached and shared across requests,
+processes, and restarts.
+
+```ts
+import { unstable_cache } from "@farm.js/core/cache";
+
+const getProduct = unstable_cache(async (id: string) => fetchProduct(id), ["product"], {
+  tags: ["products"],
+  revalidate: 300,
+});
+```
+
+The cache key is built from the function's identity (its name and a hash of its source), the active
+locale, the `keyParts` array, and the call arguments. Identity comes from the source rather than the
+closure instance so the key stays stable across processes and restarts — which lets a shared adapter
+reuse entries between server instances.
+
+Because of that, **list every variable the function closes over that is not one of its arguments in
+`keyParts`.** Two closures with identical source text but different captured values otherwise share a
+cache entry and return each other's data:
+
+```ts
+// Collides: `table` is captured, not an argument, so it never reaches the key.
+const makeLoader = (table: string) => unstable_cache(async (id: string) => db.get(table, id));
+
+// Correct: the captured value disambiguates the two closures.
+const makeLoader = (table: string) =>
+  unstable_cache(async (id: string) => db.get(table, id), [table]);
+```
+
+Values passed as call arguments already participate in the key, so they do not need to be repeated
+in `keyParts`.
 
 ## Revalidate
 
@@ -76,7 +134,33 @@ revalidatePath("/pricing");
 `revalidatePath()` accepts a pathname or an HTTP(S) URL. Query strings and fragments do not change
 the cache path and are removed during normalization.
 
+### Invalidation counts under a shared adapter
+
+The `count` reported on invalidation events (`cache.revalidateTag`, `cache.revalidatePath`) and the
+`ppr.shell.invalidated` event are derived from Farm's process-local entry tracking. When a shared
+`cache.adapter` is configured, entries and PPR shells live in the adapter rather than in local
+memory, so these counts reflect only what the current process has tracked — they can read as `0`,
+and `ppr.shell.invalidated` may not be emitted, even though the invalidation is still propagated to
+the adapter and applied. Treat these counts and events as best-effort observability signals rather
+than a confirmation of how many entries or shells were affected across a distributed deployment.
+
 ## PPR shell
+
+Partial Prerendering is experimental and disabled by default. Enable it once in
+`farm.config.ts`, then opt routes in individually. Without the flag, route-level PPR
+declarations are ignored and those routes render fully dynamically.
+
+**farm.config.ts**
+
+```ts
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  experimental: {
+    ppr: true,
+  },
+});
+```
 
 **src/app/dashboard/page.tsx**
 
@@ -88,6 +172,26 @@ export default function DashboardPage() {
   return <main>Static shell with dynamic sections</main>;
 }
 ```
+
+Farm's own `export const ppr = true` and a top-of-file `"use ppr"` (or `"use ppr; 60"`)
+directive are equivalent opt-ins; `experimental_ppr` matches the Next.js export name.
+`farm explain <path>` reports whether a route's PPR declaration is active or ignored.
+
+When Farm serves a cached shell with dynamic holes, the browser refresh request bypasses browser and
+shared HTTP caches. The completed response is private and is not stored, so the refresh cannot
+receive the same cached shell again.
+
+The client waits for a shell's background refresh before hydrating. Farm applies the completed
+response's page props, route slots, manifests, locale, and deferred values first, so hydration sees
+the same data that produced the refreshed HTML.
+
+The background refresh reconciles the completed response into the existing shell. Stable elements
+keep their DOM identity, focus, text selection, form values, and scroll position while server-owned
+attributes and content update.
+
+If the background refresh fails, hydration still proceeds after the first attempt. Farm retries a
+failed refresh with backoff, at most three times and only while the browser is online, and stops as
+soon as hydration starts, so a retry never replaces DOM the client has taken over.
 
 ## Cache keys and tags
 
@@ -192,7 +296,7 @@ export async function POST(request: Request) {
 
 ## PPR with Suspense holes
 
-PPR works best when the stable page shell is outside Suspense and request-specific or slow data lives inside Suspense.
+PPR works best when the stable page shell is outside Suspense and request-specific or slow data lives inside Suspense. As above, the route export only takes effect with `experimental.ppr` enabled in `farm.config.ts`.
 
 When a production render actually suspends, Farm currently buffers that response for late status
 errors and bypasses the shared PPR shell cache. This preserves fresh request-specific content

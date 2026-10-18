@@ -118,10 +118,16 @@ describe("msw Farm plugin", () => {
     };
     const closeListeners: Array<() => void> = [];
     const viteServer = {
-      ssrLoadModule: vi
-        .fn()
-        .mockResolvedValueOnce({ handlers: [firstHandler] })
-        .mockResolvedValueOnce({ handlers: [nextHandler] }),
+      environments: {
+        ssr: {
+          runner: {
+            import: vi
+              .fn()
+              .mockResolvedValueOnce({ handlers: [firstHandler] })
+              .mockResolvedValueOnce({ handlers: [nextHandler] }),
+          },
+        },
+      },
       moduleGraph: {
         getModulesByFile: vi.fn(() => new Set([handlerModule])),
       },
@@ -137,7 +143,7 @@ describe("msw Farm plugin", () => {
 
     await plugin.dev?.update?.({ file: dependency, modules: [] }, { state } as never);
     expect(mocks.resetHandlers).toHaveBeenCalledWith(nextHandler);
-    expect(viteServer.ssrLoadModule.mock.calls[1]?.[0]).toMatch(/\?farm-msw=\d+$/);
+    expect(viteServer.environments.ssr.runner.import.mock.calls[1]?.[0]).toMatch(/\?farm-msw=\d+$/);
 
     await plugin.runtime?.close?.({ state } as never);
     closeListeners[0]?.();
@@ -148,10 +154,44 @@ describe("msw Farm plugin", () => {
     const plugin = msw({ handlers: "src/mocks/handlers.ts", browser: false });
     await plugin.configure?.({ root: "/app", plugins: [plugin], vite: {} } as never, context(true));
     const state = await plugin.setup?.(context(true));
-    const viteServer = { ssrLoadModule: vi.fn(async () => ({ handlers: {} })) };
+    const viteServer = {
+      environments: { ssr: { runner: { import: vi.fn(async () => ({ handlers: {} })) } } },
+    };
 
     await expect(plugin.dev?.server?.(viteServer as never, { state } as never)).rejects.toThrow(
       "must export a handlers array",
     );
+  });
+  it("removes itself in production even when an integration re-created the plugin", async () => {
+    const plugin = msw({ handlers: "src/mocks/handlers.ts" });
+
+    // This is what withIntegrationPluginOwner does when an integration takes
+    // ownership of a contributed plugin: a new object with the same prototype
+    // and the same own property descriptors. It is not `plugin`, so an identity
+    // filter used to match nothing and leave farm:msw in the production config,
+    // which ships the dev runtime to the browser or dies on the unresolvable
+    // virtual handlers module.
+    const owned = Object.create(
+      Object.getPrototypeOf(plugin),
+      Object.getOwnPropertyDescriptors(plugin),
+    );
+    expect(owned).not.toBe(plugin);
+
+    const configured = await plugin.configure?.(
+      { root: "/app", plugins: [owned], vite: {} } as never,
+      context(false),
+    );
+
+    expect((configured as any).plugins).toEqual([]);
+  });
+
+  it("refuses to continue in production when it cannot remove itself", async () => {
+    const plugin = msw({ handlers: "src/mocks/handlers.ts" });
+
+    // A plugin list that does not contain this plugin at all means removal
+    // silently did nothing, which is the failure mode worth shouting about.
+    expect(() =>
+      plugin.configure?.({ root: "/app", plugins: [], vite: {} } as never, context(false)),
+    ).toThrow(/could not remove itself/);
   });
 });

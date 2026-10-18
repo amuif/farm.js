@@ -39,6 +39,11 @@ async function flushCompilerUpdates(): Promise<void> {
   await Promise.resolve();
 }
 
+function LocalFallbackCounter() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((previous) => previous + 1)}>Local: {count}</button>;
+}
+
 function rowDescriptor(item: Item): CompilerKeyedRowElement {
   return {
     kind: "element",
@@ -157,6 +162,91 @@ describe("compiled keyed-row runtime", () => {
     expect(listRenders).toBe(1);
   });
 
+  it("keeps ordered survivors on the removal fast path without hiding later reorders", async () => {
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    const Inventory = createCompiledComponent({
+      displayName: "MultiRemovalRows",
+      initialize: () => [
+        [
+          { id: "a", label: "Alpha" },
+          { id: "b", label: "Beta" },
+          { id: "c", label: "Gamma" },
+          { id: "d", label: "Delta" },
+          { id: "e", label: "Epsilon" },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <KeyedRows
+              id={0}
+              render={() => (
+                <ol>
+                  {items().map((item) => (
+                    <li data-key={item.id} key={item.id}>
+                      {item.label}
+                    </li>
+                  ))}
+                </ol>
+              )}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => rowDescriptor(item as Item)}
+              bindings={[{ kind: "text", path: [], read: (item) => [(item as Item).label] }]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const initial = new Map(
+      [...container.querySelectorAll<HTMLLIElement>("li")].map((row) => [row.dataset.key, row]),
+    );
+
+    await act(async () => {
+      setItems([
+        { id: "a", label: "Alpha!" },
+        { id: "c", label: "Gamma!" },
+        { id: "e", label: "Epsilon!" },
+      ]);
+      await flushCompilerUpdates();
+    });
+
+    let rows = [...container.querySelectorAll<HTMLLIElement>("li")];
+    expect(rows.map((row) => [row.dataset.key, row.textContent])).toEqual([
+      ["a", "Alpha!"],
+      ["c", "Gamma!"],
+      ["e", "Epsilon!"],
+    ]);
+    expect(rows).toEqual([initial.get("a"), initial.get("c"), initial.get("e")]);
+    expect(initial.get("b")?.isConnected).toBe(false);
+    expect(initial.get("d")?.isConnected).toBe(false);
+
+    await act(async () => {
+      setItems([
+        { id: "e", label: "Epsilon!!" },
+        { id: "a", label: "Alpha!!" },
+      ]);
+      await flushCompilerUpdates();
+    });
+
+    rows = [...container.querySelectorAll<HTMLLIElement>("li")];
+    expect(rows.map((row) => [row.dataset.key, row.textContent])).toEqual([
+      ["e", "Epsilon!!"],
+      ["a", "Alpha!!"],
+    ]);
+    expect(rows).toEqual([initial.get("e"), initial.get("a")]);
+  });
+
   it("uses LIS to move only the rows outside the stable subsequence", async () => {
     let setItems: (next: CompilerStateUpdater) => void = () => undefined;
     const Inventory = createCompiledComponent({
@@ -209,6 +299,163 @@ describe("compiled keyed-row runtime", () => {
 
     expect([...list.children].map((row) => row.textContent)).toEqual(["D", "A", "B", "C"]);
     expect(insertBefore).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { name: "an inner swap", order: [0, 6, 2, 3, 4, 5, 1, 7], moves: 2 },
+    { name: "a swap with the last row", order: [7, 1, 2, 3, 4, 5, 6, 0], moves: 2 },
+    { name: "an adjacent swap", order: [0, 1, 2, 4, 3, 5, 6, 7], moves: 1 },
+    { name: "a cycle around unmoved rows", order: [0, 6, 2, 3, 1, 5, 4, 7], moves: 3 },
+    { name: "a rotation", order: [7, 0, 1, 2, 3, 4, 5, 6], moves: 1 },
+    {
+      name: "a reorder past the moved-position limit",
+      order: Array.from({ length: 100 }, (_, index) => 99 - index),
+      moves: 99,
+    },
+  ])("moves only the reordered rows for $name", async ({ order, moves }) => {
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    let listRenders = 0;
+    const initial: Item[] = Array.from({ length: order.length }, (_, index) => ({
+      id: `row-${index}`,
+      label: `Row ${index}`,
+    }));
+    const Inventory = createCompiledComponent({
+      displayName: "MovedRows",
+      initialize: () => [initial],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <KeyedRows
+              id={0}
+              render={() => {
+                listRenders += 1;
+                return (
+                  <ol>
+                    {items().map((item) => (
+                      <li key={item.id}>{item.label}</li>
+                    ))}
+                  </ol>
+                );
+              }}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [],
+                styles: [],
+                children: [(item as Item).label],
+              })}
+              bindings={[{ kind: "text", path: [], read: (item) => [(item as Item).label] }]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const rendersAfterMount = listRenders;
+    const list = container.querySelector("ol")!;
+    const elements = [...list.children] as HTMLElement[];
+    // Focus a row that moves; moving it must not lose focus.
+    const focused = elements[order[1]];
+    focused.tabIndex = -1;
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+    const insertBefore = vi.spyOn(list, "insertBefore");
+
+    // Reorder and relabel one moved row in the same update.
+    await act(async () => {
+      setItems(
+        order.map((from, to) =>
+          to === 1 ? { ...initial[from], label: `Moved ${from}` } : initial[from],
+        ),
+      );
+      await flushCompilerUpdates();
+    });
+    expect([...list.children]).toEqual(order.map((from) => elements[from]));
+    expect([...list.children].map((row) => row.textContent)).toEqual(
+      order.map((from, to) => (to === 1 ? `Moved ${from}` : `Row ${from}`)),
+    );
+    expect(insertBefore).toHaveBeenCalledTimes(moves);
+    expect(document.activeElement).toBe(focused);
+    expect(listRenders).toBe(rendersAfterMount);
+
+    // The committed order is the new order: later updates find the right rows.
+    await act(async () => {
+      setItems((current: Item[]) => [
+        ...current.map((item, index) => (index === 0 ? { ...item, label: "First" } : item)),
+        { id: "appended", label: "Appended" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    const final = [...list.children];
+    expect(final.slice(0, order.length)).toEqual(order.map((from) => elements[from]));
+    expect(final[0].textContent).toBe("First");
+    expect(final.at(-1)?.textContent).toBe("Appended");
+    expect(listRenders).toBe(rendersAfterMount);
+  });
+
+  it("reconciles a same-length update that replaces a key", async () => {
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    const Inventory = createCompiledComponent({
+      displayName: "ReplacedKeyRows",
+      initialize: () => [["a", "b", "c", "d"]],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as string[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <KeyedRows
+              id={0}
+              render={() => (
+                <ol>
+                  {items().map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ol>
+              )}
+              items={items}
+              rowKey={(item) => item as string}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [],
+                styles: [],
+                children: [String(item)],
+              })}
+              bindings={[{ kind: "text", path: [], read: (item) => [String(item)] }]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const [a, b, , d] = container.querySelectorAll("li");
+
+    // "c" leaves and "x" arrives while "b" and "d" trade places.
+    await act(async () => {
+      setItems(["a", "d", "x", "b"]);
+      await flushCompilerUpdates();
+    });
+    const rows = [...container.querySelectorAll("li")];
+    expect(rows.map((row) => row.textContent)).toEqual(["a", "d", "x", "b"]);
+    expect([rows[0], rows[1], rows[3]]).toEqual([a, d, b]);
   });
 
   it("remounts the list under React when runtime keys are duplicated", async () => {
@@ -273,6 +520,263 @@ describe("compiled keyed-row runtime", () => {
     expect(listRenders).toBeGreaterThan(2);
     expect(container.querySelector("li")?.textContent).toBe("Safe again");
   });
+
+  it("matches React's string comparison of number and string row keys", async () => {
+    interface KeyedItem {
+      key: number | string;
+      label: string;
+    }
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    let listRenders = 0;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const Inventory = createCompiledComponent({
+      displayName: "MixedKeyRows",
+      initialize: () => [
+        [
+          { key: 1, label: "One" },
+          { key: 2, label: "Two" },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as KeyedItem[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <main>
+            <KeyedRows
+              id={0}
+              render={() => {
+                listRenders += 1;
+                return (
+                  <ul>
+                    {items().map((item) => (
+                      <li key={item.key}>{item.label}</li>
+                    ))}
+                  </ul>
+                );
+              }}
+              items={items}
+              rowKey={(item) => (item as KeyedItem).key}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [],
+                styles: [],
+                children: [(item as KeyedItem).label],
+              })}
+              bindings={[{ kind: "text", path: [], read: (item) => [(item as KeyedItem).label] }]}
+            />
+          </main>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const rendersAfterMount = listRenders;
+    const [one, two] = container.querySelectorAll("li");
+
+    // React keys "1" and 1 are the same key, so the rows move instead of remounting.
+    await act(async () => {
+      setItems([
+        { key: "2", label: "Two!" },
+        { key: "1", label: "One!" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")]).toEqual([two, one]);
+    expect(two.textContent).toBe("Two!");
+    expect(one.textContent).toBe("One!");
+
+    // "01" is not 1's spelling, so it is a different key.
+    await act(async () => {
+      setItems([
+        { key: 2, label: "Two" },
+        { key: "01", label: "Zero one" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    const rows = [...container.querySelectorAll("li")];
+    expect(rows[0]).toBe(two);
+    expect(rows[1]).not.toBe(one);
+    expect(rows[1].textContent).toBe("Zero one");
+    expect(listRenders).toBe(rendersAfterMount);
+
+    // 1 and "1" in one list are duplicates, which React owns.
+    await act(async () => {
+      setItems([
+        { key: 1, label: "Number" },
+        { key: "1", label: "String" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
+      "Number",
+      "String",
+    ]);
+    expect(listRenders).toBeGreaterThan(rendersAfterMount);
+
+    // Non-finite and signed spellings follow the same rule once the list is safe again.
+    await act(async () => {
+      setItems([
+        { key: "NaN", label: "NaN" },
+        { key: "Infinity", label: "Infinity" },
+        { key: "-1", label: "Minus one" },
+        { key: "1e+21", label: "Big" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    const special = [...container.querySelectorAll("li")];
+    await act(async () => {
+      setItems([
+        { key: 1e21, label: "Big" },
+        { key: -1, label: "Minus one" },
+        { key: Infinity, label: "Infinity" },
+        { key: Number.NaN, label: "NaN" },
+      ]);
+      await flushCompilerUpdates();
+    });
+    expect([...container.querySelectorAll("li")]).toEqual([...special].reverse());
+  });
+
+  it.each(
+    (["static", "hybrid"] as const).flatMap((reactivity) =>
+      (["mount", "hydrate"] as const).map((lifecycle) => ({ lifecycle, reactivity })),
+    ),
+  )(
+    "resets parent-prop duplicate-key fallback and preserves later safe updates ($reactivity, $lifecycle)",
+    async ({ lifecycle, reactivity }) => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const PropRows = createCompiledComponent<{ items: Item[] }>({
+        displayName: "PropDrivenFallbackRows",
+        reactivity,
+        initialize: () => [],
+        render(props, _state, blocks) {
+          const items = () => props.items;
+          const KeyedRows = blocks.KeyedRows;
+          return (
+            <main>
+              <KeyedRows
+                id={0}
+                render={() => (
+                  <section data-surface="prop-fallback-rows">
+                    <LocalFallbackCounter />
+                    <input aria-label="Draft" defaultValue="draft" />
+                    {items().map((item) => (
+                      <article data-key={item.id} key={item.id}>
+                        {item.label}
+                      </article>
+                    ))}
+                  </section>
+                )}
+                items={items}
+                rowKey={(item) => (item as Item).id}
+                create={(item) => rowDescriptor(item as Item)}
+                bindings={[{ kind: "text", path: [], read: (item) => [(item as Item).label] }]}
+              />
+            </main>
+          );
+        },
+        bindings: [{ kind: "block", id: 0, dependencies: [] }],
+      });
+      const duplicate = [
+        { id: "duplicate", label: "One" },
+        { id: "duplicate", label: "Two" },
+      ];
+      const safe = [
+        { id: "a", label: "Alpha" },
+        { id: "b", label: "Beta" },
+      ];
+      const tree = (items: Item[]) => (
+        <StrictMode>
+          <PropRows items={items} />
+        </StrictMode>
+      );
+      const container = document.createElement("div");
+      document.body.append(container);
+      if (lifecycle === "hydrate") container.innerHTML = renderToString(tree(duplicate));
+      const recoverable = vi.fn();
+      const root =
+        lifecycle === "hydrate"
+          ? hydrateRoot(container, tree(duplicate), { onRecoverableError: recoverable })
+          : createRoot(container);
+      roots.push(root);
+      await act(async () => {
+        if (lifecycle === "mount") root.render(tree(duplicate));
+        await flushCompilerUpdates();
+      });
+      expect(recoverable).not.toHaveBeenCalled();
+
+      const ambiguousSurface = container.querySelector<HTMLElement>(
+        "[data-surface='prop-fallback-rows']",
+      )!;
+      await act(async () => {
+        root.render(tree(safe));
+        await flushCompilerUpdates();
+      });
+      const recoveredSurface = container.querySelector<HTMLElement>(
+        "[data-surface='prop-fallback-rows']",
+      )!;
+      expect(recoveredSurface).not.toBe(ambiguousSurface);
+
+      await act(async () => recoveredSurface.querySelector("button")!.click());
+      const input = recoveredSurface.querySelector<HTMLInputElement>("input")!;
+      input.value = "typed";
+      input.focus();
+      input.setSelectionRange(1, 4, "backward");
+      await act(async () => {
+        root.render(
+          tree([
+            { id: "b", label: "Beta renamed" },
+            { id: "a", label: "Alpha renamed" },
+          ]),
+        );
+        await flushCompilerUpdates();
+      });
+      expect(container.querySelector("[data-surface='prop-fallback-rows']")).toBe(recoveredSurface);
+      expect(container.querySelector("input")).toBe(input);
+      expect(input.value).toBe("typed");
+      expect(recoveredSurface.querySelector("button")?.textContent).toBe("Local: 1");
+      expect(document.activeElement).toBe(input);
+      expect([input.selectionStart, input.selectionEnd, input.selectionDirection]).toEqual([
+        1,
+        4,
+        "backward",
+      ]);
+
+      await act(async () => {
+        root.render(tree(duplicate));
+        await flushCompilerUpdates();
+      });
+      const duplicateSurface = container.querySelector<HTMLElement>(
+        "[data-surface='prop-fallback-rows']",
+      )!;
+      expect(duplicateSurface).not.toBe(recoveredSurface);
+      expect(duplicateSurface.querySelector("button")?.textContent).toBe("Local: 0");
+
+      await act(async () => {
+        root.render(tree(safe));
+        await flushCompilerUpdates();
+      });
+      const safeSurface = container.querySelector<HTMLElement>(
+        "[data-surface='prop-fallback-rows']",
+      )!;
+      expect(safeSurface).not.toBe(duplicateSurface);
+      const safeInput = safeSurface.querySelector<HTMLInputElement>("input")!;
+      safeInput.value = "recovered";
+      await act(async () => {
+        root.render(tree([{ id: "a", label: "Alpha final" }]));
+        await flushCompilerUpdates();
+      });
+      expect(container.querySelector("[data-surface='prop-fallback-rows']")).toBe(safeSurface);
+      expect(container.querySelector("input")).toBe(safeInput);
+      expect(safeInput.value).toBe("recovered");
+    },
+  );
 
   it("combines parent props and local row updates without losing the newest values", async () => {
     let setPrefix: React.Dispatch<React.SetStateAction<string>> = () => undefined;
@@ -659,9 +1163,12 @@ describe("compiled keyed-row runtime", () => {
     expect(errors).toEqual([]);
   });
 
-  it("preserves compiler state and row identity across a compatible Fast Refresh", async () => {
+  it("refreshes static row markup while preserving state and identity", async () => {
     const hmrId = `keyed-rows-refresh-${Math.random()}`;
-    const definition = (prefix: string): CompiledComponentDefinition<Record<string, never>> => ({
+    const definition = (
+      prefix: string,
+      blockId = 0,
+    ): CompiledComponentDefinition<Record<string, never>> => ({
       displayName: "RefreshKeyedRows",
       hmrId,
       stateSignature: "1",
@@ -673,13 +1180,13 @@ describe("compiled keyed-row runtime", () => {
           <section>
             <button onClick={() => state[0].set([{ id: "a", label: "Updated" }])}>Update</button>
             <KeyedRows
-              id={0}
+              id={blockId}
               render={() => (
                 <ul>
                   {items().map((item) => (
                     <li data-key={item.id} key={item.id}>
-                      {prefix}
-                      {item.label}
+                      <span>{prefix}</span>
+                      <strong>{item.label}</strong>
                     </li>
                   ))}
                 </ul>
@@ -691,20 +1198,35 @@ describe("compiled keyed-row runtime", () => {
                 tag: "li",
                 attributes: [{ name: "data-key", value: (item as Item).id }],
                 styles: [],
-                children: [[prefix, (item as Item).label]],
+                children: [
+                  {
+                    kind: "element" as const,
+                    tag: "span",
+                    attributes: [],
+                    styles: [],
+                    children: [prefix],
+                  },
+                  {
+                    kind: "element" as const,
+                    tag: "strong",
+                    attributes: [],
+                    styles: [],
+                    children: [(item as Item).label],
+                  },
+                ],
               })}
               bindings={[
                 {
                   kind: "text" as const,
-                  path: [],
-                  read: (item: unknown) => [prefix, (item as Item).label],
+                  path: [1],
+                  read: (item: unknown) => [(item as Item).label],
                 },
               ]}
             />
           </section>
         );
       },
-      bindings: [{ kind: "block" as const, id: 0, dependencies: [0] }],
+      bindings: [{ kind: "block" as const, id: blockId, dependencies: [0] }],
     });
 
     const Initial = createCompiledComponent(definition("Before: "));
@@ -716,7 +1238,7 @@ describe("compiled keyed-row runtime", () => {
     const row = container.querySelector("li")!;
 
     await act(async () => {
-      const Updated = createCompiledComponent(definition("After: "));
+      const Updated = createCompiledComponent(definition("After: ", 1));
       expect(Updated).toBe(Initial);
       await flushCompilerUpdates();
     });
@@ -731,7 +1253,7 @@ describe("compiled keyed-row runtime", () => {
     expect(row.textContent).toBe("After: Updated");
   });
 
-  it("routes keyed-row binding failures through the nearest error boundary", async () => {
+  it("routes keyed-row binding failures atomically through the nearest error boundary", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     class Boundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
@@ -762,7 +1284,9 @@ describe("compiled keyed-row runtime", () => {
               render={() => (
                 <ul>
                   {items().map((item) => (
-                    <li key={item.id}>{item.label}</li>
+                    <li aria-selected={Boolean(item.selected)} key={item.id}>
+                      {item.label}
+                    </li>
                   ))}
                 </ul>
               )}
@@ -770,6 +1294,12 @@ describe("compiled keyed-row runtime", () => {
               rowKey={(item) => (item as Item).id}
               create={(item) => rowDescriptor(item as Item)}
               bindings={[
+                {
+                  kind: "attribute",
+                  path: [],
+                  name: "aria-selected",
+                  read: (item) => Boolean((item as Item).selected),
+                },
                 {
                   kind: "text",
                   path: [],
@@ -797,12 +1327,413 @@ describe("compiled keyed-row runtime", () => {
         </Boundary>,
       ),
     );
+    const row = container.querySelector("li")!;
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(row, { attributes: true });
 
     await act(async () => {
       container.querySelector("button")!.click();
       await flushCompilerUpdates();
     });
+    mutations.push(...observer.takeRecords());
+    observer.disconnect();
+
     expect(container.textContent).toBe("Recovered by boundary");
+    expect(row.isConnected).toBe(false);
+    expect(mutations).toEqual([]);
+  });
+
+  it("keeps stable keyed-row refreshes atomic when a later row binding fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    class Boundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+      state = { failed: false };
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      render() {
+        return this.state.failed ? <p>Recovered by boundary</p> : this.props.children;
+      }
+    }
+
+    const Inventory = createCompiledComponent({
+      displayName: "ThrowingStableKeyedRows",
+      initialize: () => [
+        [
+          { id: "a", label: "First", selected: false },
+          { id: "b", label: "Second", selected: false },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <button
+              onClick={() =>
+                state[0].set([
+                  { id: "a", label: "First", selected: true },
+                  { id: "b", label: "Broken", selected: true },
+                ])
+              }
+            >
+              Break later row
+            </button>
+            <KeyedRows
+              id={0}
+              render={() => (
+                <ul>
+                  {items().map((item) => (
+                    <li aria-selected={Boolean(item.selected)} key={item.id}>
+                      {item.label}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => rowDescriptor(item as Item)}
+              bindings={[
+                {
+                  kind: "attribute",
+                  path: [],
+                  name: "aria-selected",
+                  read: (item) => {
+                    if ((item as Item).label === "Broken") {
+                      throw new Error("later keyed row binding failed");
+                    }
+                    return Boolean((item as Item).selected);
+                  },
+                },
+              ]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <Boundary>
+          <Inventory />
+        </Boundary>,
+      ),
+    );
+    const firstRow = container.querySelector("li")!;
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(firstRow, { attributes: true });
+
+    await act(async () => {
+      container.querySelector("button")!.click();
+      await flushCompilerUpdates();
+    });
+    mutations.push(...observer.takeRecords());
+    observer.disconnect();
+
+    expect(container.textContent).toBe("Recovered by boundary");
+    expect(firstRow.isConnected).toBe(false);
+    expect(mutations).toEqual([]);
+  });
+
+  it("keeps single-removal row refreshes atomic when a later survivor binding fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    class Boundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+      state = { failed: false };
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      render() {
+        return this.state.failed ? <p>Recovered by boundary</p> : this.props.children;
+      }
+    }
+
+    const Inventory = createCompiledComponent({
+      displayName: "ThrowingSingleRemovalRows",
+      initialize: () => [
+        [
+          { id: "a", label: "First", selected: false },
+          { id: "remove", label: "Remove", selected: false },
+          { id: "b", label: "Last", selected: false },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <button
+              onClick={() =>
+                state[0].set([
+                  { id: "a", label: "First", selected: true },
+                  { id: "b", label: "Broken", selected: true },
+                ])
+              }
+            >
+              Remove and break later row
+            </button>
+            <KeyedRows
+              id={0}
+              render={() => (
+                <ul>
+                  {items().map((item) => (
+                    <li aria-selected={Boolean(item.selected)} key={item.id}>
+                      {item.label}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => rowDescriptor(item as Item)}
+              bindings={[
+                {
+                  kind: "attribute",
+                  path: [],
+                  name: "aria-selected",
+                  read: (item) => {
+                    if ((item as Item).label === "Broken") {
+                      throw new Error("later surviving row binding failed");
+                    }
+                    return Boolean((item as Item).selected);
+                  },
+                },
+              ]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <Boundary>
+          <Inventory />
+        </Boundary>,
+      ),
+    );
+    const firstRow = container.querySelector("li")!;
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(firstRow, { attributes: true });
+
+    await act(async () => {
+      container.querySelector("button")!.click();
+      await flushCompilerUpdates();
+    });
+    mutations.push(...observer.takeRecords());
+    observer.disconnect();
+
+    expect(container.textContent).toBe("Recovered by boundary");
+    expect(firstRow.isConnected).toBe(false);
+    expect(mutations).toEqual([]);
+  });
+
+  it("keeps multi-removal row refreshes atomic when a later survivor binding fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let bindingReads = 0;
+
+    class Boundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+      state = { failed: false };
+
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+
+      render() {
+        return this.state.failed ? <p>Recovered by boundary</p> : this.props.children;
+      }
+    }
+
+    const Inventory = createCompiledComponent({
+      displayName: "ThrowingMultiRemovalRows",
+      initialize: () => [
+        [
+          { id: "a", label: "First", selected: false },
+          { id: "remove-a", label: "Remove A", selected: false },
+          { id: "remove-b", label: "Remove B", selected: false },
+          { id: "b", label: "Last", selected: false },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <button
+              onClick={() =>
+                state[0].set([
+                  { id: "a", label: "First", selected: true },
+                  { id: "b", label: "Broken", selected: true },
+                ])
+              }
+            >
+              Remove two and break later row
+            </button>
+            <KeyedRows
+              id={0}
+              render={() => (
+                <ul>
+                  {items().map((item) => (
+                    <li aria-selected={Boolean(item.selected)} key={item.id}>
+                      {item.label}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => rowDescriptor(item as Item)}
+              bindings={[
+                {
+                  kind: "attribute",
+                  path: [],
+                  name: "aria-selected",
+                  read: (item) => {
+                    bindingReads += 1;
+                    if ((item as Item).label === "Broken") {
+                      throw new Error("later surviving row binding failed");
+                    }
+                    return Boolean((item as Item).selected);
+                  },
+                },
+              ]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <Boundary>
+          <Inventory />
+        </Boundary>,
+      ),
+    );
+    const initialRows = [...container.querySelectorAll("li")];
+    const firstRow = initialRows[0];
+    const removeStaleRow = vi.spyOn(initialRows[1], "remove");
+    const readsBeforeUpdate = bindingReads;
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(firstRow, { attributes: true });
+
+    await act(async () => {
+      container.querySelector("button")!.click();
+      await flushCompilerUpdates();
+    });
+    mutations.push(...observer.takeRecords());
+    observer.disconnect();
+
+    expect(container.textContent).toBe("Recovered by boundary");
+    expect(firstRow.isConnected).toBe(false);
+    expect(bindingReads - readsBeforeUpdate).toBe(2);
+    expect(removeStaleRow).not.toHaveBeenCalled();
+    expect(mutations).toEqual([]);
+  });
+
+  it("falls back when multi-removal leaves one row with a missing binding target", async () => {
+    let setItems: (next: CompilerStateUpdater) => void = () => undefined;
+    let listRenders = 0;
+    const Inventory = createCompiledComponent({
+      displayName: "MissingSingleSurvivorBindingTarget",
+      initialize: () => [
+        [
+          { id: "a", label: "Alpha" },
+          { id: "b", label: "Beta" },
+          { id: "c", label: "Gamma" },
+        ],
+      ],
+      render(_props: Record<string, never>, state, blocks) {
+        setItems = (next) => state[0].set(next);
+        const items = () => state[0].get() as Item[];
+        const KeyedRows = blocks.KeyedRows;
+        return (
+          <section>
+            <KeyedRows
+              id={0}
+              render={() => {
+                listRenders += 1;
+                return (
+                  <ul>
+                    {items().map((item) => (
+                      <li key={item.id}>
+                        <span>{item.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              }}
+              items={items}
+              rowKey={(item) => (item as Item).id}
+              create={(item) => ({
+                kind: "element",
+                tag: "li",
+                attributes: [],
+                styles: [],
+                children: [
+                  {
+                    kind: "element",
+                    tag: "span",
+                    attributes: [],
+                    styles: [],
+                    children: [(item as Item).label],
+                  },
+                ],
+              })}
+              bindings={[{ kind: "text", path: [0], read: (item) => [(item as Item).label] }]}
+            />
+          </section>
+        );
+      },
+      bindings: [{ kind: "block", id: 0, dependencies: [0] }],
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => root.render(<Inventory />));
+    const survivor = container.querySelector("li")!;
+    survivor.querySelector("span")!.remove();
+
+    await act(async () => {
+      setItems([{ id: "a", label: "Alpha" }]);
+      await flushCompilerUpdates();
+    });
+
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(container.querySelector("li")?.textContent).toBe("Alpha");
+    expect(container.querySelector("li")).not.toBe(survivor);
+    expect(listRenders).toBe(2);
+
+    await act(async () => {
+      setItems([{ id: "a", label: "Updated" }]);
+      await flushCompilerUpdates();
+    });
+    expect(container.querySelector("li")?.textContent).toBe("Updated");
   });
 
   it("matches React across 1,000 deterministic keyed operations", async () => {

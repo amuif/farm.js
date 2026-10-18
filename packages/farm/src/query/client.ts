@@ -17,6 +17,7 @@ import { emitter, type KeyUpdate } from "./sync";
 export { parseRouteParams, loadRouteParams, type RouteParamsInput } from "./params";
 
 import { asString as asStringClient, asInteger as asIntegerClient, type Parser } from "./parsers";
+import { parseQueryParameter } from "./values";
 
 export {
   asString,
@@ -67,10 +68,8 @@ const getCurrentSearchParams = (): URLSearchParams => {
   }
 };
 
-const readSearchParam = (searchParams: URLSearchParams, key: string): string => {
-  const values = searchParams.getAll(key);
-  return values.length > 1 ? values.join(",") : (values[0] ?? "");
-};
+const parseSearchParam = <T>(searchParams: URLSearchParams, key: string, parser: Parser<T>) =>
+  parseQueryParameter(parser, searchParams.getAll(key));
 
 const throttleTimers = new Map<
   string,
@@ -231,7 +230,7 @@ const updateURL = (
   updates: Record<string, string | null>,
   options: Options = {},
   emitUpdate = true,
-): (() => void) | undefined => {
+): (() => boolean) | undefined => {
   if (typeof window === "undefined") return;
 
   discardDepartedURLUpdates();
@@ -261,9 +260,10 @@ const updateURL = (
 
   throttleTimers.set(throttleKey, { timer: timeout, updates, href: currentUrl.href });
   return () => {
-    if (throttleTimers.get(throttleKey)?.timer !== timeout) return;
+    if (throttleTimers.get(throttleKey)?.timer !== timeout) return false;
     clearTimeout(timeout);
     throttleTimers.delete(throttleKey);
+    return true;
   };
 };
 
@@ -291,13 +291,13 @@ export function useQueryState<TParser extends Parser<any>>(
   type T = NonNullable<ReturnType<TParser["parse"]>>;
   const [state, setState] = useState<T | null>(() => {
     const searchParams = getCurrentSearchParams();
-    const parsed = parser.parse(readSearchParam(searchParams, key));
+    const parsed = parseSearchParam(searchParams, key, parser);
     return parsed;
   });
 
   const stateRef = useRef(state);
   const stateKeyRef = useRef(key);
-  const cancelPendingUpdateRef = useRef<(() => void) | undefined>(undefined);
+  const cancelPendingUpdateRef = useRef<(() => boolean) | undefined>(undefined);
   stateRef.current = state;
 
   const setValue = useCallback(
@@ -320,7 +320,7 @@ export function useQueryState<TParser extends Parser<any>>(
 
     const onPopState = () => {
       const searchParams = getCurrentSearchParams();
-      const parsed = parser.parse(readSearchParam(searchParams, key));
+      const parsed = parseSearchParam(searchParams, key, parser);
       const sourceChanged = stateKeyRef.current !== key;
       stateKeyRef.current = key;
       if (sourceChanged || !areParsedValuesEqual(parser, stateRef.current, parsed)) {
@@ -330,7 +330,7 @@ export function useQueryState<TParser extends Parser<any>>(
     };
 
     const onEmitterUpdate = (searchParams: URLSearchParams) => {
-      const parsed = parser.parse(readSearchParam(searchParams, key));
+      const parsed = parseSearchParam(searchParams, key, parser);
       if (!areParsedValuesEqual(parser, stateRef.current, parsed)) {
         setState(parsed);
         stateRef.current = parsed;
@@ -370,8 +370,15 @@ export function useQueryState<TParser extends Parser<any>>(
 
   useEffect(
     () => () => {
-      cancelPendingUpdateRef.current?.();
+      const canceledPendingWrite = cancelPendingUpdateRef.current?.() ?? false;
       cancelPendingUpdateRef.current = undefined;
+      // A throttled write is discarded on unmount, but its value was already
+      // broadcast to peers via emitKey. Peers that adopted the optimistic draft
+      // get no other reconciliation signal (unmount fires no history event), so
+      // tell them to re-read the URL, which no longer carries this draft.
+      if (canceledPendingWrite && typeof window !== "undefined") {
+        emitter.emitUpdate(getCurrentSearchParams());
+      }
     },
     [key],
   );
@@ -394,14 +401,14 @@ export function useQueryStates<T extends Record<string, Parser<any>>>(
     const result = {} as { [K in keyof T]: ReturnType<T[K]["parse"]> };
 
     Object.entries(parsers).forEach(([key, parser]) => {
-      result[key as keyof T] = parser.parse(readSearchParam(searchParams, key));
+      result[key as keyof T] = parseSearchParam(searchParams, key, parser);
     });
 
     return result;
   });
 
   const stateRef = useRef(state);
-  const pendingUpdatesRef = useRef(new Map<string, () => void>());
+  const pendingUpdatesRef = useRef(new Map<string, () => boolean>());
   stateRef.current = state;
 
   const setValues = useCallback(
@@ -450,7 +457,7 @@ export function useQueryStates<T extends Record<string, Parser<any>>>(
         currentKeys.some((key) => !Object.prototype.hasOwnProperty.call(parsers, key));
 
       Object.entries(parsers).forEach(([key, parser]) => {
-        const parsed = parser.parse(readSearchParam(searchParams, key));
+        const parsed = parseSearchParam(searchParams, key, parser);
         const currentValue = stateRef.current[key as keyof T];
 
         if (!areParsedValuesEqual(parser, currentValue, parsed)) {
@@ -501,10 +508,16 @@ export function useQueryStates<T extends Record<string, Parser<any>>>(
 
   useEffect(
     () => () => {
+      let canceledPendingWrite = false;
       for (const cancelPendingUpdate of pendingUpdatesRef.current.values()) {
-        cancelPendingUpdate();
+        if (cancelPendingUpdate()) canceledPendingWrite = true;
       }
       pendingUpdatesRef.current.clear();
+      // Discarded throttled writes were already broadcast to peers via emitKey;
+      // reconcile any peer that adopted a now-cancelled draft (see useQueryState).
+      if (canceledPendingWrite && typeof window !== "undefined") {
+        emitter.emitUpdate(getCurrentSearchParams());
+      }
     },
     [watchKeys],
   );

@@ -12,6 +12,7 @@ import {
 } from "vue";
 
 const FARM_VUE_ELEMENT = Symbol.for("farm.vue.element");
+const FARM_VUE_FUNCTION_COMPONENT = Symbol.for("farm.vue.function-component");
 
 export interface FarmVueElement {
   readonly [FARM_VUE_ELEMENT]: true;
@@ -78,6 +79,40 @@ export function isFarmVueElement(value: unknown): value is FarmVueElement {
   );
 }
 
+/**
+ * Marks a plain function component: one that takes React-shaped props and
+ * returns a Farm element tree.
+ *
+ * A native Vue functional component is also a plain function, but Vue calls it
+ * with `(props, { slots, attrs, emit })` and expects VNodes back. The two
+ * shapes are indistinguishable at runtime, so Farm marks the components it
+ * wires up from modules the renderer does not compile, and the compat layer
+ * calls only those directly. Every other function goes through `h()`.
+ *
+ * A frozen component stays unmarked and renders as a Vue component.
+ */
+export function markFunctionComponent<T>(component: T): T {
+  if (typeof component !== "function") return component;
+  try {
+    Object.defineProperty(component, FARM_VUE_FUNCTION_COMPONENT, {
+      value: true,
+      configurable: true,
+    });
+  } catch {
+    // Non-configurable or frozen: fall through unmarked.
+  }
+  return component;
+}
+
+function isFarmFunctionComponent(
+  value: unknown,
+): value is (props: Record<string, unknown>) => unknown {
+  return (
+    typeof value === "function" &&
+    (value as { [FARM_VUE_FUNCTION_COMPONENT]?: boolean })[FARM_VUE_FUNCTION_COMPONENT] === true
+  );
+}
+
 export function isValidElement(value: unknown): boolean {
   return isFarmVueElement(value) || isVNode(value) || Boolean(value);
 }
@@ -109,6 +144,7 @@ const UNITLESS_STYLE_PROPERTIES = new Set([
   "opacity",
   "order",
   "orphans",
+  "scale",
   "stop-opacity",
   "stroke-dasharray",
   "stroke-dashoffset",
@@ -174,6 +210,17 @@ function normalizeProps(element: FarmVueElement): {
     props.onDblclick = props.onDoubleClick;
     delete props.onDoubleClick;
   }
+  // React seeds uncontrolled inputs by rendering defaultValue/defaultChecked as
+  // value/checked; Vue reserves key/ref itself but would emit a dead
+  // `defaultvalue` attribute otherwise.
+  if ("defaultValue" in props && !("value" in props)) {
+    props.value = props.defaultValue;
+    delete props.defaultValue;
+  }
+  if ("defaultChecked" in props && !("checked" in props)) {
+    props.checked = props.defaultChecked;
+    delete props.defaultChecked;
+  }
   delete props.suppressHydrationWarning;
 
   const sourceChildren = element.children.length
@@ -190,9 +237,31 @@ function normalizeProps(element: FarmVueElement): {
   };
 }
 
+function withComponentChildren(props: Record<string, unknown>, children: unknown[]) {
+  if (children.length === 0) return props;
+  props.children = children.length === 1 ? children[0] : children;
+  return props;
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
 function asVNodeChildren(children: unknown[]): VNodeChild {
   if (children.length === 0) return undefined;
-  return children.length === 1 ? (children[0] as VNodeChild) : (children as VNodeChild[]);
+  // React treats `false`, `true`, `null`, and `undefined` as children that do
+  // not render. Vue coerces a scalar primitive child to a text node via
+  // `String(child)`, so an unfiltered boolean would render the visible text
+  // "false"/"true". Drop React-ignored values here so a sole boolean child
+  // (the `cond && <X/>` idiom) never reaches `h()`.
+  const filtered = children.filter(
+    (child) => child !== null && child !== undefined && typeof child !== "boolean",
+  );
+  if (filtered.length === 0) return undefined;
+  return filtered.length === 1 ? (filtered[0] as VNodeChild) : (filtered as VNodeChild[]);
 }
 
 export function materializeVueElement(value: unknown): VNodeChild {
@@ -222,6 +291,16 @@ export function materializeVueElement(value: unknown): VNodeChild {
     throw new TypeError("FARMJS Vue renderer received an invalid component type.");
   }
 
+  if (isFarmFunctionComponent(value.type)) {
+    const rendered = value.type(withComponentChildren(props, children));
+    if (isThenable(rendered)) {
+      throw new TypeError(
+        "FARMJS Vue renderer does not support async function components; use Vue Suspense or a synchronous component.",
+      );
+    }
+    return materializeVueElement(rendered);
+  }
+
   const slots = children.length
     ? {
         default: () => asVNodeChildren(children),
@@ -236,6 +315,7 @@ const VueCompat = {
   ErrorBoundary,
   createElement,
   isValidElement,
+  markFunctionComponent,
 };
 
 export default VueCompat;

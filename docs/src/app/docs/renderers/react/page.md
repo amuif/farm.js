@@ -12,7 +12,7 @@ do not need a renderer option or an additional adapter package.
 ## Create an app
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-app --template basic --typescript
+pnpm create @farm.js/app my-app --template basic --typescript
 ```
 
 Omitting `renderer` keeps React active:
@@ -97,12 +97,15 @@ The example creates one store per mounted component; share that instance through
 needed. Do not put request-specific server data in a process-global store. This store does not
 persist data or serialize symbol keys across server/client boundaries.
 
-## Experimental AOT compiler
+## AOT compiler
 
 Farm's experimental React compiler moves a narrow class of local state-update work from React's
-runtime render-and-reconcile path into build-time binding metadata. It is disabled by default and
-only affects the React renderer that enables it. Preact, Solid, Vue, Svelte, and custom renderers do
-not receive this transform.
+runtime render-and-reconcile path into build-time binding metadata. It is opt-in, disabled by
+default, and only affects the React renderer that enables it. Preact, Solid, Vue, Svelte, and
+custom renderers do not receive this transform.
+
+> The compiler is experimental. `@farm.js/react` is still a beta, and eligibility, generated
+> output, and options can change between releases. Unsupported components always stay on React.
 
 The compiler is intentionally conservative. It only transforms a component when it can prove that
 the component has one stable host-element tree and that each supported state value maps to known
@@ -130,11 +133,11 @@ unsupported prop shapes keep the full React render path.
 
 ### Enable the compiler
 
-Start from the focused experimental starter when you want the compiler flag, shared dark starter
+Start from the focused compiler starter when you want the compiler option, shared dark starter
 UI, a live AOT-versus-React comparison, and a reproducible browser check already wired together:
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta compiler-app --template react-compiler --typescript
+pnpm create @farm.js/app compiler-app --template react-compiler --typescript
 ```
 
 You can also clone the standalone
@@ -152,14 +155,12 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
 });
 ```
 
-`compiler: true` is the recommended starting point for the experiment. It means automatic
+`compiler: true` is the recommended starting point. It means automatic
 inference with safe React fallback:
 
 ```ts
@@ -170,7 +171,35 @@ compiler: {
 }
 ```
 
-Omitting `experimental.compiler` or setting it to `false` disables the transform.
+Omitting `compiler` or setting it to `false` disables the transform.
+
+### Experimental AOT compiler
+
+Upgrading from an earlier beta? The option used to live at
+`react({ experimental: { compiler } })`. That form still works as a
+deprecated alias: it logs a one-time deprecation warning and behaves exactly like the top-level
+option. Setting both keys is an error. This heading preserves existing links to the compiler
+guide; use the [AOT compiler](#aot-compiler) section for new links.
+
+### Compatibility and release status
+
+`@farm.js/react` is versioned independently from core. A `-beta.N` package version is still a beta;
+moving the configuration option does not by itself publish a stable package, and the compiler stays
+experimental until that happens. The first stable release covers `react({ compiler })`, the
+documented compiler options, and the public `List` component. Inference and annotation mode, hybrid
+and static reactivity, diagnostics, and reporting all remain supported; the advanced options do not
+require an experimental flag.
+
+The compiler and `@farm.js/react/compiler-runtime` must come from the same installed package
+version. Generated definitions are an implementation protocol, not a cross-version format.
+Rebuild and deploy the complete server and browser output together after upgrading. Do not mix
+cached compiled modules from different package versions. Existing runtime exports remain available;
+applications should normally write React components rather than hand-author generated definitions.
+
+Eligibility and the set of compiled components can evolve between releases. React fallback,
+documented options, and observable application behavior are the compatibility contract, not an
+exact render count, generated helper name, or benchmark score. Unsupported components continue on
+React unless `onUnsupported: "error"` deliberately makes them a build error.
 
 ### Combine the compiler with isolated hydration
 
@@ -186,9 +215,7 @@ import { react } from "@farm.js/react";
 
 export default defineConfig({
   renderer: react({
-    experimental: {
-      compiler: true,
-    },
+    compiler: true,
   }),
   experimental: {
     isolatedClientHydration: "enabled",
@@ -253,6 +280,20 @@ comparison and diagnostic mode. `"hybrid"` is the default because it can avoid i
 preserving the compiler's safe fallback and React ownership boundaries. Both modes cache the last
 committed direct-binding value and skip an identical DOM write.
 
+When Suspense (or React 19's Activity) temporarily hides a compiled component, Farm retains
+its pending local state and React-owned text-node snapshots. On reappearance, it synchronizes
+the current committed props before rebuilding binding dependencies and drains queued updates
+in order. Hiding is not treated as permanent disposal: host refs and refresh subscriptions
+are detached, while component-owned state remains available for React to resume.
+
+During a production build, identical compiler inputs can reuse results across route discovery,
+SSR, and client compilation. This build-local cache retains at most 128 entries and 16 MiB of
+source-key/result payloads (excluding JavaScript object overhead and active compilation work).
+Results are isolated from each consumer, and the cache is discarded after the build, including
+failures. Diagnostics and compiler reports still run for every transform. Ordinary development
+keeps Vite's existing caching behavior; there is no persistent source cache, configuration flag,
+or added browser runtime payload.
+
 ### Component selection
 
 #### Automatic inference
@@ -280,12 +321,10 @@ Annotation mode is useful for a staged rollout or a strict, reviewed set of comp
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      mode: "annotation",
-      directive: "use compiler",
-      onUnsupported: "warn",
-    },
+  compiler: {
+    mode: "annotation",
+    directive: "use compiler",
+    onUnsupported: "warn",
   },
 }),
 ```
@@ -351,10 +390,8 @@ fallback behavior:
 
 ```ts
 renderer: react({
-  experimental: {
-    compiler: {
-      report: true,
-    },
+  compiler: {
+    report: true,
   },
 }),
 ```
@@ -474,22 +511,22 @@ policy.
 The current compiler deliberately supports a smaller subset than general React. A component must
 satisfy all of these rules:
 
-| Area                | Current supported shape                                                                                                                         |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                         |
-| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or flat object props destructuring.              |
-| Props               | Flat object destructuring supports shorthand names, aliases, and defaults. Referenced primitive values join the dependency graph after mount.   |
-| Body                | Top-level `useState` declarations, optional compiler-safe derived values and synchronous named handlers, then one unconditional JSX return.     |
-| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                      |
-| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                          |
-| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                      |
-| Text bindings       | State-driven text in a leaf host element.                                                                                                       |
-| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                           |
-| Events              | Inline handlers and synchronous `const` or function-declaration handlers, including inline synchronous events in eligible host-only keyed rows. |
-| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                |
-| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions. |
-| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                        |
-| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.           |
+| Area                | Current supported shape                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Component discovery | A top-level, capitalized function declaration, function expression, or arrow component in application `.tsx` or `.jsx`.                                                          |
+| Function shape      | Synchronous, non-generator, non-generic block body with zero parameters, one props identifier, or object props destructuring without computed keys.                              |
+| Props               | Object destructuring supports shorthand names, aliases, defaults, nested object and array patterns, and rest. Referenced primitive values join the dependency graph after mount. |
+| Body                | Top-level `useState` declarations, compiler-safe derived values and named handlers in any order (a derived value cannot read a later state), then one unconditional JSX return.  |
+| State               | `const [value, setValue] = useState(initial)`, including lazy initializers, multiple cells, and queued functional updates.                                                       |
+| Root                | Exactly one lowercase host JSX element such as `button`, `section`, `input`, or `div`.                                                                                           |
+| Tree                | A statically known host tree around eligible conditional, keyed-list, compiled keyed-row, and component-island boundaries.                                                       |
+| Text bindings       | State-driven text in a leaf host element.                                                                                                                                        |
+| Attribute bindings  | Basic attributes, controlled form properties, and individual properties in one inline `style` object.                                                                            |
+| Events              | Inline handlers and `const` or function-declaration handlers, including async ones, plus inline synchronous events in eligible host-only keyed rows.                             |
+| Conditional blocks  | Logical/ternary host branches in dedicated containers or direct ranges among static host siblings, including the component root.                                                 |
+| Keyed lists         | Item-keyed maps and imported `List`, including safe collection pipelines; eligible rows use direct bindings and recursive host-only conditions.                                  |
+| Range siblings      | Stable host siblings beside ranges may patch leaf text, attributes, `className`, and individual inline style properties.                                                         |
+| Component islands   | Stable imported or module-level component identifiers with explicit compiler-safe props and no JSX children, spread, `ref`, or `key`.                                            |
 
 This component is eligible:
 
@@ -545,10 +582,14 @@ React.
 For destructured props, the original component wrapper still performs JavaScript destructuring on
 every parent render. Defaults therefore apply only to `undefined`, aliases keep their normal local
 names, and the resolved values are passed to the compiled definition. A named handler can be a
-synchronous `const` function or function declaration. It is expanded when passed directly to a JSX
+`const` function or function declaration, synchronous or async. It is expanded when passed directly to a JSX
 event or called from that event's inline function, including arguments such as
 `onClick={() => select(productId)}`. Calling it while producing the event prop, exposing it as a
-child, using it outside an event, or making it async/generic still falls back to React.
+child, using it outside an event, or making it a generator or generic still falls back to React.
+
+A handler that can run code later, because it awaits or contains a nested function such as a
+`setTimeout` callback, reads each state value and prop it uses once, when it starts. Code after an
+`await` therefore sees the values from the render that created the handler, as it does in React.
 
 #### Primitive prop cells
 
@@ -592,7 +633,7 @@ on React because their final property set or precedence can change.
 
 ### Conditional DOM blocks
 
-This optimization is automatic for components selected by the existing experimental compiler
+This optimization is automatic for components selected by the compiler
 configuration. It does not require a conditional component, a new annotation, or another option.
 The compiler can isolate logical and ternary child structures when their positions are known at
 build time:
@@ -802,6 +843,12 @@ longest increasing subsequence (LIS) of the old row positions. Rows in that subs
 place; only the other surviving rows move. LIS is a runtime move planner over compiler-prepared
 rows, not a claim that the future contents of an array are known at build time.
 
+When an update keeps every row and changes only a few positions, such as swapping two rows, Farm
+compares the new keys with the committed order position by position, confirms that the changed
+positions only trade rows among themselves, and plans moves over those positions alone. A swap moves
+two rows without building a set of every key. Every row's bindings are still reread, as React would
+rerender them.
+
 #### Key-directed selection updates
 
 A separate state or primitive prop often identifies one active row while the collection itself
@@ -837,6 +884,13 @@ nullish targets. Object, array, boolean, ambiguous, mixed structural, React-owne
 unsupported expressions use the existing complete evaluation or React fallback. Missing keys are
 safe and simply patch no next row. No option or component primitive is required. The compiler
 report exposes the number of emitted row-binding proofs as `keyedIdentityTargets`.
+
+For plain keyed rows using only one target kind, the compiler includes only that kind's target
+runtime: identity, Set membership, or Map lookup. Identity-only selection does not retain the
+Set/Map snapshot machinery. These paths keep two target snapshot maps instead of six. Rows
+combining target kinds, row conditionals, nested host blocks, or structural update hints continue
+using the complete runtime. This changes bundle and bookkeeping costs, not eligibility, update
+semantics, or the normal React fallback; there is no new option to enable.
 
 #### Key-directed Set membership updates
 
@@ -901,6 +955,12 @@ dependencies, React-owned rows, nested blocks, and structural key dependencies d
 path. A failed runtime guard returns that keyed boundary to React before compiled bindings run.
 No option or component primitive is required. The report exposes the emitted binding count as
 `keyedMapLookupTargets`.
+
+When a key-directed identity, Set-membership, or Map-lookup refresh selects multiple binding
+updates, the runtime prepares every selected value and resolves every selected DOM target before
+committing the batch. A reader failure in a later selected row therefore leaves earlier rows
+untouched, while an invalid target uses the complete React fallback. Preparation retains the same
+changed-key set; it does not scan unaffected rows. Single-binding refreshes retain the direct path.
 
 #### Producer-side Set and Map deltas
 
@@ -1323,16 +1383,23 @@ otherwise unsafe still runs normally but takes complete keyed reconciliation.
 
 At update time, Farm validates the committed native source, result length, source token, normalized
 position, clamped removal count, and any incoming key before changing the DOM. For a batch, Farm
-computes every key, descriptor, binding snapshot, and detached host row before mutating the live
-tree. Duplicate incoming keys or collisions with existing keys therefore take complete
-reconciliation without a partial insertion. Valid rows are mounted in one document fragment;
+checks existing-key collisions against the committed row map and keeps a temporary set of only
+the incoming batch's keys. It does not copy every existing key into that set. Complete source-row
+validation still runs, and Farm computes every incoming key, descriptor, binding snapshot, and
+detached host row before mutating the live tree. Duplicate incoming keys or collisions with
+existing keys therefore take complete reconciliation without a partial insertion. Valid rows
+are mounted in one document fragment;
 surrounding elements remain connected and only stored suffix indexes shift. Exact-window
 replacement with fresh keys removes only the proven old interval after every incoming row is
 prepared. If the incoming interval has the same length and exactly the same keys in the same order,
 Farm first evaluates all keys and binding snapshots and resolves every changed target across the
 complete interval. It then patches only changed bindings in place and updates each stored row
 object, so later delegated or cached handlers observe the latest data. No descriptor or DOM row is
-created, and every row keeps its identity, focus, and text selection. A window may instead grow or
+created, and every row keeps its identity, focus, and text selection. Validated same-key row and
+window refreshes also keep the existing row map and element lookup, and skip redundant cache
+cleanup after the bindings are patched. Source and key validation still run, and each flush commits
+the new collection token so subsequent updates use current state.
+Structural changes retain index rebuilding and cache cleanup. A window may instead grow or
 shrink while it reorders keys from inside its own removed interval and mixes them with globally
 fresh keys. Farm prepares all reused binding updates, new descriptors, binding snapshots, and
 detached rows before the first DOM write. It removes only retired rows, preserves each reused row,
@@ -1343,8 +1410,13 @@ same-key windows queued before one compiler flush compose into one atomic refres
 queued windows may mix same-key rows with globally new final keys, and both disjoint and
 overlapping windows are supported. An overlapping position uses the last queued value;
 intermediate identities are never mounted. Farm validates the complete chain and final key set,
-then prepares every touched key, binding value, DOM target, new descriptor, binding snapshot, and
-disconnected DOM row before the first write. It patches same-key positions and swaps only final
+using the committed row map directly for key collisions instead of copying every existing key
+into a temporary set. For length-preserving queued windows, it sorts the window ranges and walks
+them alongside the rows, without building a set of touched positions or sorting those positions.
+Overlapping and contained ranges prepare each final position once, in row order. This removes
+bookkeeping, not the full-chain or untouched-row checks: every row is still validated before
+preparation. It then prepares every touched key, binding value, DOM target, new descriptor, binding
+snapshot, and disconnected DOM row before the first write. It patches same-key positions and swaps only final
 fresh-key positions. Untouched rows retain their identity. Duplicate final keys and keys reused
 from outside a single removed interval take complete reconciliation before fast-path mutation. A
 queued chain may also contain disjoint grow or shrink windows. Farm maps every immediate-source
@@ -1431,12 +1503,15 @@ The runtime validates only the final order against the committed collection. A c
 sort/reverse pipelines apply one LIS-based reconciliation.
 
 A compiler-safe `filter()` or bounded `slice()` prefix may run before one or more native reorder
-steps in the same concise setter or exact one-return block:
+steps in the same concise setter or exact one-return block. The filter predicate may itself be a
+concise expression or an exact one-return block:
 
 ```tsx
 setItems((current) =>
   current
-    .filter((item) => item.visible)
+    .filter((item) => {
+      return item.visible;
+    })
     .toSorted((left, right) => left.rank - right.rank)
     .toReversed(),
 );
@@ -1743,13 +1818,19 @@ setItems((current) => current.filter((item) => item.id !== removedId));
 setItems((current) => {
   return current.filter((item) => item.id !== removedId);
 });
+setItems((current) =>
+  current.filter((item) => {
+    return item.id !== removedId;
+  }),
+);
 ```
 
 At build time, Farm recognizes a concise functional setter or a setter block containing exactly one
 direct value-returning `return`. The returned expression must directly call native `filter()` with
-a synchronous, one-parameter, expression-bodied predicate from the compiler's safe expression
-subset. The native `filter()` still runs normally. Its generated wrapper records rejected positions
-and links queued filters to the last committed array.
+a synchronous, one-parameter predicate from the compiler's safe expression subset. The predicate
+may be a concise expression or a block containing exactly one direct value-returning `return`. The
+native `filter()` still runs normally. Its generated wrapper records rejected positions and links
+queued filters to the last committed array.
 
 At update time, Farm validates the native-array chain, result lengths, surviving item identities,
 and surviving keys before changing the DOM. It then removes only rejected row elements, updates
@@ -1757,12 +1838,12 @@ the stored positions used by delegated row events, and keeps all surviving eleme
 descriptors and bindings are not recreated or reread, and the owner component does not rerun.
 
 The proof applies only to compiler-owned host rows whose render callback and key do not observe the
-row index. An index-aware row or predicate, collection-derived key, updater block with extra
-statements, directives, conditional returns, or no value-returning `return`, block-bodied predicate,
-custom filter method, sparse or subclassed array, binding that reads the collection, React-owned row
-structure, nested host block, row conditional, unrelated dirty dependency, or failed runtime
-validation keeps complete keyed reconciliation. A filter queued after an unhinted update also falls
-back. These checks make the hint an internal optimization rather than a new behavior contract.
+row index. An index-aware row or predicate, collection-derived key, updater or predicate block with
+extra statements, directives, conditional returns, or no value-returning `return`, custom filter
+method, sparse or subclassed array, binding that reads the collection, React-owned row structure,
+nested host block, row conditional, unrelated dirty dependency, or failed runtime validation keeps
+complete keyed reconciliation. A filter queued after an unhinted update also falls back. These
+checks make the hint an internal optimization rather than a new behavior contract.
 Reports expose emitted sites as `keyedArrayFilterHints`; the optional hinted runtime is retained only
 when a module emits a supported update hint.
 
@@ -1969,6 +2050,12 @@ projects applies LIS to the outer list. Reordering one project's tasks applies a
 only inside that project. A surviving project, task, and every static sibling keep their DOM
 identity; updating the inner task does not rerun the component or either map callback.
 
+When the complete inner key order is unchanged, the nested scope reuses its row table and skips
+position-map construction and LIS planning. Every key is still validated and every child scope
+and binding is still updated. Insertions, removals, and reorders use the existing structural path.
+The same rule applies to keyed ranges beside host-only conditions in nested mixed ranges; it does
+not expand which row shapes the compiler accepts.
+
 The inner scope moves with its outer key and is cleaned when that project is removed. React still
 renders or hydrates the original nested lists, after which the compiler adopts the existing DOM.
 An outer and inner update queued together are read from the same latest collection. Duplicate keys
@@ -2100,7 +2187,7 @@ function InventoryRow({ item }) {
 
 `List` is an ordinary React component, not compiler-only syntax. It accepts an `Iterable`, `null`,
 or `undefined`; calls `by(item, index)` to create each React key; and requires its child function to
-return one React element. It therefore renders correctly when the experimental compiler is off or
+return one React element. It therefore renders correctly when the compiler is off or
 when this particular use cannot be optimized. The `InventoryRow` example stays in a React-owned
 keyed boundary because a custom component may contain Hooks, events, context, effects, and local
 state. The surrounding compiled component can still avoid executing again. Hooks belong inside a
@@ -2189,11 +2276,40 @@ The optimized host-row contract is deliberately narrow:
 - Unsupported or mutating collection methods, spread children, Hooks in callbacks, and other
   unproven shapes fall back to normal React.
 
+Keyed rows build their DOM-element lookup only when delegated row events need it. Rows without
+events and rows using ordinary React callbacks skip that lookup; ordinary callbacks still resolve
+the current item and index through the keyed row table. The lookup is rebuilt when a delegated event
+definition is adopted, including after compatible Fast Refresh.
+
 Stable keys must be unique among siblings and come from the item's identity, such as a database ID.
 If duplicate keys appear at runtime, Farm remounts that list container through its original React
 render instead of guessing which row owns the identity. Later updates remain on the React fallback
 for that mounted list. Interactive fallback handlers use ordinary per-render item/index closures,
 not ambiguous keyed lookup. Unsupported source shapes also keep React ownership from the beginning.
+
+When a parent-prop change or compatible Fast Refresh hands a compiled keyed-row container back to
+React, Farm checks its direct row elements against the last React adoption. If compiler updates
+have inserted, removed, replaced, or reordered those elements, Farm remounts that container once
+before React reconciles it, then adopts the new tree. This preserves the compiled component's
+local state, but the stale container's DOM identity, focus, selection, and uncontrolled form values
+reset at that handoff. A current row structure is not remounted; same-key binding updates and later
+React-owned updates retain their existing controls and user state. Ordinary compiler updates do
+not perform this handoff check.
+
+Once a keyed list or keyed-range container is on React fallback, updates with unique keys reconcile
+in place. Unchanged form controls, user-entered values, focus, selection, local component state, and
+DOM identity therefore survive later safe updates. A render containing duplicate keys still forces
+a complete remount, as does the first unique-key render after it; that recovery reset prevents React
+from reusing an identity made ambiguous by the preceding duplicate keys. Farm applies the same
+check when the collection changes through compiler state or through new parent props.
+
+Mixed conditional-and-keyed range containers use the same recovery rule for their direct keyed
+ranges. Once React owns the fallback subtree, branch changes and uniquely keyed list updates keep
+unaffected controls, focus, selection, child state, and DOM identity. Duplicate or unreadable keys
+still reset the subtree, followed by one recovery reset when the keys become safe again. The same
+rule applies recursively to keyed ranges nested inside conditional branches, mixed ranges, and
+keyed rows: Farm inspects every live nested row before reuse, while any duplicate, unreadable key,
+or failed descriptor read keeps the complete React reset.
 
 For example, changing `[A, B, C, D]` to `[D, A, B, C]` keeps `[A, B, C]` as the LIS and moves only
 `D`. Reversing four rows needs three moves because the LIS has length one. Insertions and removals
@@ -2309,6 +2425,11 @@ is a Babel AST transform, not a Rust compiler pass. It parses application TSX/JS
 JSX lowering, discovers candidate components, validates the full supported contract, and emits
 source maps with the transformed module.
 
+Local state, setters, derived values, props, and handlers retain JavaScript's lexical scoping,
+including names that shadow globals such as `Math`, `Map`, or `NaN`. Nested callback parameters
+still shadow outer bindings. A shadowed global is not treated as a whitelisted built-in call;
+unsupported usage retains the ordinary React fallback.
+
 For each eligible component, the transform conceptually emits a definition like this:
 
 ```ts
@@ -2389,12 +2510,78 @@ is not replaced during hydration. Interactive rows keep their React event props 
 process. A hydration mismatch stays on React's recoverable-error path; Farm adopts only the host
 shape React committed.
 
+In development, React 18 and React 19 Strict Mode can replay mount lifecycles. Eligible keyed-row
+containers re-adopt their existing DOM after that replay instead of switching permanently to React
+fallback. A real unmount still clears the host ref, disposes subscriptions, and ignores queued work
+or stale setters from the removed owner.
+
+Direct text, attribute, style, and controlled-input bindings also retain their attached DOM refs
+during Strict Mode's lifecycle replay. Local updates keep working before a parent renders again,
+including after hydration. React's ref-detach callbacks clear those references on a real unmount;
+queued updates and stale setters cannot update a removed component or its replacement.
+
+Host conditionals and conditional, keyed, and mixed range containers follow the same replay rule.
+They re-adopt the existing container, static siblings, and eligible branches or rows, including
+server-rendered nodes. Nested subscriptions are disposed and re-established during replay; hiding
+a branch or unmounting the component still disposes its scopes. Unsupported shapes keep the
+existing React fallback behavior.
+
+React-owned conditional boundaries also retain their attached-root registration during replay.
+Path-based bindings continue to skip those branches, so a nearby text or input update reaches
+its intended element. Hiding or replacing a branch and real unmounts remove the old registration;
+disposed owners cannot update the detached nodes or a new component instance.
+
+If a host conditional or conditional-range container has already requested React fallback,
+Strict Mode replay restores its nested fallback subscriptions instead of attempting compiled
+adoption again. Each committed fallback render also refreshes that subscription set, so a nested
+block introduced by a parent, local condition, or compatible Fast Refresh becomes live immediately
+and a removed block stops receiving work. Descendant-only updates remain live, including after
+hydration, and real unmounts still dispose those subscriptions. The existing fallback eligibility
+rules are unchanged. Subscription discovery follows only the branch React actually rendered:
+hidden branches are not evaluated, and their descendants remain unsubscribed until that branch is
+shown. Refreshing the active set keeps listeners whose block IDs did not change, removes only stale
+IDs, and subscribes only newly mounted IDs instead of rebuilding every listener after each render.
+
+Host conditional and conditional-range containers keep a stable key after entering React fallback
+when their descendants are either React-owned or conditional-only compiled blocks. Later updates
+preserve unchanged form controls, user-entered values, focus, selection, and React child state. The
+first fallback still resets DOM ownership. A keyed descendant retains the full reset path for safe
+recovery, including duplicate-key recovery, while removing a branch still follows normal React
+unmount behavior.
+
 During development, compiled components receive a module-and-component identity plus a state-layout
 signature. A compatible Fast Refresh replaces the compiled definition while retaining the React
 component type and its local cells. An interactive keyed boundary lets React commit the refreshed
 event layout before Farm re-adopts it, and keyed proxies read the current definition, so a refreshed
-handler cannot keep executing its older closure. If the compiler-owned state layout changes, the
-identity is not reused and React remounts it instead of preserving incompatible state.
+handler cannot keep executing its older closure. Compiler-owned host conditionals, keyed rows, and
+conditional, keyed, and mixed ranges also move their update subscription when the refreshed
+definition assigns that mounted boundary a different internal block ID. Later local updates cannot
+remain routed to the previous definition. Compiler-owned host conditionals, keyed rows, and
+conditional, keyed, and mixed ranges also pass through React once when their definition changes,
+then Farm re-adopts them. This refreshes their static markup even when binding values are unchanged
+while preserving matching branch, range, and keyed DOM identity, except for the stale keyed-row
+container handoff described above. React-owned conditional
+boundaries move their retained root registration with the same ID change, so neighboring path-based
+bindings continue to skip the branch React preserved. Interactive keyed rows validate the complete
+refreshed row set before Farm reapplies bindings; a later invalid row therefore returns the
+container to React without first patching an earlier row. Conditional, keyed, and mixed range
+owners likewise validate every static binding target before applying any binding update, so a
+later invalid target cannot partially change an earlier static sibling before React takes over.
+They also evaluate and normalize every static binding value before the first DOM write, so a later
+throwing reader reaches the nearest React error boundary without exposing an earlier sibling update.
+An ordinary surviving keyed row likewise evaluates and normalizes every binding in that row before
+updating its binding cache or the DOM. A later throwing reader therefore leaves that row untouched;
+single-row refreshes with one binding retain the direct single-binding path. Stable multi-row
+refreshes whose row structure is unchanged additionally prepare every row's binding updates before
+committing any row, so a reader failure in a later row leaves earlier rows untouched.
+Single-removal refreshes with multiple static survivors use the same preflight before committing
+survivor bindings or detaching the removed row. Other removal-only refreshes with static survivors
+also preflight the complete surviving row set before detaching any stale row.
+Conditional branch bindings and keyed-row bindings inside nested keyed or mixed ranges are also
+read and prepared without DOM writes until every sibling range has passed adoption. A later invalid
+range therefore cannot partially patch an earlier branch or keyed row before React takes over. If
+the compiler-owned state layout changes, the identity is not reused and React remounts it instead
+of preserving incompatible state.
 
 If a direct binding evaluation throws, the runtime schedules a React update and rethrows from the
 component render. This lets the nearest React error boundary handle the failure through React's
@@ -2444,6 +2631,13 @@ The package and example test suites verify more than generated code:
   Strict Mode preserve the primitive prop optimization afterward;
 - nested fallback blocks read one coherent render snapshot, and an abandoned concurrent render
   cannot publish prop cells or replace the last committed compiled element;
+- host conditional and conditional-range fallbacks rebind changing descendant listeners in static
+  and hybrid modes after mount or hydration, drop removed listeners, and dispose the active set on
+  unmount;
+- fallback subscription discovery skips hidden direct and nested branches in static and hybrid
+  modes after mount or hydration;
+- stable fallback descendants retain their existing listeners across committed host-conditional,
+  conditional-range, and mixed-range updates;
 - compatible Fast Refresh preserves state, while binding errors reach React error boundaries;
 - hydration mismatches follow React's recoverable-error path and remain interactive;
 - compiler-owned conditionals preserve a same-branch DOM instance, patch nested text, attributes,
@@ -2520,7 +2714,9 @@ The package and example test suites verify more than generated code:
 - mixed conditional/keyed containers match normal React across 3,000 deterministic branch, reorder,
   insertion, removal, binding, and recursively nested list transitions, with additional Strict Mode,
   simultaneous parent/local, duplicate-key fallback, error-boundary, queued-unmount, SSR, and
-  recoverable-hydration coverage;
+  recoverable-hydration coverage; fallback state-preservation coverage also spans static and hybrid
+  reactivity, nested and component-root ownership, uncontrolled controls, focus, selection, local
+  child state, duplicate keys, and unique-key recovery;
 - component islands update only dependent children, preserve child-local state and context, route
   failures through React error boundaries, hydrate in Strict Mode, and safely drop queued updates
   after unmount;
@@ -2632,7 +2828,11 @@ The package and example test suites verify more than generated code:
 - 2,000 deterministic batches of two to four reversals match normal React with zero key reads; a
   4,096-row direct test requires exactly `n - 1` connected DOM moves, while double-reverse and
   fallback tests cover zero-move cancellation, custom or unhinted chains, collection-reading rows,
-  StrictMode hydration, and unmount cleanup;
+  StrictMode hydration, and unmount cleanup; validated reorders reuse the runtime-owned row map
+  instead of copying it again, with repeated single and queued reversals checked in both static
+  and hybrid modes; when every row survives, their element lookup stays valid because the same
+  instances hold the current item and index; structural removals still rebuild the lookup and
+  prune removed-row listeners, with delegated clicks checked after successive commits;
 - 2,000 deterministic batches of two to four randomized sorts match normal React with zero key
   reads; a 4,096-row direct test requires exactly `n - LIS` connected DOM moves, while mixed
   sort/reverse chains, native semantics, focus and selection, fallback cases, StrictMode hydration,
@@ -2719,9 +2919,11 @@ deployment use the same contracts described in the renderer overview.
 
 ## Production rendering
 
-The React adapter supports string rendering and streaming when the active production runtime can
-use `renderToPipeableStream`. Static generation, ISR, PPR, and ordinary dynamic rendering continue
-to follow route configuration rather than the component extension.
+The React adapter uses `renderToPipeableStream` on Node deployment targets and
+`renderToReadableStream` on edge targets. FARMJS resolves the matching React DOM server entry while
+building the target and validates that the promised primitive is present. Static generation, ISR,
+PPR, and ordinary dynamic rendering continue to follow route configuration rather than the
+component extension.
 
 See [Rendering Model](/docs/server-rendering) for rendering modes and
 [Renderers](/docs/renderers) for the cross-renderer support matrix.

@@ -1,4 +1,10 @@
+import fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { _describeServerFunction } from "@farm.js/core/server-fn";
 import { transformFarmServerFns } from "./server-fn-transform";
 
 describe("Farm server function transform", () => {
@@ -31,6 +37,25 @@ export const product = query({ key: () => ["product"], handler: async () => true
     expect(result?.code).toContain("$$farm_server_query_product");
   });
 
+  it("transforms exports that pass explicit type arguments to the factory", () => {
+    const result = transformFarmServerFns(
+      `import { createServerFn, createServerQuery } from "@farm.js/core";
+export const save = createServerFn<{ name: string }>({ handler: async () => true });
+export const product = createServerQuery<Params<Id>>({ key: () => ["product"], handler: async () => true });`,
+      "/app/src/actions.ts",
+    );
+
+    expect(result?.exports).toEqual(["save", "product"]);
+    expect(result?.code).toContain('"use server"');
+    expect(result?.code).toContain(
+      "const $$farm_server_fn_save = createServerFn<{ name: string }>(",
+    );
+    expect(result?.code).toContain(
+      "const $$farm_server_query_product = createServerQuery<Params<Id>>(",
+    );
+    expect(result?.code).toContain("export async function save(input)");
+  });
+
   it("does not let adjacent core imports consume server function imports", () => {
     const result = transformFarmServerFns(
       `import { invalidate } from "@farm.js/core/cache";
@@ -45,6 +70,26 @@ export const update = createServerFn({ handler: async () => { invalidate(["produ
     expect(result?.code).toContain("export async function update(input)");
   });
 
+  it("transforms a default-exported server function so it gets a server boundary", () => {
+    // Without this the module gets no "use server" directive and the handler
+    // (and its server-only imports) ships to the client.
+    const result = transformFarmServerFns(
+      `import { createServerFn } from "@farm.js/core";
+export default createServerFn({ handler: async () => true });`,
+      "/app/src/actions.ts",
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.exports).toEqual(["default"]);
+    expect(result?.code).toContain('"use server"');
+    expect(result?.code).toContain("const $$farm_server_fn_default = createServerFn(");
+    expect(result?.code).toContain(
+      "export default async function $$farm_server_fn_default_export(input)",
+    );
+    // The raw factory call must no longer be the default export.
+    expect(result?.code).not.toContain("export default createServerFn(");
+  });
+
   it("rejects query declarations in client modules", () => {
     expect(() =>
       transformFarmServerFns(
@@ -54,5 +99,129 @@ export const product = createServerQuery({ key: () => ["product"], handler: asyn
         "/app/src/product.tsx",
       ),
     ).toThrow("must live in a server module");
+  });
+
+  it("fails closed for server functions re-exported through an export clause", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerFn } from "@farm.js/core";
+const save = createServerFn({ handler: async () => true });
+export { save as persist };`,
+        "/app/src/actions.ts",
+      ),
+    ).toThrow(
+      'Server function "save" cannot be re-exported with an export clause. Export it inline instead',
+    );
+  });
+
+  it("does not treat re-exports from another module as local server functions", () => {
+    const result = transformFarmServerFns(
+      `import { save } from "./save";
+export { save } from "./save";`,
+      "/app/src/actions.ts",
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it("names the query factory in the fail-closed message", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerQuery } from "@farm.js/core";
+const product = createServerQuery({ key: () => ["product"], handler: async () => true });
+export { product };`,
+        "/app/src/queries.ts",
+      ),
+    ).toThrow("createServerQuery(...)");
+  });
+
+  it("fails closed for a server function re-exported as the default export", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerFn } from "@farm.js/core";
+const save = createServerFn({ handler: async () => true });
+export default save;`,
+        "/app/src/actions.ts",
+      ),
+    ).toThrow(
+      'Server function "save" cannot be re-exported as the default export. Export it inline instead: export default createServerFn(...)',
+    );
+  });
+
+  it("fails closed for a server function re-exported through a renamed binding", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerFn } from "@farm.js/core";
+const save = createServerFn({ handler: async () => true });
+export const persist = save;`,
+        "/app/src/actions.ts",
+      ),
+    ).toThrow(
+      'Server function "save" cannot be re-exported through another exported binding. Export it inline instead: export const persist = createServerFn(...)',
+    );
+  });
+
+  it("fails closed when a comment hides the specifier inside an export clause", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerFn } from "@farm.js/core";
+const save = createServerFn({ handler: async () => true });
+export { /* re-export */ save };`,
+        "/app/src/actions.ts",
+      ),
+    ).toThrow('Server function "save" cannot be re-exported with an export clause.');
+  });
+
+  it("fails closed when the server function is assigned after its declaration", () => {
+    expect(() =>
+      transformFarmServerFns(
+        `import { createServerFn } from "@farm.js/core";
+let save;
+save = createServerFn({ handler: async () => true });
+export { save };`,
+        "/app/src/actions.ts",
+      ),
+    ).toThrow('Server function "save" cannot be re-exported with an export clause.');
+  });
+
+  it("ignores export-shaped text inside strings and comments", () => {
+    const result = transformFarmServerFns(
+      `import { createServerFn } from "@farm.js/core";
+// export { save };
+const note = "export default save;";
+export const save = createServerFn({ handler: async () => note });`,
+      "/app/src/actions.ts",
+    );
+
+    expect(result?.exports).toEqual(["save"]);
+    expect(result?.code).toContain('"use server"');
+  });
+
+  it("keeps the descriptor MCP reads on the exported wrappers", async () => {
+    const result = transformFarmServerFns(
+      `import { createServerFn } from "@farm.js/core/server-fn";
+export const save = createServerFn({ mcp: { name: "save" }, handler: async () => "saved" });
+export default createServerFn({ mcp: { name: "fallback" }, handler: async () => "default" });`,
+      "/app/src/actions.ts",
+    );
+    const coreEntry = createRequire(import.meta.url).resolve("@farm.js/core/server-fn");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "farm-server-fn-transform-"));
+    try {
+      const file = path.join(dir, "actions.mjs");
+      await fs.writeFile(
+        file,
+        result!.code.replace(
+          '"@farm.js/core/server-fn"',
+          JSON.stringify(pathToFileURL(coreEntry).href),
+        ),
+      );
+      const module = await import(/* @vite-ignore */ pathToFileURL(file).href);
+
+      expect(_describeServerFunction(module.save)?.mcp).toEqual({ name: "save" });
+      expect(_describeServerFunction(module.default)?.mcp).toEqual({ name: "fallback" });
+      await expect(module.save()).resolves.toBe("saved");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

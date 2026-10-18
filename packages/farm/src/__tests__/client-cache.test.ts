@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRouteDataCacheKey } from "../cache";
 import {
   FarmClientDataCache,
@@ -10,6 +10,34 @@ import { notifyFarmCacheInvalidation } from "../cache-invalidation";
 describe("Farm client data cache", () => {
   beforeEach(() => {
     getFarmClientDataCache().clear();
+  });
+
+  it("isolates a throwing cache listener from the other subscribers", () => {
+    const cache = getFarmClientDataCache();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const seen: Array<string | undefined> = [];
+
+    cache.subscribe("product:1", () => {
+      throw new Error("listener exploded");
+    });
+    cache.subscribe("product:1", (event) => seen.push(event));
+
+    expect(() =>
+      cache.set("product:1", {
+        data: { id: 1 },
+        updatedAt: Date.now(),
+        staleAt: Date.now() + 60_000,
+        status: "success",
+        error: null,
+      }),
+    ).not.toThrow();
+    expect(seen).toHaveLength(1);
+
+    expect(() => cache.invalidate("product:1")).not.toThrow();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toBe("invalidate");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("normalizes structured keys with the route data key contract", () => {
@@ -35,6 +63,26 @@ describe("Farm client data cache", () => {
     expect(cache.get(key)?.invalidatedAt).toEqual(expect.any(Number));
     expect(listener).toHaveBeenCalledTimes(2);
     unsubscribe();
+  });
+
+  it("keeps a resubscribed listener notified after a stale unsubscribe fires again", () => {
+    const cache = new FarmClientDataCache();
+    const first = vi.fn();
+    const second = vi.fn();
+
+    const unsubscribeFirst = cache.subscribe("k", first);
+    unsubscribeFirst(); // drains {first} and removes the "k" entry
+    cache.subscribe("k", second); // creates a fresh listener set for "k"
+    unsubscribeFirst(); // stale/duplicate: must not evict second's live set
+
+    cache.set("k", {
+      data: { id: "k" },
+      updatedAt: 1,
+      staleAt: Number.POSITIVE_INFINITY,
+    });
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
   });
 
   it("unsubscribes disposed cache instances from shared invalidations", () => {
@@ -102,5 +150,277 @@ describe("Farm client data cache", () => {
     expect(cache.isStale("product:123", 11)).toBe(true);
     expect(cache.get("product:123")?.invalidatedAt).toBe(10);
     cache.dispose();
+  });
+});
+
+describe("Farm client data cache gc sweep", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function entryWithGc(now: number, gcTime: number) {
+    return {
+      data: { id: "gc" },
+      updatedAt: now,
+      staleAt: Number.POSITIVE_INFINITY,
+      gcAt: now + gcTime,
+    };
+  }
+
+  it("sweeps alias and invalidation metadata with the entries they describe", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+    const internals = cache as unknown as {
+      aliases: Map<string, string>;
+      invalidatedAt: Map<string, number>;
+    };
+
+    const now = Date.now();
+    cache.set("product:1", entryWithGc(now, 1_000));
+    // A per-invocation provisional alias, as server queries create.
+    cache.alias("provisional:abc", "product:1");
+    cache.invalidate("product:1");
+    expect(cache.resolveKey("provisional:abc")).toBe("product:1");
+
+    vi.advanceTimersByTime(60_000);
+
+    // The entry is swept...
+    expect(cache.size).toBe(0);
+    // ...and so is the metadata that described it, instead of accumulating for
+    // the lifetime of the page.
+    expect(internals.aliases.size).toBe(0);
+    expect(internals.invalidatedAt.size).toBe(0);
+    expect(cache.resolveKey("provisional:abc")).toBe("provisional:abc");
+    cache.dispose();
+  });
+
+  it("sweeps metadata when a read lazily evicts an expired entry", () => {
+    const cache = new FarmClientDataCache({
+      subscribeToInvalidation: false,
+      gcSweepIntervalMs: false,
+    });
+    const internals = cache as unknown as {
+      aliases: Map<string, string>;
+      invalidatedAt: Map<string, number>;
+    };
+    const onDelete = vi.fn();
+    cache.attachPersistence({ onSet: vi.fn(), onDelete, onClear: vi.fn() });
+
+    const now = 1_000;
+    cache.set("product:1", entryWithGc(now, 100));
+    cache.alias("provisional:abc", "product:1");
+    cache.invalidate("product:1", now + 1);
+
+    expect(cache.get("provisional:abc", now + 100)).toBeUndefined();
+
+    expect(cache.size).toBe(0);
+    expect(internals.aliases.size).toBe(0);
+    expect(internals.invalidatedAt.size).toBe(0);
+    expect(cache.resolveKey("provisional:abc")).toBe("provisional:abc");
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("product:1");
+    cache.dispose();
+  });
+
+  it("keeps lazy-expiration metadata for watched aliases and in-progress targets", () => {
+    const cache = new FarmClientDataCache({
+      subscribeToInvalidation: false,
+      gcSweepIntervalMs: false,
+    });
+    const internals = cache as unknown as {
+      aliases: Map<string, string>;
+      invalidatedAt: Map<string, number>;
+      pendingMetadataSweeps: Set<string>;
+    };
+    const now = 1_000;
+
+    cache.set("watched-target", entryWithGc(now, 100));
+    cache.alias("watched-alias", "watched-target");
+    cache.invalidate("watched-target", now + 1);
+    const unsubscribe = cache.subscribe("watched-alias", () => {});
+
+    cache.set("inflight-target", entryWithGc(now, 100));
+    cache.alias("inflight-alias", "inflight-target");
+    cache.invalidate("inflight-target", now + 1);
+    cache.setInflight("inflight-target", Promise.resolve());
+
+    cache.set("fetching-target", { ...entryWithGc(now, 100), fetching: true });
+    cache.alias("fetching-alias", "fetching-target");
+    cache.invalidate("fetching-target", now + 1);
+
+    expect(cache.get("watched-alias", now + 100)).toBeUndefined();
+    expect(cache.get("inflight-alias", now + 100)).toBeUndefined();
+    expect(cache.get("fetching-alias", now + 100)).toBeUndefined();
+
+    expect(internals.aliases.get("watched-alias")).toBe("watched-target");
+    expect(internals.invalidatedAt.has("watched-target")).toBe(true);
+    expect(internals.aliases.get("inflight-alias")).toBe("inflight-target");
+    expect(internals.invalidatedAt.has("inflight-target")).toBe(true);
+    expect(internals.aliases.get("fetching-alias")).toBe("fetching-target");
+    expect(internals.invalidatedAt.has("fetching-target")).toBe(true);
+    expect(internals.pendingMetadataSweeps.size).toBe(2);
+    expect(cache.size).toBe(1);
+
+    unsubscribe();
+    expect(internals.aliases.has("watched-alias")).toBe(false);
+    expect(internals.invalidatedAt.has("watched-target")).toBe(false);
+
+    cache.deleteInflight("inflight-target");
+    expect(internals.aliases.has("inflight-alias")).toBe(false);
+    expect(internals.invalidatedAt.has("inflight-target")).toBe(false);
+
+    cache.set("fetching-target", {
+      data: { id: "fresh" },
+      updatedAt: now + 2,
+      staleAt: Number.POSITIVE_INFINITY,
+      fetching: false,
+    });
+    expect(internals.aliases.get("fetching-alias")).toBe("fetching-target");
+    expect(internals.invalidatedAt.has("fetching-target")).toBe(false);
+    expect(internals.pendingMetadataSweeps.size).toBe(0);
+    cache.dispose();
+  });
+
+  it("moves deferred cleanup when an in-flight key becomes canonical", () => {
+    const cache = new FarmClientDataCache({
+      subscribeToInvalidation: false,
+      gcSweepIntervalMs: false,
+    });
+    const internals = cache as unknown as {
+      aliases: Map<string, string>;
+      invalidatedAt: Map<string, number>;
+      pendingMetadataSweeps: Set<string>;
+    };
+    const now = 1_000;
+
+    cache.set("provisional", entryWithGc(now, 100));
+    cache.invalidate("provisional", now + 1);
+    cache.setInflight("provisional", Promise.resolve());
+    expect(cache.get("provisional", now + 100)).toBeUndefined();
+    expect(internals.pendingMetadataSweeps).toEqual(new Set(["provisional"]));
+
+    cache.alias("provisional", "canonical");
+    expect(internals.pendingMetadataSweeps).toEqual(new Set(["canonical"]));
+    expect(internals.invalidatedAt.has("canonical")).toBe(true);
+
+    cache.deleteInflight("canonical");
+    expect(internals.pendingMetadataSweeps.size).toBe(0);
+    expect(internals.aliases.has("provisional")).toBe(false);
+    expect(internals.invalidatedAt.has("canonical")).toBe(false);
+    cache.dispose();
+  });
+
+  it("keeps alias metadata that is still addressable", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+    const internals = cache as unknown as { aliases: Map<string, string> };
+
+    const now = Date.now();
+    cache.set("product:1", entryWithGc(now, 1_000));
+    cache.alias("watched-alias", "product:1");
+    // A live subscriber keeps the key watched, so nothing is swept.
+    const unsubscribe = cache.subscribe("watched-alias", () => {});
+
+    vi.advanceTimersByTime(60_000);
+
+    expect(cache.size).toBe(1);
+    expect(internals.aliases.size).toBe(1);
+    expect(cache.resolveKey("watched-alias")).toBe("product:1");
+    unsubscribe();
+    cache.dispose();
+  });
+
+  it("evicts unread expired entries without a read", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+
+    cache.set("expired", entryWithGc(Date.now(), 1_000));
+    expect(cache.size).toBe(1);
+
+    vi.advanceTimersByTime(30_000);
+
+    expect(cache.size).toBe(0);
+    cache.dispose();
+  });
+
+  it("keeps watched, fetching, and inflight entries", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+    const now = Date.now();
+
+    cache.set("watched", entryWithGc(now, 1_000));
+    const unsubscribe = cache.subscribe("watched", () => {});
+
+    cache.set("fetching", { ...entryWithGc(now, 1_000), fetching: true });
+
+    cache.set("inflight", entryWithGc(now, 1_000));
+    cache.setInflight("inflight", Promise.resolve());
+
+    cache.set("expired", entryWithGc(now, 1_000));
+
+    vi.advanceTimersByTime(30_000);
+
+    expect(cache.get("watched", now)).toBeDefined();
+    expect(cache.get("fetching", now)).toBeDefined();
+    expect(cache.get("inflight", now)).toBeDefined();
+    expect(cache.size).toBe(3);
+
+    unsubscribe();
+    cache.dispose();
+  });
+
+  it("keeps sweeping while surviving entries still carry gcAt, then disarms", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+    const now = Date.now();
+
+    cache.set("later", entryWithGc(now, 45_000));
+    vi.advanceTimersByTime(30_000);
+    expect(cache.size).toBe(1);
+
+    vi.advanceTimersByTime(30_000);
+    expect(cache.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    cache.dispose();
+  });
+
+  it("does not schedule a sweep for entries without gcAt", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+
+    cache.set("forever", {
+      data: { id: "forever" },
+      updatedAt: Date.now(),
+      staleAt: Number.POSITIVE_INFINITY,
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
+    cache.dispose();
+  });
+
+  it("supports disabling the sweep", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({
+      subscribeToInvalidation: false,
+      gcSweepIntervalMs: false,
+    });
+
+    cache.set("expired", entryWithGc(Date.now(), 1_000));
+    vi.advanceTimersByTime(60_000);
+
+    expect(cache.size).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    cache.dispose();
+  });
+
+  it("clears the pending sweep timer on dispose", () => {
+    vi.useFakeTimers();
+    const cache = new FarmClientDataCache({ subscribeToInvalidation: false });
+
+    cache.set("expired", entryWithGc(Date.now(), 1_000));
+    expect(vi.getTimerCount()).toBe(1);
+
+    cache.dispose();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

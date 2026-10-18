@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { addFarmIntegration, listFarmIntegrationProviders } = require("../dist/add-integration.js");
+const { handleUIRegistryRequest } = require("../dist/ui-registry.js");
 const ts = require("typescript");
 const execFileAsync = promisify(execFile);
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,7 @@ test("lists official integration providers", () => {
   assert.ok(providers.includes("supabase"));
   assert.ok(providers.includes("unkey"));
   assert.ok(providers.includes("jobs-inngest"));
+  assert.ok(providers.includes("strapi"));
 });
 
 test("all official integration providers expose opt-in UI metadata", () => {
@@ -210,6 +212,28 @@ test("adds a stripe integration with the shadcn UI feature pack", async () => {
     assert.equal(packageJson.dependencies.tailwindcss, "^4.1.18");
     assert.equal(componentsJson.aliases.ui, "@/components/ui");
     assert.equal(componentsJson.registries.farm.url, "https://farmjs.dev/r/{name}.json");
+    // Pinning the string alone passed while the endpoint 404'd, so ask the
+    // registry handler farmjs.dev mounts to answer the advertised url for every
+    // component this install wrote.
+    for (const component of result.ui.components) {
+      const registryResponse = handleUIRegistryRequest(
+        new Request(componentsJson.registries.farm.url.replace("{name}", component)),
+      );
+      assert.equal(registryResponse.status, 200, `${component} is not served by the registry`);
+      const registryItem = await registryResponse.json();
+      assert.equal(registryItem.name, component);
+      assert.equal(registryItem.type, "registry:ui");
+      const installed = await readFile(
+        path.join(root, "src/components/ui", `${component}.tsx`),
+        "utf8",
+      );
+      // The install resolves the `@/lib/utils` alias to a relative import; the
+      // registry item keeps the alias for the shadcn CLI to resolve.
+      assert.equal(
+        registryItem.files[0].content,
+        installed.replace(/from "(?:\.\.\/)+lib\/utils"/g, 'from "@/lib/utils"'),
+      );
+    }
     assert.deepEqual(tsconfig.compilerOptions.paths["@/*"], ["./src/*"]);
     assert.match(globals, /--color-background/);
     assert.match(globals, /^@import "tailwindcss";/);
@@ -496,6 +520,59 @@ test("adds a Vercel AI SDK chat route template", async () => {
     assert.match(route, /model: "openai\/gpt-4o-mini"/);
     await assert.rejects(() => readFile(path.join(root, "src/lib/integrations.ts"), "utf8"));
     await assert.rejects(() => readFile(path.join(root, "farm.config.ts"), "utf8"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("imports the generated auth instance relative to a custom registry file", async () => {
+  for (const provider of ["better-auth", "authjs"]) {
+    const root = await createTempProject({ packageJson: { type: "module", dependencies: {} } });
+
+    try {
+      const result = await addFarmIntegration({
+        root,
+        provider,
+        integrationsFile: "src/integrations.ts",
+        skipConfig: true,
+      });
+      const source = await readFile(result.integrationFile, "utf8");
+      const specifier = source.match(/import \{ auth \} from "([^"]+)"/)?.[1];
+      assert.equal(specifier, "../lib/auth.ts", provider);
+      assert.equal(
+        path.resolve(path.dirname(result.integrationFile), specifier),
+        path.join(root, "src/lib/auth.ts"),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("keeps the default registry's auth import", async () => {
+  const root = await createTempProject({ packageJson: { type: "module", dependencies: {} } });
+
+  try {
+    const result = await addFarmIntegration({ root, provider: "better-auth", skipConfig: true });
+    assert.match(await readFile(result.integrationFile, "utf8"), /from "\.\.\/auth\.ts"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects an unreadable package.json before writing any file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-add-integration-"));
+
+  try {
+    await writeFile(path.join(root, "package.json"), "{ broken", "utf8");
+    await assert.rejects(
+      () => addFarmIntegration({ root, provider: "better-auth" }),
+      (error) => {
+        assert.ok(error.message.includes(path.join(root, "package.json")), error.message);
+        return true;
+      },
+    );
+    assert.deepEqual(await readdir(root), ["package.json"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -50,6 +50,13 @@
  */
 
 import { readFile } from "fs/promises";
+import {
+  mergeRouteRenderingDirectiveConfig,
+  type DirectiveRenderingConfig,
+  type RouteRenderingConfig,
+  type RouteRenderingDynamic,
+  type RouteRenderingOptions,
+} from "./route-rendering";
 import type {
   RouteModule,
   SSGPage,
@@ -65,27 +72,16 @@ interface RouteEntry {
   pattern: string;
 }
 
-export type RouteRenderingDynamic = NonNullable<RouteModule["dynamic"]>;
-
-export interface RouteRenderingConfig {
-  ssg: boolean;
-  ppr: boolean;
-  revalidate?: number;
-  dynamic?: RouteRenderingDynamic;
-  directive?: string;
-}
+export type {
+  DirectiveRenderingConfig,
+  RouteRenderingConfig,
+  RouteRenderingDynamic,
+  RouteRenderingOptions,
+} from "./route-rendering";
 
 export interface StaticRouteCandidateAnalysis {
   candidate: boolean;
   blockers: string[];
-}
-
-interface DirectiveRenderingConfig {
-  ssg: boolean;
-  ppr: boolean;
-  revalidate?: number;
-  dynamic?: RouteRenderingDynamic;
-  directive: string;
 }
 
 const OPTIONAL_CATCH_ALL_SEGMENT = /^\[\[\.\.\.([^\]]+)\]\]$/;
@@ -117,57 +113,9 @@ const ROUTE_PROP_LABELS = new Map<string, string>([
 function resolveConfiguredRouteRenderingConfig(
   mod: RouteModule | null | undefined,
   source?: string,
+  options?: RouteRenderingOptions,
 ): RouteRenderingConfig {
-  const directiveConfig = parseRouteRenderingDirective(source);
-  let ssg = directiveConfig?.ssg ?? false;
-  let ppr = directiveConfig?.ppr ?? false;
-  let revalidate = directiveConfig?.revalidate;
-  const moduleDynamic = normalizeDynamicMode(mod?.dynamic);
-  const dynamic = moduleDynamic ?? directiveConfig?.dynamic;
-  const hasExplicitSsg = typeof mod?.ssg === "boolean";
-  const hasExplicitPPR =
-    typeof mod?.ppr === "boolean" || typeof mod?.experimental_ppr === "boolean";
-
-  if (hasExplicitSsg) {
-    ssg = mod!.ssg === true;
-  }
-
-  if (hasExplicitPPR) {
-    ppr = mod?.ppr === true || mod?.experimental_ppr === true;
-  }
-
-  if (typeof mod?.revalidate === "number") {
-    if (mod.revalidate > 0) {
-      revalidate = mod.revalidate;
-      if (!hasExplicitSsg && !ppr) {
-        ssg = true;
-      }
-    } else {
-      revalidate = undefined;
-      if (!hasExplicitSsg) {
-        ssg = false;
-      }
-    }
-  } else if (mod?.revalidate === false) {
-    revalidate = undefined;
-  }
-
-  if (moduleDynamic === "force-static" || moduleDynamic === "error") {
-    ssg = true;
-    ppr = false;
-  } else if (moduleDynamic === "force-dynamic") {
-    ssg = false;
-    ppr = false;
-    revalidate = undefined;
-  }
-
-  return {
-    ssg,
-    ppr: ssg ? false : ppr,
-    revalidate: ssg || ppr ? revalidate : undefined,
-    dynamic,
-    directive: directiveConfig?.directive,
-  };
+  return mergeRouteRenderingDirectiveConfig(parseRouteRenderingDirective(source), mod, options);
 }
 
 /**
@@ -177,8 +125,9 @@ function resolveConfiguredRouteRenderingConfig(
 export function resolveRouteRenderingConfig(
   mod: RouteModule | null | undefined,
   source?: string,
+  options?: RouteRenderingOptions,
 ): RouteRenderingConfig {
-  const rendering = resolveConfiguredRouteRenderingConfig(mod, source);
+  const rendering = resolveConfiguredRouteRenderingConfig(mod, source, options);
   if (!rendering.ssg || !source) {
     return rendering;
   }
@@ -198,9 +147,10 @@ export function resolveRouteRenderingConfig(
 export async function resolveRouteRenderingConfigFromFile(
   mod: RouteModule | null | undefined,
   filePath: string,
+  options?: RouteRenderingOptions,
 ): Promise<RouteRenderingConfig> {
   const source = await readFile(filePath, "utf8").catch(() => undefined);
-  return resolveRouteRenderingConfig(mod, source);
+  return resolveRouteRenderingConfig(mod, source, options);
 }
 
 /**
@@ -239,7 +189,7 @@ export function analyzeStaticRouteCandidate(
   };
 }
 
-function findRequestBoundSourceBlockers(source: string): string[] {
+export function findRequestBoundSourceBlockers(source: string): string[] {
   const blockers = new Set<string>();
   const code = stripCommentsAndLiteralContents(source);
 
@@ -529,18 +479,6 @@ function parseKnownRenderingDirective(directive: string): DirectiveRenderingConf
   };
 }
 
-function normalizeDynamicMode(value: unknown): RouteRenderingDynamic | undefined {
-  switch (value) {
-    case "auto":
-    case "force-static":
-    case "force-dynamic":
-    case "error":
-      return value;
-    default:
-      return undefined;
-  }
-}
-
 function readDirectivePrologue(source: string): string[] {
   const directives: string[] = [];
   let index = skipTrivia(source, 0);
@@ -690,10 +628,11 @@ export async function collectSSGPages(
           // Materialize every path before adding any of them. If one entry is
           // invalid, the outer error handler can safely fall the whole route
           // back to SSR without leaving a partial SSG manifest behind.
+          const optionalCatchAllParams = getOptionalCatchAllParameterNames(route.path);
           const materializedPages = paths.map((params) => ({
             urlPath: materializeSSGRoutePath(route.path, params),
             filePath: route.filePath,
-            params: normalizeStaticPathParams(params),
+            params: normalizeStaticPathParams(params, optionalCatchAllParams),
             revalidate: rendering.revalidate,
           }));
 
@@ -825,13 +764,40 @@ function readCatchAllSegments(
   return segments;
 }
 
-function normalizeStaticPathParams(params: StaticPathParams): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(params).map(([key, value]) => [
-      key,
-      isStaticPathArray(value) ? value.map(String).join("/") : String(value),
-    ]),
+function getOptionalCatchAllParameterNames(routePattern: string): ReadonlySet<string> {
+  return new Set(
+    routePattern
+      .split("/")
+      .map((segment) => segment.match(OPTIONAL_CATCH_ALL_SEGMENT)?.[1])
+      .filter((name): name is string => Boolean(name)),
   );
+}
+
+function normalizeStaticPathParams(
+  params: StaticPathParams,
+  optionalCatchAllParams: ReadonlySet<string>,
+): Record<string, string> {
+  const entries = Object.entries(params).map(([key, value]): [string, string] => {
+    const emptyOptionalCatchAll =
+      optionalCatchAllParams.has(key) &&
+      (isMissingPathValue(value) || (isStaticPathArray(value) && value.length === 0));
+    return [
+      key,
+      emptyOptionalCatchAll
+        ? ""
+        : isStaticPathArray(value)
+          ? value.map(String).join("/")
+          : String(value),
+    ];
+  });
+
+  for (const name of optionalCatchAllParams) {
+    if (!Object.prototype.hasOwnProperty.call(params, name)) {
+      entries.push([name, ""]);
+    }
+  }
+
+  return Object.fromEntries(entries);
 }
 
 function isMissingPathValue(value: unknown): value is "" | null | undefined {
@@ -895,8 +861,11 @@ export function getRevalidateInterval(mod: RouteModule | null | undefined): numb
 /**
  * Check if a route module has PPR/static-shell caching enabled.
  */
-export function hasPPR(mod: RouteModule | null | undefined): boolean {
-  return resolveRouteRenderingConfig(mod).ppr;
+export function hasPPR(
+  mod: RouteModule | null | undefined,
+  options?: RouteRenderingOptions,
+): boolean {
+  return resolveRouteRenderingConfig(mod, undefined, options).ppr;
 }
 
 /**

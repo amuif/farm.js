@@ -5,9 +5,55 @@ import test from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { createNodePreviewGatewayHandler, MemoryPreviewGatewayStore } from "../dist/index.js";
 
+test("localhost preview origins preserve the port and serve root-relative scripts", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const gateway = await createGatewayServer(store, { domain: "localhost" });
+  try {
+    const registered = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "browser-demo" }),
+    });
+    const session = await registered.json();
+    assert.equal(session.publicUrl, `http://browser-demo.localhost:${new URL(gateway.url).port}`);
+    const pending = requestWithHeaders(`${gateway.url}/@farm/client.js`, {
+      host: new URL(session.publicUrl).host,
+    });
+    const poll = await (
+      await fetch(
+        `${gateway.url}/api/sessions/${session.id}/requests?token=${session.token}&wait=1000`,
+      )
+    ).json();
+    assert.equal(poll.requests[0].path, "/@farm/client.js");
+    assert.equal(poll.requests[0].headers["x-forwarded-proto"], "http");
+    await store.saveResponse(session.id, poll.requests[0].id, {
+      status: 200,
+      headers: { "content-type": "text/javascript" },
+      body: Buffer.from("window.previewReady = true;").toString("base64"),
+      encoding: "base64",
+    });
+    const response = await pending;
+    assert.equal(response.headers["content-type"], "text/javascript");
+    assert.equal(response.body, "window.previewReady = true;");
+  } finally {
+    await gateway.close();
+  }
+});
+
 test("proxies a public preview request through the gateway queue", async () => {
   const store = new MemoryPreviewGatewayStore();
-  const gateway = await createGatewayServer(store);
+  const activity = [];
+  const gateway = await createGatewayServer(store, {
+    observer: {
+      session(event) {
+        assert.equal(event.token, undefined);
+      },
+      request(event) {
+        activity.push(event);
+        throw new Error("optional telemetry failed");
+      },
+    },
+  });
 
   try {
     const sessionResponse = await fetch(`${gateway.url}/api/sessions`, {
@@ -66,6 +112,73 @@ test("proxies a public preview request through the gateway queue", async () => {
     const response = await publicRequest;
     assert.equal(response.status, 202);
     assert.equal(await response.text(), "preview-ok");
+    assert.equal(activity.length, 1);
+    assert.equal(activity[0].path, "/docs");
+    assert.equal(activity[0].status, 202);
+    assert.equal(activity[0].headers, undefined);
+    assert.equal(activity[0].body, undefined);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("routes preview subdomains only by host, never by the path form", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const gateway = await createGatewayServer(store);
+  const register = async (name) =>
+    await (
+      await fetch(`${gateway.url}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, localUrl: "http://localhost:4321" }),
+      })
+    ).json();
+  const poll = async (session) => {
+    const response = await fetch(
+      `${gateway.url}/api/sessions/${session.id}/requests?token=${session.token}&wait=200`,
+    );
+    return response.status === 204 ? [] : (await response.json()).requests;
+  };
+  const respond = (session, requestId) =>
+    store.saveResponse(session.id, requestId, {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+      body: Buffer.from(session.name).toString("base64"),
+      encoding: "base64",
+    });
+
+  try {
+    const alice = await register("alice");
+    const bob = await register("bob");
+
+    // A tenant origin must not reach another tenant through the path form.
+    const crossTenant = requestWithHeaders(`${gateway.url}/__preview/bob/account`, {
+      host: "alice.preview.farmjs.dev",
+    });
+    const [aliceRequests, bobRequests] = await Promise.all([poll(alice), poll(bob)]);
+    assert.deepEqual(bobRequests, []);
+    assert.equal(aliceRequests.length, 1);
+    assert.equal(aliceRequests[0].path, "/__preview/bob/account");
+    await respond(alice, aliceRequests[0].id);
+    assert.equal((await crossTenant).body, "alice");
+
+    // Hostnames are case-insensitive.
+    const uppercase = requestWithHeaders(`${gateway.url}/upper`, {
+      host: "BOB.Preview.FarmJS.dev",
+    });
+    const [uppercaseRequest] = await poll(bob);
+    assert.equal(uppercaseRequest.path, "/upper");
+    await respond(bob, uppercaseRequest.id);
+    assert.equal((await uppercase).body, "bob");
+
+    // The apex domain keeps the path form.
+    const apex = requestWithHeaders(`${gateway.url}/__preview/bob/apex`, {
+      host: "preview.farmjs.dev",
+    });
+    const [apexRequest] = await poll(bob);
+    assert.equal(apexRequest.path, "/apex");
+    await respond(bob, apexRequest.id);
+    assert.equal((await apex).body, "bob");
   } finally {
     await gateway.close();
   }
@@ -426,10 +539,328 @@ test("keeps a taken-over name routable after the stale session is deleted", asyn
   }
 });
 
+test("reports an online session name as claimed for the other preview transport", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const gateway = await createGatewayServer(store, { clientHeartbeatTimeoutMs: 20 });
+
+  try {
+    const created = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "demo", localUrl: "http://localhost:4321" }),
+    });
+    assert.equal(created.status, 200);
+
+    // The persistent relay serves the same hostnames from its own namespace and
+    // its route wins, so it asks this before accepting a name claim.
+    assert.equal(await gateway.handler.isPreviewNameClaimed("demo"), true);
+    assert.equal(await gateway.handler.isPreviewNameClaimed("Demo"), true);
+    assert.equal(await gateway.handler.isPreviewNameClaimed("other"), false);
+    assert.equal(await gateway.handler.isPreviewNameClaimed(""), false);
+
+    // A session that stopped heartbeating no longer holds its name, matching
+    // how public routing and session creation treat it.
+    await delay(50);
+    assert.equal(await gateway.handler.isPreviewNameClaimed("demo"), false);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("exchanges GitHub login for a scoped expiring preview session", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const signingSecret = "managed-preview-test-secret-that-is-long-enough";
+  const gateway = await createGatewayServer(store, {
+    auth: {
+      signingSecret,
+      githubClientId: "github-client-id",
+      defaultSessionTtlMs: 60_000,
+      maxSessionTtlMs: 120_000,
+      fetch: async (_url, init) => {
+        assert.equal(init.headers.authorization, "Bearer github-provider-token");
+        return Response.json({
+          id: 42,
+          login: "farm-user",
+          name: "Farm User",
+          avatar_url: "https://avatars.example.com/farm-user",
+        });
+      },
+    },
+  });
+
+  try {
+    const config = await fetch(`${gateway.url}/api/auth/config`).then((response) =>
+      response.json(),
+    );
+    assert.deepEqual(config, {
+      enabled: true,
+      controlAuth: "bearer",
+      provider: "github",
+      clientId: "github-client-id",
+      scope: "read:user",
+      defaultSessionTtlMs: 60_000,
+      maxSessionTtlMs: 120_000,
+    });
+
+    const accountResponse = await fetch(`${gateway.url}/api/auth/exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", accessToken: "github-provider-token" }),
+    });
+    assert.equal(accountResponse.status, 200);
+    const account = await accountResponse.json();
+    assert.equal(account.user.login, "farm-user");
+    assert.ok(account.token);
+
+    const invalidExpiry = await fetch(`${gateway.url}/api/tunnel/grants`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "managed-demo", expiresInMs: 1.5 }),
+    });
+    assert.equal(invalidExpiry.status, 400);
+
+    const grantResponse = await fetch(`${gateway.url}/api/tunnel/grants`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "managed-demo", expiresInMs: 90_000 }),
+    });
+    assert.equal(grantResponse.status, 200);
+    const grant = await grantResponse.json();
+    assert.equal(grant.name, "managed-demo");
+    assert.ok(grant.expiresAt > Date.now() + 80_000);
+
+    const mismatchedGrant = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${grant.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "another-name" }),
+    });
+    assert.equal(mismatchedGrant.status, 401);
+
+    const [prefix, payload, signature] = grant.token.split(".");
+    const tamperedPayload = `${payload.startsWith("A") ? "B" : "A"}${payload.slice(1)}`;
+    const tamperedToken = `${prefix}.${tamperedPayload}.${signature}`;
+    const tamperedGrant = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${tamperedToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "managed-demo" }),
+    });
+    assert.equal(tamperedGrant.status, 401);
+
+    const unauthenticated = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "managed-demo" }),
+    });
+    assert.equal(unauthenticated.status, 401);
+
+    const sessionResponse = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${grant.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "managed-demo", localUrl: "http://localhost:4321" }),
+    });
+    assert.equal(sessionResponse.status, 200);
+    const session = await sessionResponse.json();
+    assert.equal(session.expiresAt, grant.expiresAt);
+
+    const heartbeat = await fetch(`${gateway.url}/api/sessions/${session.id}/heartbeat`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}` },
+    });
+    assert.equal(heartbeat.status, 200);
+    assert.equal((await heartbeat.json()).expiresAt, grant.expiresAt);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("slides default self-hosted sessions but preserves explicit absolute expiry", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  const gateway = await createGatewayServer(store, { sessionTtlMs: 60_000 });
+
+  try {
+    const sliding = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "sliding-session" }),
+    }).then((response) => response.json());
+    assert.equal(sliding.expiresAt, undefined);
+
+    const storedSliding = await store.getSessionById(sliding.id);
+    assert.ok(storedSliding);
+    const forcedNearExpiry = Date.now() + 10_000;
+    storedSliding.expiresAt = forcedNearExpiry;
+    const slidingHeartbeatResponse = await fetch(
+      `${gateway.url}/api/sessions/${sliding.id}/heartbeat`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${sliding.token}` },
+      },
+    );
+    assert.equal(slidingHeartbeatResponse.status, 200);
+    const slidingHeartbeat = await slidingHeartbeatResponse.json();
+    assert.equal(slidingHeartbeat.expiresAt, undefined);
+    const renewedSliding = await store.getSessionById(sliding.id);
+    assert.ok(renewedSliding);
+    assert.ok(renewedSliding.expiresAt > forcedNearExpiry + 10_000);
+
+    const absolute = await fetch(`${gateway.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "absolute-session", expiresInMs: 60_000 }),
+    }).then((response) => response.json());
+    assert.ok(absolute.expiresAt > Date.now());
+    const absoluteHeartbeat = await fetch(`${gateway.url}/api/sessions/${absolute.id}/heartbeat`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${absolute.token}` },
+    }).then((response) => response.json());
+    assert.equal(absoluteHeartbeat.expiresAt, absolute.expiresAt);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("rate limits managed auth exchange before contacting GitHub", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  let limitChecks = 0;
+  let githubRequests = 0;
+  const gateway = await createGatewayServer(store, {
+    auth: {
+      signingSecret: "managed-preview-test-secret-that-is-long-enough",
+      githubClientId: "github-client-id",
+      rateLimitExchange: (request) => {
+        limitChecks += 1;
+        assert.equal(request.headers.get("x-forwarded-for"), "203.0.113.8");
+        return limitChecks === 1 ? { allowed: true } : { allowed: false, retryAfterMs: 1_250 };
+      },
+      fetch: async () => {
+        githubRequests += 1;
+        return Response.json({ id: 42, login: "farm-user" });
+      },
+    },
+  });
+
+  try {
+    const exchange = (
+      body = JSON.stringify({ provider: "github", accessToken: "provider-token" }),
+    ) =>
+      fetch(`${gateway.url}/api/auth/exchange`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.8",
+        },
+        body,
+      });
+
+    assert.equal((await exchange()).status, 200);
+    const limited = await exchange("not-json");
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "2");
+    assert.match(await limited.text(), /Too many Farm Preview login attempts/);
+    assert.equal(limitChecks, 2);
+    assert.equal(githubRequests, 1);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("fails managed auth exchange closed when its rate limiter is unavailable", async () => {
+  const store = new MemoryPreviewGatewayStore();
+  let githubRequests = 0;
+  const gateway = await createGatewayServer(store, {
+    auth: {
+      signingSecret: "managed-preview-test-secret-that-is-long-enough",
+      githubClientId: "github-client-id",
+      rateLimitExchange: async (request) => {
+        assert.equal(request.bodyUsed, false);
+        throw new Error("private redis connection details");
+      },
+      fetch: async () => {
+        githubRequests += 1;
+        return Response.json({ id: 42, login: "farm-user" });
+      },
+    },
+  });
+
+  try {
+    const response = await fetch(`${gateway.url}/api/auth/exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", accessToken: "provider-token" }),
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("retry-after"), "1");
+    const body = await response.text();
+    assert.match(body, /Farm Preview login is temporarily unavailable/);
+    assert.ok(!body.includes("private redis connection details"));
+    assert.equal(githubRequests, 0);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("shows browser visitors a friendly expired preview page", async () => {
+  const deletedSessionIds = [];
+  const store = new (class extends MemoryPreviewGatewayStore {
+    async deleteSession(session) {
+      deletedSessionIds.push(session.id);
+      await super.deleteSession(session);
+    }
+  })();
+  const gateway = await createGatewayServer(store);
+  const expiredSession = {
+    id: "sess_expired",
+    name: "finished-demo",
+    hostname: "finished-demo.preview.farmjs.dev",
+    publicUrl: `${gateway.url}/__preview/finished-demo`,
+    token: "expired-token",
+    createdAt: Date.now() - 120_000,
+    expiresAt: Date.now() - 60_000,
+    lastHeartbeatAt: Date.now() - 60_000,
+  };
+
+  try {
+    await store.createSession(expiredSession, 1);
+    assert.deepEqual(deletedSessionIds, []);
+    const response = await fetch(`${gateway.url}/__preview/finished-demo`, {
+      headers: { accept: "text/html" },
+    });
+    assert.equal(response.status, 410);
+    const page = await response.text();
+    assert.match(page, /This Farm preview has expired/);
+    assert.match(page, /<a href="https:\/\/farmjs\.dev">Farm\.js<\/a>/);
+    assert.match(
+      page,
+      /<a class="start" href="https:\/\/farmjs\.dev\/docs\/preview">Try farm preview<\/a>/,
+    );
+    assert.deepEqual(deletedSessionIds, [expiredSession.id]);
+    assert.equal(await store.getSessionById(expiredSession.id), undefined);
+  } finally {
+    await gateway.close();
+  }
+});
+
 async function createGatewayServer(store, options = {}) {
   const handler = createNodePreviewGatewayHandler({
     store,
-    domain: "preview.farming-labs.dev",
+    domain: "preview.farmjs.dev",
     requestTimeoutMs: 2000,
     pollTimeoutMs: 1000,
     pollIntervalMs: 10,
@@ -447,6 +878,7 @@ async function createGatewayServer(store, options = {}) {
 
   return {
     url: `http://localhost:${address.port}`,
+    handler,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

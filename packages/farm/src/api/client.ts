@@ -26,6 +26,7 @@ import { _resolveCurrentRequest } from "../server/request-bridge";
 import { resolveClientHeaders, type ClientHeaders } from "../client-headers";
 import { createClientCancellation } from "../client-cancellation";
 import { notifyClientObserver, type ClientLifecycleHooks } from "../client-observers";
+import { resolveClientRetryCount, resolveClientRetryDelay } from "../client-retry";
 import { resolveAPIRequestRuntime, type APIRequestRuntime } from "./server-client-bridge";
 export type { APIRouteManifest } from "./client-routes";
 import {
@@ -167,12 +168,52 @@ export type CacheOptions = {
   staleTime?: number;
   gcTime?: number;
   dedupeMs?: number;
+  /** Allow the configured client cache persistence adapter to store this read. */
+  persist?: boolean;
+};
+
+export type RetryAttemptContext = {
+  /** Zero-based index of the attempt that just failed. */
+  attempt: number;
+  /** Upper-case HTTP method of the request. */
+  method: string;
+  /** Response status, or undefined when the request never produced a response. */
+  status?: number;
+  error: Error;
 };
 
 export type RetryOptions = {
   count?: number;
   delay?: number | ((attempt: number) => number);
+  /**
+   * Decide whether a failed attempt should be retried.
+   *
+   * Defaults to transient failures of idempotent requests only: replaying a
+   * POST or PATCH whose response was lost duplicates the write it performed.
+   * Supply this to opt a specific call in or out.
+   */
+  shouldRetry?: (context: RetryAttemptContext) => boolean;
 };
+
+/**
+ * Methods whose replay has the same effect as a single call, so a retry cannot
+ * duplicate work: the idempotent set from RFC 9110, plus QUERY, which Farm
+ * supports as a read that carries a body.
+ */
+const FARM_IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "QUERY"]);
+
+/** Statuses that represent a transient condition worth another attempt. */
+const FARM_RETRYABLE_STATUSES = new Set([408, 425, 429]);
+
+function isFarmRetryableFailure(context: RetryAttemptContext): boolean {
+  // A non-idempotent request may already have been applied by the server even
+  // when the client never saw the response, so it is never retried by default.
+  if (!FARM_IDEMPOTENT_METHODS.has(context.method)) return false;
+  // No response at all: a transport failure, which is the transient case retries
+  // exist for.
+  if (context.status === undefined) return true;
+  return context.status >= 500 || FARM_RETRYABLE_STATUSES.has(context.status);
+}
 
 export type InvalidateTarget =
   | FarmClientCacheKey
@@ -297,16 +338,39 @@ type BodyInputProp<TValue> =
         ? { body?: TValue }
         : { body: TValue };
 
+export type APIQueryPrimitive = string | number | boolean | bigint;
+export type APIQueryValue =
+  | APIQueryPrimitive
+  | null
+  | undefined
+  | readonly (APIQueryPrimitive | null | undefined)[];
+
+type NormalizeAPIQueryValue<TValue> = TValue extends null | undefined
+  ? TValue
+  : TValue extends APIQueryPrimitive
+    ? TValue
+    : TValue extends readonly (infer TItem)[]
+      ? Exclude<TItem, null | undefined> extends APIQueryPrimitive
+        ? TValue
+        : never
+      : never;
+
+type NormalizeAPIQueryInput<TValue> = TValue extends URLSearchParams
+  ? TValue
+  : TValue extends object
+    ? { [TKey in keyof TValue]: NormalizeAPIQueryValue<TValue[TKey]> }
+    : never;
+
 type QueryInputProp<TValue> =
   IsNever<TValue> extends true
     ? {}
     : IsAny<TValue> extends true
       ? { query?: TValue }
       : undefined extends TValue
-        ? { query?: TValue }
+        ? { query?: NormalizeAPIQueryInput<TValue> }
         : RequiredKeys<TValue> extends never
-          ? { query?: TValue }
-          : { query: TValue };
+          ? { query?: NormalizeAPIQueryInput<TValue> }
+          : { query: NormalizeAPIQueryInput<TValue> };
 
 type HasRequiredKeys<T> = RequiredKeys<T> extends never ? false : true;
 
@@ -332,7 +396,7 @@ type InferEndpointInput<T> = T extends {
 }
   ? Simplify<
       BodyInputProp<InferEndpointBody<T>> &
-        QueryInputProp<TQuery> &
+        QueryInputProp<T extends { __types: { inputQuery: infer I } } ? I : TQuery> &
         (T extends { __routeParams: infer P }
           ? keyof P extends never
             ? { params?: never }
@@ -669,113 +733,6 @@ function createAPIClientRuntime<
   const routeMeta = transport?.routeMeta ?? new WeakMap<AnyRouteRef, RouteMeta>();
   let requestCounter = 0;
 
-  const applyOptimisticLayer = (
-    entry: CacheEntry | undefined,
-    layer: OptimisticLayer,
-  ): CacheEntry => {
-    let data = entry?.data;
-    for (const updater of layer.updaters) data = updater(data);
-
-    return {
-      data,
-      updatedAt: layer.updatedAt,
-      staleAt: entry?.staleAt ?? layer.staleAt,
-      gcAt: entry?.gcAt ?? layer.gcAt,
-      invalidatedAt: entry?.invalidatedAt,
-      [API_CACHE_REFETCH]: entry?.[API_CACHE_REFETCH],
-    };
-  };
-
-  const storeOptimisticEntry = (
-    cacheState: FarmClientDataCache,
-    key: string,
-    stack: OptimisticStack,
-    entry: CacheEntry | undefined,
-  ) => {
-    if (!entry) {
-      cacheState.delete(key);
-      stack.renderedEntry = undefined;
-      return;
-    }
-
-    cacheState.set(key, entry);
-    if (stack.invalidatedAt !== undefined) {
-      cacheState.invalidate(key, stack.invalidatedAt);
-    }
-    stack.renderedEntry = cacheState.get(key);
-  };
-
-  const reconcileOptimisticInvalidation = (
-    cacheState: FarmClientDataCache,
-    key: string,
-    stack: OptimisticStack,
-  ) => {
-    const current = cacheState.get(key);
-    const rendered = stack.renderedEntry;
-    if (current === rendered) return true;
-    if (
-      !current ||
-      !rendered ||
-      current.data !== rendered.data ||
-      current.updatedAt !== rendered.updatedAt ||
-      current.gcAt !== rendered.gcAt ||
-      current.status !== rendered.status ||
-      current.error !== rendered.error ||
-      current.fetching !== rendered.fetching ||
-      current.staleAt !== 0 ||
-      current.invalidatedAt === undefined
-    ) {
-      return false;
-    }
-
-    stack.invalidatedAt = current.invalidatedAt;
-    stack.renderedEntry = current;
-    return true;
-  };
-
-  const renderOptimisticStack = (
-    cacheState: FarmClientDataCache,
-    key: string,
-    stack: OptimisticStack,
-  ) => {
-    let entry = stack.entry ? { ...stack.entry } : undefined;
-    for (const layer of stack.layers) entry = applyOptimisticLayer(entry, layer);
-    storeOptimisticEntry(cacheState, key, stack, entry);
-  };
-
-  const settleOptimisticUpdates = (
-    cacheState: FarmClientDataCache,
-    optimisticState: Map<string, OptimisticStack>,
-    snapshots: OptimisticSnapshot[],
-    outcome: "commit" | "rollback" | "invalidate",
-  ) => {
-    const settledKeys: string[] = [];
-    for (const snapshot of snapshots) {
-      const stack = optimisticState.get(snapshot.key);
-      if (stack !== snapshot.stack) continue;
-      if (!reconcileOptimisticInvalidation(cacheState, snapshot.key, stack)) {
-        optimisticState.delete(snapshot.key);
-        continue;
-      }
-
-      if (outcome === "rollback") {
-        stack.layers = stack.layers.filter((layer) => layer !== snapshot.layer);
-      } else {
-        snapshot.layer.committed = true;
-        if (outcome === "invalidate") stack.invalidatedAt = Date.now();
-      }
-
-      while (stack.layers[0]?.committed) {
-        stack.entry = applyOptimisticLayer(stack.entry, stack.layers.shift()!);
-      }
-
-      renderOptimisticStack(cacheState, snapshot.key, stack);
-      if (stack.layers.length === 0) optimisticState.delete(snapshot.key);
-      settledKeys.push(snapshot.key);
-    }
-    return settledKeys;
-  };
-
   // Create a simple fetch-based client (browser compatible)
   const fetchClient = async (
     path: string,
@@ -788,14 +745,7 @@ function createAPIClientRuntime<
 
     // Handle query parameters
     if (requestOptions.query) {
-      Object.entries(requestOptions.query).forEach(([key, value]) => {
-        if (value === undefined || value === null) return;
-        url.searchParams.delete(key);
-        const values = Array.isArray(value) ? value : [value];
-        for (const item of values) {
-          if (item !== undefined && item !== null) url.searchParams.append(key, String(item));
-        }
-      });
+      appendAPIQuery(url.searchParams, requestOptions.query);
     }
 
     // Prepare fetch options
@@ -854,6 +804,10 @@ function createAPIClientRuntime<
     input: any = {},
     clientOptions?: ClientOptions<any, any>,
   ): Promise<APIResult<any, Error>> => {
+    const maxRetries = resolveClientRetryCount(clientOptions?.retry?.count);
+    if (typeof clientOptions?.retry?.delay !== "function") {
+      resolveClientRetryDelay(clientOptions?.retry?.delay);
+    }
     const cancellation = createClientCancellation(
       clientOptions?.signal,
       clientOptions?.timeoutMs ?? options.timeoutMs,
@@ -900,15 +854,21 @@ function createAPIClientRuntime<
       const now = Date.now();
 
       const emitStatus = (phase: StatusPhase, payload?: Partial<StatusEvent>) => {
-        clientOptions?.onStatus?.({
-          phase,
-          requestId,
-          method: methodUpper,
-          key: cacheKey,
-          input,
-          timestamp: Date.now(),
-          ...payload,
-        });
+        notifyClientObserver(
+          clientOptions?.onStatus,
+          [
+            {
+              phase,
+              requestId,
+              method: methodUpper,
+              key: cacheKey,
+              input,
+              timestamp: Date.now(),
+              ...payload,
+            },
+          ],
+          "API client onStatus",
+        );
       };
 
       const policy = cacheOptions?.policy ?? (cacheOptions ? "cache-first" : "network-only");
@@ -923,7 +883,7 @@ function createAPIClientRuntime<
         isCacheEnabled ||
         Boolean(clientOptions?.optimistic?.update?.length) ||
         Boolean(clientOptions?.invalidate);
-      let requestCacheContext = requestContextError ? `invalid:${requestId}` : undefined;
+      let requestCacheContext: string | undefined = undefined;
       if (needsCacheState && !requestContextError) {
         try {
           requestCacheContext = getRequestCacheContext(
@@ -934,7 +894,6 @@ function createAPIClientRuntime<
             httpFetch ? "client" : cacheOptions?.scope,
           );
         } catch (error) {
-          requestCacheContext = `invalid:${requestId}`;
           requestContextError = normalizeError(error);
         }
       }
@@ -1079,12 +1038,16 @@ function createAPIClientRuntime<
               emitStatus("error", { error: result.error, isBackground: opts?.isBackground });
               notifyClientObserver(options.onError, [result.error]);
               if (opts?.callCallbacks !== false) {
-                clientOptions?.onError?.(result.error);
+                notifyClientObserver(clientOptions?.onError, [result.error], "API client onError");
               }
             } else {
               emitStatus("success", { data: result.data, isBackground: opts?.isBackground });
               if (opts?.callCallbacks !== false) {
-                clientOptions?.onSuccess?.(result.data as any);
+                notifyClientObserver(
+                  clientOptions?.onSuccess,
+                  [result.data],
+                  "API client onSuccess",
+                );
               }
             }
 
@@ -1109,7 +1072,7 @@ function createAPIClientRuntime<
           });
 
           const promise = (async () => {
-            const maxRetries = Math.max(0, clientOptions?.retry?.count ?? 0);
+            const shouldRetryFailure = clientOptions?.retry?.shouldRetry ?? isFarmRetryableFailure;
             let attempt = 0;
 
             // eslint-disable-next-line no-constant-condition
@@ -1125,7 +1088,11 @@ function createAPIClientRuntime<
                   timestamp: Date.now(),
                 };
                 notifyClientObserver(options.onRequest, [requestEvent]);
-                clientOptions?.onRequest?.(requestEvent);
+                notifyClientObserver(
+                  clientOptions?.onRequest,
+                  [requestEvent],
+                  "API client onRequest",
+                );
               }
 
               try {
@@ -1175,7 +1142,15 @@ function createAPIClientRuntime<
                   return { data, error: null, key: cacheKey } as APIResult<any, Error>;
                 }
 
-                if (attempt >= maxRetries) {
+                if (
+                  attempt >= maxRetries ||
+                  !shouldRetryFailure({
+                    attempt,
+                    method: methodUpper,
+                    status: response.status,
+                    error,
+                  })
+                ) {
                   return { data: undefined, error, key: cacheKey } as APIResult<any, Error>;
                 }
               } catch (err: any) {
@@ -1195,16 +1170,22 @@ function createAPIClientRuntime<
                 notifyClientObserver(options.onResponse, [undefined, error, responseEvent]);
                 notifyResponseObserver(clientOptions?.onResponse, undefined, error, responseEvent);
 
-                if (attempt >= maxRetries || requestContextError || cancellation.signal?.aborted) {
+                if (
+                  attempt >= maxRetries ||
+                  requestContextError ||
+                  cancellation.signal?.aborted ||
+                  !shouldRetryFailure({ attempt, method: methodUpper, error })
+                ) {
                   return { data: undefined, error, key: cacheKey } as APIResult<any, Error>;
                 }
               }
 
               attempt += 1;
-              const delay =
+              const delay = resolveClientRetryDelay(
                 typeof clientOptions?.retry?.delay === "function"
                   ? clientOptions.retry.delay(attempt)
-                  : (clientOptions?.retry?.delay ?? 0);
+                  : clientOptions?.retry?.delay,
+              );
 
               if (delay > 0) {
                 try {
@@ -1241,6 +1222,7 @@ function createAPIClientRuntime<
                 staleAt: updatedAt + staleTime,
                 gcAt: getGcAt(updatedAt, cacheOptions?.gcTime),
                 invalidatedAt: undefined,
+                persist: cacheOptions?.persist === true ? true : undefined,
                 [API_CACHE_REFETCH]: createCacheRefetch(
                   request,
                   path,
@@ -1259,12 +1241,16 @@ function createAPIClientRuntime<
               emitStatus("error", { error: result.error, isBackground: opts?.isBackground });
               notifyClientObserver(options.onError, [result.error]);
               if (opts?.callCallbacks !== false) {
-                clientOptions?.onError?.(result.error);
+                notifyClientObserver(clientOptions?.onError, [result.error], "API client onError");
               }
             } else {
               emitStatus("success", { data: result.data, isBackground: opts?.isBackground });
               if (opts?.callCallbacks !== false) {
-                clientOptions?.onSuccess?.(result.data as any);
+                notifyClientObserver(
+                  clientOptions?.onSuccess,
+                  [result.data],
+                  "API client onSuccess",
+                );
               }
             }
 
@@ -1341,15 +1327,23 @@ function createAPIClientRuntime<
       if (isCacheEnabled && !requestContextError && !cancellation.signal?.aborted) {
         if (entry && !isStale && policy !== "network-only") {
           emitStatus("success", { data: entry.data });
-          clientOptions?.onSuccess?.(entry.data);
-          clientOptions?.onSettled?.(entry.data, null);
+          notifyClientObserver(clientOptions?.onSuccess, [entry.data], "API client onSuccess");
+          notifyClientObserver(
+            clientOptions?.onSettled,
+            [entry.data, null],
+            "API client onSettled",
+          );
           return { data: entry.data, error: null, key: cacheKey };
         }
 
         if (entry && isStale && policy === "stale-while-revalidate") {
           emitStatus("success", { data: entry.data });
-          clientOptions?.onSuccess?.(entry.data);
-          clientOptions?.onSettled?.(entry.data, null);
+          notifyClientObserver(clientOptions?.onSuccess, [entry.data], "API client onSuccess");
+          notifyClientObserver(
+            clientOptions?.onSettled,
+            [entry.data, null],
+            "API client onSettled",
+          );
 
           void executeNetwork({ isBackground: true, callCallbacks: false });
           return { data: entry.data, error: null, key: cacheKey };
@@ -1368,7 +1362,11 @@ function createAPIClientRuntime<
         settleOptimisticUpdates(cacheState, optimisticState, optimisticSnapshots, "commit");
         await invalidateTargets();
       }
-      clientOptions?.onSettled?.(result.data, result.error);
+      notifyClientObserver(
+        clientOptions?.onSettled,
+        [result.data, result.error],
+        "API client onSettled",
+      );
       return result;
     } finally {
       cancellation.dispose();
@@ -1512,6 +1510,10 @@ function createNestedProxy(
   const proxy = new Proxy(target, {
     // When accessing a property (api.hello)
     get(_target, prop: string | symbol) {
+      // Promise resolution probes arbitrary values for a callable `then`.
+      // Route proxies are not promises; literal /then routes remain available
+      // through the leading-slash alias.
+      if (prop === "then") return undefined;
       if (prop === "$params") {
         return (params: unknown) => {
           if (!manifest)
@@ -1550,7 +1552,12 @@ function createNestedProxy(
         });
       }
 
-      if (path.length === 0 && typeof prop === "string" && rootAliases && prop in rootAliases) {
+      if (
+        path.length === 0 &&
+        typeof prop === "string" &&
+        rootAliases &&
+        Object.prototype.hasOwnProperty.call(rootAliases, prop)
+      ) {
         return rootAliases[prop];
       }
 
@@ -1796,6 +1803,215 @@ function getOptimisticState(cache: FarmClientDataCache): Map<string, OptimisticS
   return state;
 }
 
+function applyOptimisticLayer(entry: CacheEntry | undefined, layer: OptimisticLayer): CacheEntry {
+  let data = entry?.data;
+  for (const updater of layer.updaters) data = updater(data);
+
+  return {
+    data,
+    updatedAt: layer.updatedAt,
+    staleAt: entry?.staleAt ?? layer.staleAt,
+    gcAt: entry?.gcAt ?? layer.gcAt,
+    invalidatedAt: entry?.invalidatedAt,
+    [API_CACHE_REFETCH]: entry?.[API_CACHE_REFETCH],
+  };
+}
+
+function storeOptimisticEntry(
+  cacheState: FarmClientDataCache,
+  key: string,
+  stack: OptimisticStack,
+  entry: CacheEntry | undefined,
+): void {
+  if (!entry) {
+    cacheState.delete(key);
+    stack.renderedEntry = undefined;
+    return;
+  }
+
+  cacheState.set(key, entry);
+  if (stack.invalidatedAt !== undefined) {
+    cacheState.invalidate(key, stack.invalidatedAt);
+  }
+  stack.renderedEntry = cacheState.get(key);
+}
+
+function reconcileOptimisticInvalidation(
+  cacheState: FarmClientDataCache,
+  key: string,
+  stack: OptimisticStack,
+): boolean {
+  const current = cacheState.get(key);
+  const rendered = stack.renderedEntry;
+  if (current === rendered) return true;
+  if (
+    !current ||
+    !rendered ||
+    current.data !== rendered.data ||
+    current.updatedAt !== rendered.updatedAt ||
+    current.gcAt !== rendered.gcAt ||
+    current.status !== rendered.status ||
+    current.error !== rendered.error ||
+    current.fetching !== rendered.fetching ||
+    current.staleAt !== 0 ||
+    current.invalidatedAt === undefined
+  ) {
+    return false;
+  }
+
+  stack.invalidatedAt = current.invalidatedAt;
+  stack.renderedEntry = current;
+  return true;
+}
+
+function renderOptimisticStack(
+  cacheState: FarmClientDataCache,
+  key: string,
+  stack: OptimisticStack,
+): void {
+  let entry = stack.entry ? { ...stack.entry } : undefined;
+  for (const layer of stack.layers) entry = applyOptimisticLayer(entry, layer);
+  storeOptimisticEntry(cacheState, key, stack, entry);
+}
+
+function settleOptimisticUpdates(
+  cacheState: FarmClientDataCache,
+  optimisticState: Map<string, OptimisticStack>,
+  snapshots: OptimisticSnapshot[],
+  outcome: "commit" | "rollback" | "invalidate",
+): string[] {
+  const settledKeys: string[] = [];
+  for (const snapshot of snapshots) {
+    const stack = optimisticState.get(snapshot.key);
+    if (stack !== snapshot.stack) continue;
+    if (!reconcileOptimisticInvalidation(cacheState, snapshot.key, stack)) {
+      optimisticState.delete(snapshot.key);
+      continue;
+    }
+
+    if (outcome === "rollback") {
+      stack.layers = stack.layers.filter((layer) => layer !== snapshot.layer);
+    } else {
+      snapshot.layer.committed = true;
+      if (outcome === "invalidate") stack.invalidatedAt = Date.now();
+    }
+
+    while (stack.layers[0]?.committed) {
+      stack.entry = applyOptimisticLayer(stack.entry, stack.layers.shift()!);
+    }
+
+    renderOptimisticStack(cacheState, snapshot.key, stack);
+    if (stack.layers.length === 0) optimisticState.delete(snapshot.key);
+    settledKeys.push(snapshot.key);
+  }
+  return settledKeys;
+}
+
+/**
+ * @internal Apply key-targeted optimistic updates to the shared client cache
+ * for a server-function mutation. Route-reference update tuples need an API
+ * caller's route metadata and are skipped here; use structured cache keys.
+ */
+export function applyServerFnOptimisticUpdates(
+  updates: readonly OptimisticUpdate[],
+  now = Date.now(),
+): OptimisticSnapshot[] {
+  const cacheState = getFarmClientDataCache();
+  const optimisticState = getOptimisticState(cacheState);
+  const snapshots = new Map<string, OptimisticSnapshot>();
+
+  for (const update of updates) {
+    if (update.length !== 2) continue;
+    const [target, updater] = update;
+    if (typeof updater !== "function") continue;
+    const targetKey =
+      typeof target === "string" || Array.isArray(target)
+        ? normalizeFarmClientCacheKey(target as FarmClientCacheKey)
+        : null;
+    if (!targetKey) continue;
+
+    const targetEntry = getValidCacheEntry(cacheState, targetKey, now);
+    const currentEntry = cacheState.get(targetKey);
+    let stack = optimisticState.get(targetKey);
+    if (stack && !reconcileOptimisticInvalidation(cacheState, targetKey, stack)) {
+      stack = undefined;
+    }
+    if (!stack) {
+      stack = {
+        entry: targetEntry ? { ...targetEntry } : undefined,
+        layers: [],
+        renderedEntry: currentEntry,
+      };
+      optimisticState.set(targetKey, stack);
+    }
+
+    let snapshot = snapshots.get(targetKey);
+    if (!snapshot) {
+      const previousEntry = stack.layers.length === 0 ? stack.entry : stack.renderedEntry;
+      const layer: OptimisticLayer = {
+        updaters: [],
+        updatedAt: now,
+        // A server function has no cache policy of its own; preserve the
+        // target read's freshness metadata when it exists.
+        staleAt: targetEntry?.staleAt ?? now,
+        gcAt: targetEntry?.gcAt,
+      };
+      stack.layers.push(layer);
+      snapshot = { key: targetKey, stack, layer };
+      snapshots.set(targetKey, snapshot);
+      snapshot.layer.updaters.push(updater);
+      const nextEntry = applyOptimisticLayer(previousEntry, {
+        ...snapshot.layer,
+        updaters: [updater],
+      });
+      storeOptimisticEntry(cacheState, targetKey, stack, nextEntry);
+      continue;
+    }
+    snapshot.layer.updaters.push(updater);
+    const nextEntry = applyOptimisticLayer(stack.renderedEntry, {
+      ...snapshot.layer,
+      updaters: [updater],
+    });
+    storeOptimisticEntry(cacheState, targetKey, stack, nextEntry);
+  }
+
+  return Array.from(snapshots.values());
+}
+
+/**
+ * @internal Settle a server-function mutation's optimistic snapshots with the
+ * API client's semantics: commit on success, rollback on failure with
+ * `rollbackOnError`, and mark-stale on failure without it.
+ */
+export function settleServerFnOptimisticUpdates(
+  snapshots: OptimisticSnapshot[],
+  outcome: "commit" | "rollback" | "invalidate",
+): void {
+  if (snapshots.length === 0) return;
+  const cacheState = getFarmClientDataCache();
+  settleOptimisticUpdates(cacheState, getOptimisticState(cacheState), snapshots, outcome);
+}
+
+/**
+ * @internal Resolve a server-function mutation's invalidate targets to cache
+ * keys. Route-reference and path targets need an API caller's identity and are
+ * skipped; use structured cache keys. Keys are applied through the shared
+ * invalidation bus, matching server-declared `invalidates`.
+ */
+export function resolveServerFnInvalidateTargets(invalidate: InvalidateOptions): string[] {
+  const targets = Array.isArray(invalidate) ? invalidate : invalidate.targets;
+  const keys: string[] = [];
+  for (const target of targets) {
+    if (typeof target === "string" || Array.isArray(target)) {
+      if (Array.isArray(target) && typeof target[0] === "function") continue;
+      keys.push(normalizeFarmClientCacheKey(target as FarmClientCacheKey));
+    } else if (target && typeof target === "object" && "key" in target) {
+      keys.push(normalizeFarmClientCacheKey(target.key));
+    }
+  }
+  return keys;
+}
+
 function buildCacheKey(
   method: string,
   path: string,
@@ -1833,9 +2049,13 @@ function isSameOriginAPIBaseURL(baseURL: string): boolean {
 function stableStringify(value: any): string {
   if (value === null || value === undefined) return String(value);
   if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return `bigint:${value.toString()}`;
   if (typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (value instanceof URLSearchParams) {
+    return `urlsearchparams:${stableStringify(Array.from(value.entries()))}`;
   }
 
   const keys = Object.keys(value).sort();
@@ -2005,6 +2225,42 @@ function isFormData(value: unknown): value is FormData {
     ((typeof FormData !== "undefined" && value instanceof FormData) ||
       (Object.prototype.toString.call(value) === "[object FormData]" &&
         typeof (value as { entries?: unknown }).entries === "function"))
+  );
+}
+
+function appendAPIQuery(searchParams: URLSearchParams, query: unknown): void {
+  if (query instanceof URLSearchParams) {
+    const keys = new Set(query.keys());
+    for (const key of keys) searchParams.delete(key);
+    query.forEach((value, key) => searchParams.append(key, value));
+    return;
+  }
+  if (!query || typeof query !== "object" || Array.isArray(query)) {
+    throw new TypeError("API query input must be an object or URLSearchParams.");
+  }
+
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null) continue;
+    searchParams.delete(key);
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      if (item === undefined || item === null) continue;
+      if (!isAPIQueryPrimitive(item)) {
+        throw new TypeError(
+          `API query parameter "${key}" must be a string, number, boolean, bigint, or an array of those values.`,
+        );
+      }
+      searchParams.append(key, String(item));
+    }
+  }
+}
+
+function isAPIQueryPrimitive(value: unknown): value is APIQueryPrimitive {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
   );
 }
 

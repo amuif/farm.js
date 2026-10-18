@@ -6,6 +6,11 @@ export interface FarmDocsAdapterDescriptor {
   server: string;
   react?: string;
   vite?: string;
+  /**
+   * Build-time entry that compiles the adapter's docs runtime into Farm's
+   * serializable edge manifest. Older Farm releases safely ignore it.
+   */
+  edgeCompiler?: string;
 }
 
 export interface FarmDocsSidebarItem {
@@ -95,4 +100,12 @@ export interface FarmDocsResolvedConfig {
   contentDir?: string;
   configPath?: string;
   config: FarmDocsRuntimeConfig & Pick<DocsConfig, "entry">;
+  /**
+   * `config` before it was made serializable: icons and other React elements, MDX
+   * components, and callbacks intact. Only the in-process adapter runtime reads it;
+   * whatever Farm serializes uses `config`.
+   */
+  runtimeConfig?: FarmDocsRuntimeConfig & Pick<DocsConfig, "entry">;
+  /** The serializable docs settings from `farm.config.ts`, applied over the config file. */
+  configOverrides?: Partial<DocsConfig>;
 }

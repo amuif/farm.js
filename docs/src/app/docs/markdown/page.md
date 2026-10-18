@@ -100,6 +100,30 @@ export const components = {
 
 Set `mdx.markdownRoutes` to `false` when source-authored pages should render as HTML only.
 
+### Interactive components
+
+A `"use client"` component the components module imports hydrates as an island in React apps, so
+it works inside Markdown pages, including under a layout that hydrates as a whole route. The rest
+of the page stays server HTML. Island props must be serializable, the same limit as other islands.
+
+```tsx title="src/components/copy-button.tsx"
+"use client";
+
+import { useState } from "react";
+
+export function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button onClick={() => navigator.clipboard.writeText(text).then(() => setCopied(true))}>
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+```
+
+Islands need `mdx.components` to be a module path. Components from a package that marks itself
+`"use client"` render as static HTML on Markdown pages, and Farm logs which packages it left static.
+
 ## Restrict exposed pages
 
 Automatic mirrors include all application page routes. Restrict them when an application contains
@@ -141,6 +165,12 @@ export default defineConfig({
 Explicit `page.md` and `page.mdx` sources use `mdx.markdownRoutes`; set that option to `false` when
 their raw routes must also be disabled.
 
+## llms.txt
+
+Set `agent: { llmsTxt: true }` to publish `/llms.txt`, an index that points language models at these
+mirrors, and `/llms-full.txt`, which inlines them. See
+[Agent readiness](/docs/configuration#agent-readiness).
+
 ## Per-route options
 
 Routes can include a display title and cache override.
@@ -163,7 +193,7 @@ export default defineConfig({
 
 ## What gets returned
 
-Markdown mirrors call the rendered page, strip scripts/styles, convert HTML headings, paragraphs, lists, blockquotes, and code blocks into markdown, then return `text/markdown`.
+Markdown mirrors call the rendered page, strip scripts/styles and elements hidden by an attribute (`aria-hidden="true"`, or `hidden` except `hidden="until-found"`, which the browser can reveal), convert HTML headings, paragraphs, lists (ordered lists keep their numbers), blockquotes, tables (as GFM tables), and code blocks (keeping a `language-*` class or `data-language` as the fence language) into markdown, then return `text/markdown`. The mirror is built without CSS, so text hidden only by a stylesheet (`display: none`, a collapsed menu) still appears. Mark decorative text `aria-hidden` to keep it out of the mirror as well as out of screen readers.
 
 **Terminal**
 
@@ -179,7 +209,116 @@ curl -H "Accept: text/markdown" http://localhost:3000/pricing
 
 Farm returns the same markdown representation with `Content-Type: text/markdown`,
 `Content-Location: /pricing.md`, and `Vary: Accept`. The HTML response also advertises the
-`.md` URL through a `Link` header, while ordinary browser requests continue to receive HTML.
+`.md` URL through a `Link` header and a `<link rel="alternate" type="text/markdown">` tag in the
+document head, while ordinary browser requests continue to receive HTML. Set
+`metadata.alternates.types["text/markdown"]` to point the head link somewhere else.
+
+Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
+production, so they answer every request with HTML. They still send the `Link` header, and their
+`.md` URL works, so agents should follow the header or request the `.md` URL directly.
+
+## Read part of a page
+
+Agents can fetch less than the whole page. Every Markdown response, from a mirror or a `page.md`,
+accepts these query parameters:
+
+```bash
+curl "http://localhost:3000/pricing.md?outline"
+curl "http://localhost:3000/pricing.md?section=plans"
+curl "http://localhost:3000/pricing.md?max_tokens=2000"
+```
+
+- `?outline` returns the heading tree. Each entry links to its section and estimates its size in
+  tokens, so an agent can decide what to read.
+- `?section=<id>` returns one heading and everything under it, up to the next heading at the same
+  or a higher level. Ids follow GitHub's heading anchors (`## Team plans` is `team-plans`; a
+  repeated heading gets `-1`, `-2`). An unknown id answers `404` with the list of valid ids.
+- `?max_tokens=<n>` returns the page, or the section with `?section`, in parts of about `n` tokens
+  (at least 100). See [Read a long page in parts](#read-a-long-page-in-parts).
+
+Headings inside fenced code blocks and front matter are ignored. Every Markdown response also
+carries an `ETag`, so an agent can re-check a page with `If-None-Match` and receive `304 Not
+Modified` when it has not changed.
+
+### Read a long page in parts
+
+`?max_tokens=<n>` keeps each response within an agent's budget. A page that fits comes back whole.
+A longer one comes back in parts, each cut where a reader would pause, before a heading or after a
+paragraph, and ending with a link to the next part:
+
+```md
+## Install
+
+...
+
+---
+
+Continue: /guide.md?max_tokens=2000&cursor=48.k3j9x2a1 (about 3100 more tokens)
+```
+
+The same link is in a `Link: </guide.md?max_tokens=2000&cursor=48.k3j9x2a1>; rel="next"` header,
+and the last part has neither. A part never splits a code block unless the block alone is larger
+than the budget; then the part closes the block and the next one reopens it with the same language,
+so every part is valid Markdown. Token counts are estimates of about four characters per token.
+
+Continuation, restart, and outline links keep the page's own query, so
+`/products.md?category=shoes&max_tokens=2000` keeps reading the shoes listing. The view parameters
+(`outline`, `section`, `actions`, `max_tokens`, `cursor`) are never passed to the page itself.
+
+The cursor names where to continue and which version of the page it belongs to. If the page changes
+between requests, the next part answers `409` with a link to start again, rather than continuing
+from a position that no longer lines up. A malformed cursor or a budget under 100 answers `400`.
+
+## Describe a page's forms
+
+The mirror turns a form's labels and buttons into text, but not what the form submits. When a page
+has forms, its mirror lists one more line under `Source:`:
+
+```md
+Source: /contact
+
+Actions: /contact.md?actions
+```
+
+`?actions` answers with the page's forms as JSON, read from the same part of the page as the mirror
+and with the same hidden-element rules:
+
+```bash
+curl "http://localhost:3000/contact.md?actions"
+```
+
+```json
+{
+  "page": "/contact",
+  "markdown": "/contact.md",
+  "actions": [
+    {
+      "type": "form",
+      "method": "POST",
+      "action": "/api/contact",
+      "enctype": "application/x-www-form-urlencoded",
+      "fields": [{ "name": "email", "type": "email", "label": "Email", "required": true }],
+      "submit": [{ "label": "Send" }]
+    }
+  ]
+}
+```
+
+- `action` is resolved the way a browser resolves it: an empty or missing `action` submits to the
+  page itself. Same-origin targets are root-relative; a form that only submits through JavaScript
+  has no `action` and is marked `requiresJavaScript`.
+- `fields` carry each control's name, type, label, preset value, and constraints (`required`,
+  `pattern`, `min`, `max`, `minLength`, `maxLength`, `accept`). Radio buttons and checkboxes that
+  share a name become one field with `options`, as do a select's options. Disabled controls are left
+  out, since a browser would not submit them. Hidden fields keep their values, so a submission
+  without JavaScript can be repeated; password and file inputs never include a value.
+- `submit` lists the buttons, with a button's own `formaction` or `formmethod` when it has one.
+- A React server action form, rendered with React's hidden `$ACTION_` fields, includes
+  `serverAction.id`.
+
+A `page.md` source has no forms, so its `?actions` view is an empty list. The view carries an
+`ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's
+request, so it shows the forms that caller would see.
 
 ## Production notes
 

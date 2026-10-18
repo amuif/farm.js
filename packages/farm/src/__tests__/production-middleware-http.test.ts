@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
+import { middleware } from "../middleware/chain";
 import {
   applyProductionMiddlewareHeaders,
   createProductionMiddlewareRunner,
@@ -45,6 +46,90 @@ describe("production middleware HTTP behavior", () => {
       "session=abc; Path=/; HttpOnly",
       "theme=dark; Path=/; SameSite=Lax",
     ]);
+  });
+
+  it("preserves a returned Response's headers over ctx.headers, adding only new keys", () => {
+    const middlewareHeaders = new Headers({
+      "cache-control": "private",
+      "x-mw": "1",
+    });
+    const response = applyProductionMiddlewareHeaders(
+      new Response("ok", { headers: { "cache-control": "public, max-age=60" } }),
+      middlewareHeaders,
+    );
+    // The returned Response's header is authoritative (matches the dev runtime,
+    // where the Response is applied after ctx.headers); ctx.headers only add
+    // keys the Response did not already set.
+    expect(response.headers.get("cache-control")).toBe("public, max-age=60");
+    expect(response.headers.get("x-mw")).toBe("1");
+  });
+
+  it("short-circuits when middleware writes to the raw response", async () => {
+    const runner = createProductionMiddlewareRunner({
+      config: {
+        handler(ctx) {
+          const response = ctx.response
+            .setHeader("X-Middleware", "raw")
+            .writeHead(201, "Created", {
+              "Set-Cookie": ["session=abc; Path=/", "theme=dark; Path=/"],
+            })
+            .end("created");
+
+          expect(response).toBe(ctx.response);
+        },
+      },
+    });
+
+    const result = await runner(new Request("https://example.com/"));
+
+    expect(result.handled).toBe(true);
+    expect(result.response?.status).toBe(201);
+    expect(result.response?.statusText).toBe("Created");
+    expect(result.response?.headers.get("x-middleware")).toBe("raw");
+    expect(result.response?.headers.getSetCookie()).toEqual([
+      "session=abc; Path=/",
+      "theme=dark; Path=/",
+    ]);
+    await expect(result.response?.text()).resolves.toBe("created");
+  });
+
+  it("keeps redirect helper headers authoritative over ctx.headers", async () => {
+    const runner = createProductionMiddlewareRunner({
+      config: {
+        handler(ctx) {
+          ctx.headers.set("location", "/wrong");
+          ctx.headers.set("content-type", "application/json");
+          ctx.headers.set("x-middleware", "kept");
+          ctx.redirect("/right", 308);
+        },
+      },
+    });
+
+    const result = await runner(new Request("https://example.com/"));
+    expect(result.response?.status).toBe(308);
+    expect(result.response?.headers.get("location")).toBe("/right");
+    expect(result.response?.headers.get("content-type")).toBe("text/plain");
+    expect(result.response?.headers.get("x-middleware")).toBe("kept");
+  });
+
+  it.each([
+    ["json", "application/json"],
+    ["text", "text/plain"],
+    ["html", "text/html"],
+  ] as const)("keeps %s helper content type authoritative", async (helper, contentType) => {
+    const runner = createProductionMiddlewareRunner({
+      config: {
+        handler(ctx) {
+          ctx.headers.set("content-type", "application/octet-stream");
+          if (helper === "json") ctx.json({ ok: true });
+          if (helper === "text") ctx.text("ok");
+          if (helper === "html") ctx.html("<p>ok</p>");
+        },
+      },
+    });
+
+    const result = await runner(new Request("https://example.com/"));
+    expect(result.response?.headers.get("content-type")).toBe(contentType);
   });
 
   it("serves requests with malformed percent-encoded paths instead of throwing", async () => {
@@ -109,6 +194,25 @@ describe("production middleware HTTP behavior", () => {
     expect(seen).toEqual({ track: "100%", session: "abc123" });
   });
 
+  it("selects the first duplicate cookie in wire order", async () => {
+    let session: string | undefined;
+    const runner = createProductionMiddlewareRunner({
+      config: {
+        handler(ctx) {
+          session = ctx.cookies.get("session");
+        },
+      },
+    });
+
+    await runner(
+      new Request("https://example.com/", {
+        headers: { cookie: "session=path-specific; session=broader" },
+      }),
+    );
+
+    expect(session).toBe("path-specific");
+  });
+
   it("preserves empty request cookies without inherited record values", async () => {
     const seen: Record<string, string | undefined> = {};
     const runner = createProductionMiddlewareRunner({
@@ -145,9 +249,76 @@ describe("production middleware HTTP behavior", () => {
       });
 
     const direct = await createRunner(false)(request());
-    expect(direct.headers.get("x-client-address")).toBe("127.0.0.1");
+    // No trusted proxy means there is no client address to report, and the
+    // runtime says so rather than inventing `127.0.0.1`. The property under
+    // test is unchanged and stronger: the forwarded 203.0.113.8 is not used.
+    expect(direct.headers.get("x-client-address")).toBe("missing");
 
     const proxied = await createRunner(true)(request());
     expect(proxied.headers.get("x-client-address")).toBe("203.0.113.8");
+  });
+
+  it("reports the server adapter's client address, before and after a rewrite", async () => {
+    // A web Request has no socket, so the built entry hands over the address
+    // its server adapter already has. Development reads the same thing from
+    // the real socket.
+    const createRunner = (trustProxy: boolean) =>
+      createProductionMiddlewareRunner({
+        server: { trustProxy },
+        config: [
+          {
+            matcher: "/old",
+            async handler(ctx, next) {
+              ctx.headers.set("x-before-rewrite", ctx.request.socket.remoteAddress || "missing");
+              ctx.rewrite("/new");
+              await next();
+            },
+          },
+          {
+            handler(ctx) {
+              ctx.headers.set("x-client-address", ctx.request.socket.remoteAddress || "missing");
+            },
+          },
+        ],
+      });
+    const request = () =>
+      new Request("https://example.com/old", {
+        headers: { "x-forwarded-for": "203.0.113.8" },
+      });
+
+    const direct = await createRunner(false)(request(), { clientAddress: "198.51.100.4" });
+    expect({
+      before: direct.headers.get("x-before-rewrite"),
+      after: direct.headers.get("x-client-address"),
+    }).toEqual({ before: "198.51.100.4", after: "198.51.100.4" });
+
+    // A trusted proxy's header still names the client ahead of the proxy's
+    // own connection.
+    const proxied = await createRunner(true)(request(), { clientAddress: "10.0.0.1" });
+    expect(proxied.headers.get("x-client-address")).toBe("203.0.113.8");
+  });
+
+  it("buckets the default rate limit per client address in a built app", async () => {
+    // The documented setup: a file middleware exporting a rate-limit chain,
+    // with no keyGenerator and no trustProxy on a directly exposed server.
+    const runner = createProductionMiddlewareRunner({
+      modules: [
+        {
+          path: "/api",
+          module: { default: middleware().rateLimit({ requests: 1, window: "1m" }) },
+        },
+      ],
+    });
+    const call = (clientAddress: string) =>
+      runner(new Request("https://example.com/api/login", { method: "POST" }), { clientAddress });
+
+    const first = await call("203.0.113.10");
+    expect(first.response).toBeNull();
+    // A different client is not limited by the first one's spent request.
+    const other = await call("198.51.100.77");
+    expect(other.response).toBeNull();
+    // The same client is.
+    const repeat = await call("203.0.113.10");
+    expect(repeat.response?.status).toBe(429);
   });
 });

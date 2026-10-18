@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { createFarmRendererPlugin } from "../dist/vite.mjs";
+import { assertCoreRuntimeReduction } from "./runtime-size-budget.mjs";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureRoot = join(packageRoot, "fixtures/runtime-size");
@@ -53,6 +54,8 @@ const [
   directOn,
   keyedOff,
   keyedOn,
+  keyedPlainOff,
+  keyedPlainOn,
   keyedAppendOff,
   keyedAppendOn,
   keyedFilterOff,
@@ -93,6 +96,8 @@ const [
   bundle("direct.tsx", true),
   bundle("keyed.tsx", false),
   bundle("keyed.tsx", true),
+  bundle("keyed-plain.tsx", false),
+  bundle("keyed-plain.tsx", true),
   bundle("keyed-append.tsx", false),
   bundle("keyed-append.tsx", true),
   bundle("keyed-filter.tsx", false),
@@ -131,6 +136,9 @@ const [
 ]);
 
 const forbiddenDirectMarkers = [
+  "Array.prototype",
+  "Set.prototype",
+  "Map.prototype",
   "FarmCompiledConditionalBlock",
   "FarmCompiledHostConditionalBlock",
   "FarmCompiledKeyedListBlock",
@@ -148,6 +156,23 @@ for (const marker of forbiddenDirectMarkers) {
 }
 if (!keyedOn.code.includes("FarmCompiledKeyedRows")) {
   throw new Error("Keyed fixture did not retain its keyed-row runtime.");
+}
+if (
+  !keyedPlainOn.code.includes("FarmCompiledKeyedRows") ||
+  !keyedPlainOn.code.includes("keyed-rows:plain")
+) {
+  throw new Error("Plain keyed fixture did not retain its isolated keyed-row runtime.");
+}
+for (const marker of [
+  "identityTarget",
+  "membershipTarget",
+  "mapLookupTarget",
+  '"set-add"',
+  '"map-set"',
+]) {
+  if (keyedPlainOn.code.includes(marker)) {
+    throw new Error(`Plain keyed fixture unexpectedly retained ${marker}.`);
+  }
 }
 if (keyedOn.code.includes("FarmCompiledKeyedRowConditional")) {
   throw new Error("Plain keyed fixture retained the optional row-conditional runtime.");
@@ -169,13 +194,18 @@ if (!keyedOn.code.includes('"set-add"') || !keyedOn.code.includes('"map-set"')) 
 }
 if (
   !keyedAppendOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedAppendOn.code.includes("keyed-rows:hinted")
+  !keyedAppendOn.code.includes("keyed-rows:append-only")
 ) {
-  throw new Error("Keyed append fixture did not retain its optional hinted runtime.");
+  throw new Error("Keyed append fixture did not retain its isolated append-only runtime.");
+}
+for (const marker of ["Set.prototype.has", "Map.prototype.get", "keyed-rows:hinted"]) {
+  if (keyedAppendOn.code.includes(marker)) {
+    throw new Error(`Append-only fixture unexpectedly retained ${marker}.`);
+  }
 }
 if (
   !keyedFilterOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedFilterOn.code.includes("keyed-rows:filter-hinted") ||
+  !keyedFilterOn.code.includes("keyed-rows:filter-only") ||
   !keyedFilterOn.code.includes("filterIndexIndependent")
 ) {
   throw new Error("Keyed filter fixture did not retain its optional filter-hint runtime.");
@@ -213,17 +243,24 @@ if (
 }
 if (
   !keyedPrependOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedPrependOn.code.includes("keyed-rows:prepend-hinted") ||
+  !keyedPrependOn.code.includes("keyed-rows:prepend-only") ||
   !keyedPrependOn.code.includes("prependIndexIndependent")
 ) {
   throw new Error("Keyed prepend fixture did not retain its optional prepend-hint runtime.");
 }
 if (
   !keyedSliceOn.code.includes("FarmCompiledKeyedRows") ||
-  !keyedSliceOn.code.includes("keyed-rows:filter-hinted") ||
+  !keyedSliceOn.code.includes("keyed-rows:filter-only") ||
   !keyedSliceOn.code.includes("filterIndexIndependent")
 ) {
   throw new Error("Keyed slice fixture did not retain its optional removal-hint runtime.");
+}
+for (const fixture of [keyedFilterOn, keyedSliceOn]) {
+  for (const marker of ["Set.prototype.has", "Map.prototype.get", "keyed-rows:filter-hinted"]) {
+    if (fixture.code.includes(marker)) {
+      throw new Error(`Removal-only fixture unexpectedly retained ${marker}.`);
+    }
+  }
 }
 if (
   !keyedRollingWindowOn.code.includes("FarmCompiledKeyedRows") ||
@@ -372,6 +409,23 @@ const results = {
         raw: keyedOn.raw - keyedOff.raw,
         gzip: keyedOn.gzip - keyedOff.gzip,
         brotli: keyedOn.brotli - keyedOff.brotli,
+      },
+    },
+    keyedPlain: {
+      compilerOff: {
+        raw: keyedPlainOff.raw,
+        gzip: keyedPlainOff.gzip,
+        brotli: keyedPlainOff.brotli,
+      },
+      compilerOn: {
+        raw: keyedPlainOn.raw,
+        gzip: keyedPlainOn.gzip,
+        brotli: keyedPlainOn.brotli,
+      },
+      compilerPremium: {
+        raw: keyedPlainOn.raw - keyedPlainOff.raw,
+        gzip: keyedPlainOn.gzip - keyedPlainOff.gzip,
+        brotli: keyedPlainOn.brotli - keyedPlainOff.brotli,
       },
     },
     keyedAppend: {
@@ -791,12 +845,7 @@ if (checkOnly) {
       );
     }
   }
-  if (
-    results.fixtures.isolatedRuntime.gzipReductionPercent <
-    reference.fixtures.isolatedRuntime.gzipReductionPercent - 1
-  ) {
-    throw new Error("Core-only runtime reduction regressed against the persisted result.");
-  }
+  assertCoreRuntimeReduction(results.fixtures.isolatedRuntime, reference.fixtures.isolatedRuntime);
 } else {
   await writeFile(resultFile, `${JSON.stringify(results, null, 2)}\n`, "utf8");
 }

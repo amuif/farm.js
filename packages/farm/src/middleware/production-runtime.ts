@@ -5,17 +5,31 @@ import type {
   MiddlewareConfig,
   MiddlewareContext,
   MiddlewareFunction,
-  MiddlewareMatcher,
   MiddlewareModule,
   MiddlewareResult,
 } from "./types";
 import { emitFarmEvent } from "../observability";
-import { decodeRouteSegment } from "../utils/decode";
+import {
+  getFarmRedirectError,
+  isFarmNotFoundError,
+  isFarmRedirectError,
+} from "../navigation-errors";
 import { normalizeMiddlewareModule } from "./module";
 import { stripFarmLocaleFromPathname } from "../i18n/routing";
+import { stripFarmBasePath } from "../base-path";
 import type { ResolvedFarmI18nConfig } from "../i18n/types";
 import type { ResolvedFarmServerConfig } from "../server-http";
-import { parseMiddlewareCookieHeader } from "./cookie-header";
+import {
+  parseMiddlewareCookieHeader,
+  serializeMiddlewareCookie as serializeCookie,
+  serializeMiddlewareCookieDeletion,
+} from "./cookie-header";
+import {
+  compileMiddlewareConfig,
+  compileMiddlewareRoute,
+  matchesMiddlewareRoute,
+  matchesMiddlewareConfig as matchesPreparedMiddlewareConfig,
+} from "./matcher";
 
 export interface ProductionMiddlewareModuleEntry {
   path: string;
@@ -30,6 +44,16 @@ export interface ProductionMiddlewareRunnerOptions {
   server?: Pick<ResolvedFarmServerConfig, "trustProxy">;
 }
 
+export interface ProductionMiddlewareRequestOptions {
+  /**
+   * The address of the peer that opened the connection, as the server adapter
+   * reports it. A web Request carries no socket, so this is the only way a
+   * built app's middleware learns the client address it already has in
+   * development. A trusted proxy's `x-forwarded-for` still takes precedence.
+   */
+  clientAddress?: string;
+}
+
 export interface ProductionMiddlewareResult {
   request: Request;
   response: Response | null;
@@ -37,6 +61,8 @@ export interface ProductionMiddlewareResult {
   context: Map<string, any>;
   headers: Headers;
   handled: boolean;
+  /** Middleware called notFound(): answer with the app's not-found page. */
+  notFound?: true;
 }
 
 interface ProductionMiddlewareEntry {
@@ -52,6 +78,11 @@ interface WebMiddlewareContextState {
   headers: WebResponseHeaderMap;
   getRequest(): Request;
   getResponse(): Response | null;
+}
+
+interface WebResponseShimState {
+  response: Record<string, any>;
+  getResponse(method: string): Response | null;
 }
 
 const FARM_SET_COOKIE_HEADERS = Symbol("farm.setCookieHeaders");
@@ -104,22 +135,6 @@ class WebResponseHeaderMap extends Map<string, string> {
   }
 }
 
-function serializeCookie(name: string, value: string, options: CookieOptions = {}): string {
-  let cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}`;
-
-  if (options.maxAge != null) cookie += `; Max-Age=${options.maxAge}`;
-  if (options.expires) cookie += `; Expires=${options.expires.toUTCString()}`;
-  cookie += `; Path=${options.path || "/"}`;
-  if (options.domain) cookie += `; Domain=${options.domain}`;
-  if (options.secure) cookie += "; Secure";
-  if (options.httpOnly) cookie += "; HttpOnly";
-  if (options.sameSite) {
-    cookie += `; SameSite=${options.sameSite.charAt(0).toUpperCase()}${options.sameSite.slice(1)}`;
-  }
-
-  return cookie;
-}
-
 class WebCookieJar implements CookieJar {
   private cookies: Record<string, string>;
 
@@ -140,13 +155,11 @@ class WebCookieJar implements CookieJar {
     this.headers.appendSetCookie(cookieString);
   }
 
-  delete(name: string): void {
+  delete(name: string, options: CookieOptions = {}): void {
     delete this.cookies[name];
-    const cookieString = serializeCookie(name, "", {
-      maxAge: 0,
-      expires: new Date(0),
-    });
-    this.headers.appendSetCookie(cookieString);
+    // Path and Domain must match the cookie that was set, or the tombstone
+    // addresses a different cookie and the original survives.
+    this.headers.appendSetCookie(serializeMiddlewareCookieDeletion(name, options));
   }
 
   getAll(): Record<string, string> {
@@ -174,36 +187,150 @@ function isMiddlewareResponse(value: unknown): value is Response {
   return value instanceof Response;
 }
 
-function createResponseShim(headers: WebResponseHeaderMap): Record<string, any> {
-  return {
+function findHeaderName(headers: WebResponseHeaderMap, name: string): string | undefined {
+  const normalizedName = name.toLowerCase();
+  return [...headers.keys()].find((key) => key.toLowerCase() === normalizedName);
+}
+
+function createResponseShim(headers: WebResponseHeaderMap): WebResponseShimState {
+  const bodyChunks: Uint8Array[] = [];
+  const encoder = new TextEncoder();
+
+  const response = {
     headersSent: false,
     writableEnded: false,
-    setHeader(name: string, value: string | string[]) {
+    statusCode: 200,
+    statusMessage: "",
+    setHeader(name: string, value: string | number | readonly string[]) {
+      const existingName = findHeaderName(headers, name);
+      if (existingName) headers.delete(existingName);
       if (name.toLowerCase() === "set-cookie") {
         headers.replaceSetCookies(Array.isArray(value) ? value.map(String) : [String(value)]);
       } else {
         headers.set(name, Array.isArray(value) ? value.join(", ") : String(value));
       }
+      return this;
     },
     getHeader(name: string) {
-      return headers.get(name);
+      if (name.toLowerCase() === "set-cookie") {
+        const cookies = headers.getSetCookies();
+        return cookies.length > 0 ? [...cookies] : undefined;
+      }
+      const existingName = findHeaderName(headers, name);
+      return existingName ? headers.get(existingName) : undefined;
     },
-    writeHead(status: number, responseHeaders?: Record<string, string>) {
+    hasHeader(name: string) {
+      return name.toLowerCase() === "set-cookie"
+        ? headers.getSetCookies().length > 0
+        : findHeaderName(headers, name) !== undefined;
+    },
+    getHeaderNames() {
+      return [...headers.keys()].map((name) => name.toLowerCase());
+    },
+    getHeaders() {
+      return Object.fromEntries(
+        [...headers.keys()].map((name) => [name.toLowerCase(), this.getHeader(name)]),
+      );
+    },
+    removeHeader(name: string) {
+      const existingName = findHeaderName(headers, name);
+      if (existingName) headers.delete(existingName);
+    },
+    appendHeader(name: string, value: string | readonly string[]) {
+      const values = Array.isArray(value) ? value.map(String) : [String(value)];
+      if (name.toLowerCase() === "set-cookie") {
+        for (const item of values) headers.appendSetCookie(item);
+        return this;
+      }
+      const existing = this.getHeader(name);
+      return this.setHeader(name, existing ? `${String(existing)}, ${values.join(", ")}` : values);
+    },
+    writeHead(
+      status: number,
+      statusMessageOrHeaders?: string | Record<string, string | number | readonly string[]>,
+      responseHeaders?: Record<string, string | number | readonly string[]>,
+    ) {
       this.statusCode = status;
-      if (responseHeaders) {
-        for (const [key, value] of Object.entries(responseHeaders)) {
-          headers.set(key, value);
+      const nextHeaders =
+        typeof statusMessageOrHeaders === "string" ? responseHeaders : statusMessageOrHeaders;
+      if (typeof statusMessageOrHeaders === "string") {
+        this.statusMessage = statusMessageOrHeaders;
+      }
+      if (nextHeaders) {
+        for (const [key, value] of Object.entries(nextHeaders)) {
+          this.setHeader(key, value);
         }
       }
       this.headersSent = true;
+      return this;
     },
-    end() {
+    flushHeaders() {
+      this.headersSent = true;
+    },
+    write(
+      chunk: string | Uint8Array,
+      encodingOrCallback?: string | (() => void),
+      callback?: () => void,
+    ) {
+      bodyChunks.push(typeof chunk === "string" ? encoder.encode(chunk) : new Uint8Array(chunk));
+      this.headersSent = true;
+      const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+      done?.();
+      return true;
+    },
+    end(
+      chunk?: string | Uint8Array | (() => void),
+      encodingOrCallback?: string | (() => void),
+      callback?: () => void,
+    ) {
+      if (typeof chunk === "string" || chunk instanceof Uint8Array) {
+        bodyChunks.push(typeof chunk === "string" ? encoder.encode(chunk) : new Uint8Array(chunk));
+      }
+      this.headersSent = true;
       this.writableEnded = true;
+      const done =
+        typeof chunk === "function"
+          ? chunk
+          : typeof encodingOrCallback === "function"
+            ? encodingOrCallback
+            : callback;
+      done?.();
+      return this;
+    },
+  };
+
+  return {
+    response,
+    getResponse(method: string) {
+      if (!response.headersSent && !response.writableEnded) return null;
+
+      const bodyLength = bodyChunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+      const body = new Uint8Array(bodyLength);
+      let offset = 0;
+      for (const chunk of bodyChunks) {
+        body.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+
+      const bodyAllowed =
+        method.toUpperCase() !== "HEAD" &&
+        response.statusCode !== 204 &&
+        response.statusCode !== 205 &&
+        response.statusCode !== 304;
+      return new Response(bodyAllowed && bodyLength > 0 ? body : null, {
+        status: response.statusCode,
+        statusText: response.statusMessage || undefined,
+        headers: mapToHeaders(headers),
+      });
     },
   };
 }
 
-function withNodeRequestShape(request: Request, trustProxy: boolean): Request {
+function withNodeRequestShape(
+  request: Request,
+  trustProxy: boolean,
+  clientAddress: string | undefined,
+): Request {
   const requestWithShape = request as Request & {
     socket?: { remoteAddress?: string };
   };
@@ -213,9 +340,12 @@ function withNodeRequestShape(request: Request, trustProxy: boolean): Request {
       ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
       : undefined;
     try {
-      requestWithShape.socket = {
-        remoteAddress: forwardedFor || "127.0.0.1",
-      };
+      // A web Request carries no socket, so the address comes from a trusted
+      // proxy or from the server adapter's own connection. Never invent one:
+      // reporting `127.0.0.1` used to make every visitor look like the same
+      // client, which collapsed per-client rate limiting into one shared
+      // bucket. Leave it undefined so a consumer can tell that it does not know.
+      requestWithShape.socket = { remoteAddress: forwardedFor || clientAddress || undefined };
     } catch {
       // Some Request implementations may not be extensible.
     }
@@ -229,9 +359,12 @@ function createHandledResponse(
   init: ResponseInit,
   headers: WebResponseHeaderMap,
 ): Response {
-  const responseHeaders = new Headers(init.headers);
+  const responseHeaders = new Headers();
   for (const [key, value] of headers) {
     if (key.toLowerCase() === "set-cookie") continue;
+    responseHeaders.set(key, value);
+  }
+  for (const [key, value] of new Headers(init.headers)) {
     responseHeaders.set(key, value);
   }
   for (const cookie of headers.getSetCookies()) {
@@ -244,8 +377,9 @@ function createWebMiddlewareContext(
   request: Request,
   parent?: MiddlewareContext["parent"],
   trustProxy = false,
+  clientAddress?: string,
 ): WebMiddlewareContextState {
-  let currentRequest = withNodeRequestShape(request, trustProxy);
+  let currentRequest = withNodeRequestShape(request, trustProxy, clientAddress);
   let handledResponse: Response | null = null;
   const url = new URL(currentRequest.url);
   const data = parent?.data ? new Map(parent.data) : new Map<string, any>();
@@ -260,10 +394,11 @@ function createWebMiddlewareContext(
   }
   const parentCookies = (parent as InternalMiddlewareParent | undefined)?.[FARM_SET_COOKIE_HEADERS];
   if (parentCookies) headers.replaceSetCookies(parentCookies);
+  const responseShim = createResponseShim(headers);
 
   const ctx = {
     request: currentRequest as any,
-    response: createResponseShim(headers) as any,
+    response: responseShim.response as any,
     url,
     pathname: url.pathname,
     searchParams: url.searchParams,
@@ -302,7 +437,11 @@ function createWebMiddlewareContext(
     rewrite(rewriteUrl: string): void {
       ctx._rewriteUrl = rewriteUrl;
       const nextUrl = new URL(rewriteUrl, currentRequest.url);
-      currentRequest = withNodeRequestShape(new Request(nextUrl, currentRequest), trustProxy);
+      currentRequest = withNodeRequestShape(
+        new Request(nextUrl, currentRequest),
+        trustProxy,
+        clientAddress,
+      );
       ctx.request = currentRequest as any;
       ctx.url = nextUrl;
       ctx.pathname = nextUrl.pathname;
@@ -357,169 +496,22 @@ function createWebMiddlewareContext(
     ctx,
     headers,
     getRequest: () => currentRequest,
-    getResponse: () => handledResponse,
+    getResponse: () => handledResponse || responseShim.getResponse(currentRequest.method),
   };
 }
 
-function toMatcherList(matcher: MiddlewareConfig["matcher"]): MiddlewareMatcher[] {
-  if (!matcher) return [];
-  return Array.isArray(matcher) ? matcher : [matcher];
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-}
-
-function parseColonParam(segment: string): { name: string; modifier?: string } {
-  const raw = segment.slice(1);
-  const last = raw[raw.length - 1];
-  const modifier = last === "*" || last === "+" || last === "?" ? last : undefined;
-  return {
-    name: modifier ? raw.slice(0, -1) : raw,
-    modifier,
-  };
-}
-
-function compilePathPattern(pattern: string): { regex: RegExp; params: string[] } {
-  const params: string[] = [];
-  const segments = pattern.split("/").filter(Boolean);
-
-  if (segments.length === 0) {
-    return { regex: /^\/$/, params };
-  }
-
-  const parts = segments.map((segment) => {
-    if (segment === "**") {
-      return "(?:/.*)?";
-    }
-
-    if (segment === "*") {
-      return "/[^/]+";
-    }
-
-    if (segment.startsWith(":")) {
-      const { name, modifier } = parseColonParam(segment);
-      params.push(name);
-
-      if (modifier === "*") {
-        return "(?:/(.*))?";
-      }
-      if (modifier === "+") {
-        return "/(.+)";
-      }
-      return "/([^/]+)";
-    }
-
-    if (segment.startsWith("[...") && segment.endsWith("]")) {
-      params.push(segment.slice(4, -1));
-      return "(?:/(.*))?";
-    }
-
-    if (segment.startsWith("[") && segment.endsWith("]")) {
-      params.push(segment.slice(1, -1));
-      return "/([^/]+)";
-    }
-
-    return `/${escapeRegex(segment).replace(/\\\*/g, "[^/]*")}`;
-  });
-
-  return {
-    regex: new RegExp(`^${parts.join("")}$`),
-    params,
-  };
-}
-
-function matchPattern(
-  pattern: string | RegExp,
-  pathname: string,
-): { matched: boolean; params?: Record<string, string> } {
-  if (pattern instanceof RegExp) {
-    pattern.lastIndex = 0;
-    const match = pattern.exec(pathname);
-    return {
-      matched: !!match,
-      params: match?.groups ? { ...match.groups } : undefined,
-    };
-  }
-
-  if (pattern === "*" || pattern === "/(.*)") {
-    return { matched: true };
-  }
-
-  if (pattern.endsWith("(.*)")) {
-    const prefix = pattern.slice(0, -4);
-    return { matched: pathname === prefix || pathname.startsWith(`${prefix}/`) };
-  }
-
-  const { regex, params } = compilePathPattern(pattern);
-  const match = regex.exec(pathname);
-  if (!match) {
-    return { matched: false };
-  }
-
-  const values: Record<string, string> = {};
-  params.forEach((param, index) => {
-    values[param] = decodeRouteSegment(match[index + 1] || "");
-  });
-
-  return {
-    matched: true,
-    params: Object.keys(values).length > 0 ? values : undefined,
-  };
-}
-
-function matchesConfig(
+/**
+ * Decide whether a middleware entry's `export const config` applies to a path.
+ *
+ * Exported so the standalone dev plugin matches exactly what the production
+ * runner does instead of maintaining a parallel implementation.
+ */
+export function matchesMiddlewareConfig(
   pathname: string,
   config: MiddlewareConfig,
   ctx: MiddlewareContext,
 ): { matched: boolean; params?: Record<string, string> } {
-  if (config.exclude) {
-    for (const pattern of config.exclude) {
-      if (matchPattern(pattern, pathname).matched) {
-        return { matched: false };
-      }
-    }
-  }
-
-  if (config.matcher) {
-    for (const matcher of toMatcherList(config.matcher)) {
-      if (typeof matcher === "string" || matcher instanceof RegExp) {
-        const result = matchPattern(matcher, pathname);
-        if (result.matched) {
-          return result;
-        }
-      } else if (typeof matcher === "function" && matcher(ctx)) {
-        return { matched: true };
-      }
-    }
-    return { matched: false };
-  }
-
-  return { matched: true };
-}
-
-function matchRoutePath(
-  pathname: string,
-  middlewarePath: string,
-): { matched: boolean; params?: Record<string, string> } {
-  if (middlewarePath === "/") return { matched: true };
-
-  const exactMatch = matchPattern(middlewarePath, pathname);
-  if (exactMatch.matched) {
-    return exactMatch;
-  }
-
-  const nestedMatch = matchPattern(`${middlewarePath}/:__farmRest*`, pathname);
-  if (!nestedMatch.matched) {
-    return { matched: false };
-  }
-
-  const params = { ...nestedMatch.params };
-  delete params.__farmRest;
-  return {
-    matched: true,
-    params: Object.keys(params).length > 0 ? params : undefined,
-  };
+  return matchesPreparedMiddlewareConfig(pathname, config, ctx);
 }
 
 function getConfigHandlers(
@@ -569,6 +561,7 @@ function normalizeConfigMiddleware(config?: FarmMiddlewareConfig | null): {
       continue;
     }
 
+    compileMiddlewareConfig(middlewareConfig);
     entries.push({
       path: "/",
       filePath: `farm.config.ts#middleware-${index}`,
@@ -592,6 +585,7 @@ function normalizeFileMiddleware(
       continue;
     }
 
+    if (normalized.config) compileMiddlewareConfig(normalized.config);
     entries.push({
       path: moduleEntry.path,
       filePath: moduleEntry.filePath || moduleEntry.path,
@@ -640,11 +634,14 @@ function emptyResult(request: Request): ProductionMiddlewareResult {
 export function createProductionMiddlewareRunner(options: ProductionMiddlewareRunnerOptions = {}) {
   const configMiddleware = normalizeConfigMiddleware(options.config);
   const fileMiddleware = normalizeFileMiddleware(options.modules);
+  for (const entry of fileMiddleware) compileMiddlewareRoute(entry);
   const entries = [...configMiddleware.entries, ...fileMiddleware];
   const globalConfig = configMiddleware.globalConfig;
+  if (globalConfig) compileMiddlewareConfig(globalConfig);
 
   return async function runProductionMiddleware(
     request: Request,
+    requestOptions: ProductionMiddlewareRequestOptions = {},
   ): Promise<ProductionMiddlewareResult> {
     if (!globalConfig && entries.length === 0) {
       return emptyResult(request);
@@ -654,16 +651,19 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
       request,
       undefined,
       options.server?.trustProxy === true,
+      requestOptions.clientAddress,
     );
     let ctx = contextState.ctx;
     let currentRequest = contextState.getRequest();
+    // Match the app path page routing sees: without basePath (the locale step
+    // strips it too), so file and config middleware run beneath a basePath.
     const initialPathname = options.i18n?.enabled
       ? stripFarmLocaleFromPathname(ctx.pathname, options.i18n)
-      : ctx.pathname;
+      : stripFarmBasePath(ctx.pathname, options.i18n?.basePath ?? "/");
     let parentData: MiddlewareContext["parent"] | undefined;
 
     if (globalConfig) {
-      const globalMatch = matchesConfig(initialPathname, globalConfig, ctx);
+      const globalMatch = matchesPreparedMiddlewareConfig(initialPathname, globalConfig, ctx);
       if (!globalMatch.matched) {
         return emptyResult(request);
       }
@@ -678,7 +678,7 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
         routeMatch:
           entry.source === "config"
             ? { matched: true }
-            : matchRoutePath(initialPathname, entry.path),
+            : matchesMiddlewareRoute(initialPathname, entry),
       }))
       .filter((candidate) => candidate.routeMatch.matched);
 
@@ -696,7 +696,7 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
     for (const candidate of applicable) {
       const { entry, routeMatch } = candidate;
       const configMatch = entry.config
-        ? matchesConfig(initialPathname, entry.config, ctx)
+        ? matchesPreparedMiddlewareConfig(initialPathname, entry.config, ctx)
         : { matched: true };
       if (!configMatch.matched) {
         continue;
@@ -707,6 +707,7 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
           currentRequest,
           parentData,
           options.server?.trustProxy === true,
+          requestOptions.clientAddress,
         );
         ctx = contextState.ctx;
       }
@@ -750,7 +751,7 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
           };
         }
 
-        if (ctx._handled) {
+        if (ctx._handled || ctx.response.headersSent || ctx.response.writableEnded) {
           const response = contextState.getResponse() || new Response(null);
           emitFarmEvent({
             type: "middleware.shortCircuit",
@@ -773,6 +774,41 @@ export function createProductionMiddlewareRunner(options: ProductionMiddlewareRu
           durationMs: Date.now() - middlewareStartTime,
         });
       } catch (error) {
+        // redirect() and notFound() are control flow, as they are in pages.
+        // A rewrite earlier in this middleware still decides the request.
+        currentRequest = contextState.getRequest();
+        if (isFarmRedirectError(error)) {
+          const redirect = getFarmRedirectError(error)!;
+          const response = applyProductionMiddlewareHeaders(
+            new Response(null, { status: redirect.status, headers: { Location: redirect.url } }),
+            mapToHeaders(contextState.headers),
+          );
+          emitFarmEvent({
+            type: "middleware.shortCircuit",
+            ...middlewareEvent,
+            status: response.status,
+          });
+          return {
+            request: currentRequest,
+            response,
+            data: new Map(ctx.data),
+            context: new Map(ctx.locals),
+            headers: mapToHeaders(contextState.headers),
+            handled: true,
+          };
+        }
+        if (isFarmNotFoundError(error)) {
+          emitFarmEvent({ type: "middleware.shortCircuit", ...middlewareEvent, status: 404 });
+          return {
+            request: currentRequest,
+            response: null,
+            data: new Map(ctx.data),
+            context: new Map(ctx.locals),
+            headers: mapToHeaders(contextState.headers),
+            handled: true,
+            notFound: true,
+          };
+        }
         emitFarmEvent({
           type: "middleware.error",
           ...middlewareEvent,
@@ -818,6 +854,10 @@ export function applyProductionMiddlewareHeaders(
       : [];
   for (const [key, value] of middlewareHeaders) {
     if (key.toLowerCase() === "set-cookie") continue;
+    // A returned Response's headers are authoritative and preserved (matching
+    // the dev runtime, where the Response is applied after ctx.headers). ctx
+    // headers only add keys the Response did not already set.
+    if (headers.has(key)) continue;
     headers.set(key, value);
   }
   for (const cookie of setCookies) {

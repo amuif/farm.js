@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 /**
  * Farm.js API Routes Vite Plugin
  *
@@ -25,6 +26,8 @@ import {
 } from "./route-manager";
 import { matchAPIRouteAtBasePath } from "./runtime";
 import { sendWebResponse } from "../server/response";
+import { resolveFarmRequestURL } from "../server/request";
+import type { FarmRequest } from "../types";
 import { isFarmAPIRouteFileName } from "./route-files";
 import { _withAfterNodeMiddleware } from "../after";
 import { _runWithAPIRequestRuntime } from "./server-context";
@@ -298,7 +301,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             const routePath =
               "/api/" + (relativePath === "." ? "" : relativePath.replace(/\\/g, "/"));
 
-            const routeModule = await server.ssrLoadModule(filePath);
+            const routeModule = await loadFarmDevModule(server, filePath);
             const endpoints: Record<string, any> = {};
             const availableMethods: string[] = [];
 
@@ -336,7 +339,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
         for (const routesFile of routesFiles) {
           if (fs.existsSync(routesFile)) {
             try {
-              const routesModule = await server.ssrLoadModule(routesFile);
+              const routesModule = await loadFarmDevModule(server, routesFile);
 
               for (const [exportName, exportValue] of Object.entries(routesModule)) {
                 const endpoint = exportValue as any;
@@ -367,7 +370,8 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
 
         for (const routeFile of routeFiles) {
           try {
-            const routesModule = await server.ssrLoadModule(
+            const routesModule = await loadFarmDevModule(
+              server,
               toViteModuleId(routeFile, server.config.root),
             );
             const manifest = getProgrammaticRouteManifest(routesModule);
@@ -488,8 +492,10 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
               return next();
             }
 
-            // Convert Node request to Web Request
-            const fullUrl = `http://${req.headers.host || "localhost:3000"}${currentUrl}`;
+            // Convert Node request to Web Request. The path comes from req.url
+            // alone, as it does for middleware: a Host header carrying a path
+            // must not move the dispatch to a route middleware never matched.
+            const fullUrl = resolveFarmRequestURL(req as FarmRequest);
             const headers = new Headers();
             for (const [key, value] of Object.entries(req.headers)) {
               if (value) {
@@ -533,8 +539,8 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             res.end(JSON.stringify({ error: "Internal server error" }));
           }
         });
-        server.middlewares.use((req, res, next) =>
-          _runWithAPIRequestRuntime(
+        server.middlewares.use((req, res, next) => {
+          const result = _runWithAPIRequestRuntime(
             {
               basePath: basePath ?? "/api",
               dispatch: async (request) =>
@@ -543,8 +549,22 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
                   : Response.json({ error: "Not Found" }, { status: 404 }),
             },
             () => apiMiddleware(req, res, next),
-          ),
-        );
+          );
+          return Promise.resolve(result).catch((error) => {
+            console.error(
+              `[FARM] Unhandled API error while handling ${req.method || "GET"} ${req.url || "/"}:`,
+              error,
+            );
+            if (res.writableEnded) return;
+            if (res.headersSent) {
+              res.destroy?.(error instanceof Error ? error : new Error(String(error)));
+              return;
+            }
+            res.statusCode = 500;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: "Internal server error" }));
+          });
+        });
       };
     },
 
@@ -570,7 +590,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
         const previousState = snapshotRouteState();
 
         try {
-          const routesModule = await server.ssrLoadModule(file);
+          const routesModule = await loadFarmDevModule(server, file);
           removeEndpointsFromFile(file);
 
           for (const [exportName, exportValue] of Object.entries(routesModule)) {
@@ -636,7 +656,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             log(`API route file removed: ${routePath}`);
             return [];
           }
-          const routeModule = await server.ssrLoadModule(file);
+          const routeModule = await loadFarmDevModule(server, file);
 
           removeEndpointsFromFile(file);
           const availableMethods: string[] = [];

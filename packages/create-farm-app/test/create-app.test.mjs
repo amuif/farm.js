@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +22,17 @@ const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 async function workspaceRendererVersion(rendererPackage) {
   const manifestPath = path.resolve(packageDir, "..", rendererPackage, "package.json");
   return JSON.parse(await readFile(manifestPath, "utf8")).version;
+}
+
+async function assertRendererNeutralStarter(generatedDir, packageJson) {
+  assert.equal(packageJson.dependencies["@farming-labs/docs"], undefined);
+  assert.equal(packageJson.dependencies["@farming-labs/farmjs"], undefined);
+  assert.equal(packageJson.dependencies["@farming-labs/theme"], undefined);
+  assert.equal(packageJson.dependencies.react, undefined);
+  assert.equal(packageJson.dependencies["react-dom"], undefined);
+  await assert.rejects(readFile(path.join(generatedDir, "docs.config.ts"), "utf8"));
+  await assert.rejects(readFile(path.join(generatedDir, "docs.json"), "utf8"));
+  await assert.rejects(readFile(path.join(generatedDir, "src/app/docs/page.md"), "utf8"));
 }
 
 test("spaces the CLI banner and matches the website hero copy", async () => {
@@ -283,6 +303,13 @@ test("generates a buildable starter application", async () => {
     );
     assert.doesNotMatch(generatedConfig, /srcDir/);
     assert.match(generatedConfig, /theme:\s*\{\s*default: "dark"/s);
+    assert.match(generatedConfig, /import \{ devtools \} from "@farm\.js\/devtools"/);
+    assert.match(generatedConfig, /plugins: \[devtools\(\)\]/);
+    assert.equal(
+      generatedPackage.devDependencies["@farm.js/devtools"],
+      templatePackage.devDependencies["@farm.js/devtools"],
+    );
+    assert.ok(generatedPackage.devDependencies["@farm.js/devtools"]);
 
     const generatedTsconfig = JSON.parse(
       await readFile(path.join(tempDir, "generated-app/tsconfig.json"), "utf8"),
@@ -296,6 +323,7 @@ test("generates a buildable starter application", async () => {
       "utf8",
     );
     assert.match(generatedGitignore, /^\.env$/m);
+    assert.match(generatedGitignore, /^\.netlify\/?$/m);
     assert.match(generatedGitignore, /^\.env\.local$/m);
     assert.match(generatedGitignore, /^\*\.sqlite$/m);
     assert.match(generatedGitignore, /^\*\.sqlite-\*$/m);
@@ -315,6 +343,8 @@ test("generates a buildable starter application", async () => {
     assert.match(generatedPnpmWorkspace, /^  esbuild: true$/m);
     assert.match(generatedPnpmWorkspace, /^  sharp: true$/m);
     assert.match(generatedPnpmWorkspace, /^  vue-demi: true$/m);
+    assert.match(generatedPnpmWorkspace, /^minimumReleaseAgeExclude:$/m);
+    assert.match(generatedPnpmWorkspace, /^  - "@farm\.js\/\*"$/m);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -377,13 +407,15 @@ test("generates the experimental React Compiler starter with the shared dark sta
 
     const config = await readFile(path.join(generatedDir, "farm.config.ts"), "utf8");
     assert.match(config, /from "@farm\.js\/react"/);
-    assert.match(config, /experimental:\s*\{\s*compiler: compilerEnabled/s);
+    assert.match(config, /react\(\{\s*compiler: compilerEnabled/s);
     assert.match(config, /FARM_REACT_COMPILER_ENABLED/);
     assert.match(config, /theme:\s*\{\s*default: "dark"/s);
 
     const page = await readFile(path.join(generatedDir, "src/app/page.tsx"), "utf8");
     assert.match(page, /className="landing-main"/);
     assert.match(page, /FARMJS \/ React Compiler starter/);
+    assert.match(page, />Experimental<\/span>/);
+    assert.doesNotMatch(page, />Opt-in<\/span>/);
     assert.match(page, /The compiler handles the rest\./);
     assert.match(page, /data-compiler-status/);
     assert.match(page, /publicEnv\.FARM_REACT_COMPILER_ENABLED/);
@@ -422,6 +454,13 @@ test("generates the experimental React Compiler starter with the shared dark sta
     );
     await readFile(path.join(generatedDir, "scripts/verify-experiment.mjs"), "utf8");
     assert.match(await readFile(path.join(generatedDir, ".gitignore"), "utf8"), /^\.farm\/$/m);
+
+    const generatedWorkspace = await readFile(
+      path.join(generatedDir, "pnpm-workspace.yaml"),
+      "utf8",
+    );
+    assert.match(generatedWorkspace, /^minimumReleaseAgeExclude:$/m);
+    assert.match(generatedWorkspace, /^  - "@farm\.js\/\*"$/m);
 
     assert.match(output, /React AOT compiler is experimental/);
     assert.match(output, /pnpm experiment/);
@@ -465,8 +504,7 @@ test("generates a Solid starter while keeping React as the default renderer", as
       await workspaceRendererVersion("farm-solid"),
     );
     assert.equal(packageJson.dependencies["solid-js"], "1.9.14");
-    assert.equal(packageJson.dependencies.react, undefined);
-    assert.equal(packageJson.dependencies["react-dom"], undefined);
+    await assertRendererNeutralStarter(generatedDir, packageJson);
     assert.match(config, /renderer: solid\(\)/);
     assert.match(config, /from "@farm\.js\/solid"/);
     assert.match(page, /createSignal/);
@@ -476,6 +514,7 @@ test("generates a Solid starter while keeping React as the default renderer", as
     assert.match(apiClient, /createApiClients<APIRouter>/);
     assert.match(apiClient, /export const \{ api, apiClient \}/);
     assert.match(apiClient, /routes: apiRoutes/);
+    assert.match(apiClient, /from "@farm\.js\/core\/api\/client"/);
     assert.doesNotMatch(apiClient, /from ["'].*(?:route|server)["']/);
     assert.equal(tsconfig.compilerOptions.jsx, "preserve");
     assert.equal(tsconfig.compilerOptions.jsxImportSource, "solid-js");
@@ -519,8 +558,7 @@ test("generates a Preact starter with typed server interaction", async () => {
 
     assert.equal(packageJson.dependencies["@farm.js/preact"], rendererPackage.version);
     assert.equal(packageJson.dependencies.preact, "10.29.8");
-    assert.equal(packageJson.dependencies.react, undefined);
-    assert.equal(packageJson.dependencies["react-dom"], undefined);
+    await assertRendererNeutralStarter(generatedDir, packageJson);
     assert.match(config, /renderer: preact\(\)/);
     assert.match(config, /from "@farm\.js\/preact"/);
     assert.match(page, /useState/);
@@ -531,6 +569,7 @@ test("generates a Preact starter with typed server interaction", async () => {
     assert.match(apiClient, /createApiClients<APIRouter>/);
     assert.match(apiClient, /export const \{ api, apiClient \}/);
     assert.match(apiClient, /routes: apiRoutes/);
+    assert.match(apiClient, /from "@farm\.js\/core\/api\/client"/);
     assert.doesNotMatch(apiClient, /from ["'].*(?:route|server)["']/);
     assert.equal(tsconfig.compilerOptions.jsx, "react-jsx");
     assert.equal(tsconfig.compilerOptions.jsxImportSource, "preact");
@@ -570,9 +609,10 @@ test("generates a Vue SFC starter with typed server interaction", async () => {
       await workspaceRendererVersion("farm-vue"),
     );
     assert.equal(packageJson.dependencies.vue, "3.5.41");
-    assert.equal(packageJson.dependencies.react, undefined);
-    assert.equal(packageJson.dependencies["react-dom"], undefined);
+    await assertRendererNeutralStarter(generatedDir, packageJson);
     assert.equal(packageJson.scripts["type-check"], "vue-tsc --noEmit");
+    assert.ok(packageJson.devDependencies["@farm.js/devtools"]);
+    assert.match(config, /plugins: \[devtools\(\)\]/);
     assert.match(config, /renderer: vue\(\)/);
     assert.match(config, /from "@farm\.js\/vue"/);
     assert.match(page, /export const hydrate = true/);
@@ -618,8 +658,7 @@ test("generates a Svelte starter with typed server interaction", async () => {
 
     assert.equal(packageJson.dependencies["@farm.js/svelte"], rendererPackage.version);
     assert.equal(packageJson.dependencies.svelte, "5.56.8");
-    assert.equal(packageJson.dependencies.react, undefined);
-    assert.equal(packageJson.dependencies["react-dom"], undefined);
+    await assertRendererNeutralStarter(generatedDir, packageJson);
     assert.equal(packageJson.scripts["type-check"], "svelte-check --tsconfig ./tsconfig.json");
     assert.match(config, /renderer: svelte\(\)/);
     assert.match(config, /from "@farm\.js\/svelte"/);
@@ -757,7 +796,6 @@ for (const template of [
     brandPattern: /FARMJS \/ Auth starter/,
     instructionPattern: /FARMJS Auth uses local SQLite automatically/,
     betterCall: "1.3.2",
-    workspacePackage: "@farm.js/auth",
   },
   {
     name: "better-auth",
@@ -766,7 +804,6 @@ for (const template of [
     brandPattern: /FARMJS \/ Better Auth starter/,
     instructionPattern: /copy \.env\.example to \.env\.local/,
     betterCall: "1.3.7",
-    workspacePackage: "@farm.js/better-auth",
   },
 ]) {
   test(`generates the ${template.name} starter with setup guidance`, async () => {
@@ -893,16 +930,11 @@ for (const template of [
       assert.match(generatedWorkspace, /^packages:\n  - "\."$/m);
       assert.match(generatedWorkspace, /^allowBuilds:$/m);
       assert.match(generatedWorkspace, /^minimumReleaseAgeExclude:$/m);
-      assert.match(
-        generatedWorkspace,
-        new RegExp(
-          `^  - "${template.workspacePackage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"$`,
-          "m",
-        ),
-      );
+      assert.match(generatedWorkspace, /^  - "@farm\.js\/\*"$/m);
 
       const generatedGitignore = await readFile(path.join(generatedDir, ".gitignore"), "utf8");
       assert.match(generatedGitignore, /^\.env\.local$/m);
+      assert.match(generatedGitignore, /^\.netlify\/?$/m);
       const generatedConfig = await readFile(path.join(generatedDir, "farm.config.ts"), "utf8");
       assert.match(generatedConfig, /theme:\s*\{\s*default: "dark"/s);
       await readFile(path.join(generatedDir, ".env.example"), "utf8");
@@ -1092,7 +1124,7 @@ test("generates every official integration starter", async () => {
         );
       }
       if (template.name === "clerk") {
-        assert.equal(packageJson.dependencies["@clerk/react"], "^6.1.0");
+        assert.equal(packageJson.dependencies["@clerk/react"], "^6.4.3");
       }
 
       assert.match(output, new RegExp(`Open /integrations/${template.route}`));
@@ -1173,6 +1205,265 @@ writeFileSync(process.env.FARM_CREATE_APP_INSTALL_MARKER, JSON.stringify({
   }
 });
 
+test("uses the invoking package manager throughout generated guidance", async () => {
+  const tempDir = await mkdtemp(
+    path.join(os.tmpdir(), "create-farm-app-package-manager-guidance-"),
+  );
+  const cases = [
+    {
+      name: "npm",
+      userAgent: "npm/11.6.0 node/v22.0.0",
+      dev: "npm run dev",
+      migrate: "npm run auth:migrate",
+      start: "npm run start",
+      check: "npm run type-check && npm run build",
+    },
+    {
+      name: "pnpm",
+      userAgent: "pnpm/11.18.0 npm/? node/v22.0.0",
+      dev: "pnpm dev",
+      migrate: "pnpm auth:migrate",
+      start: "pnpm start",
+      check: "pnpm type-check && pnpm build",
+    },
+    {
+      name: "yarn",
+      userAgent: "yarn/4.9.2 npm/? node/v22.0.0",
+      dev: "yarn dev",
+      migrate: "yarn auth:migrate",
+      start: "yarn start",
+      check: "yarn type-check && yarn build",
+    },
+    {
+      name: "bun",
+      userAgent: "bun/1.2.22 npm/? node/v22.0.0",
+      dev: "bun run dev",
+      migrate: "bun run auth:migrate",
+      start: "bun run start",
+      check: "bun run type-check && bun run build",
+    },
+  ];
+
+  try {
+    for (const packageManager of cases) {
+      const projectName = `${packageManager.name}-app`;
+      const output = execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          projectName,
+          "--template",
+          "better-auth",
+          "--skip-install",
+        ],
+        {
+          cwd: tempDir,
+          encoding: "utf8",
+          env: { ...process.env, npm_config_user_agent: packageManager.userAgent },
+        },
+      );
+      const generatedDir = path.join(tempDir, projectName);
+      const homePage = await readFile(path.join(generatedDir, "src/app/page.tsx"), "utf8");
+      const readme = await readFile(path.join(generatedDir, "README.md"), "utf8");
+      const farmConfig = await readFile(path.join(generatedDir, "farm.config.ts"), "utf8");
+      const packageJson = JSON.parse(
+        await readFile(path.join(generatedDir, "package.json"), "utf8"),
+      );
+
+      assert.match(homePage, new RegExp(`<code>${escapeRegExp(packageManager.dev)}</code>`));
+      assert.match(readme, new RegExp(escapeRegExp(`${packageManager.name} install`)));
+      assert.match(readme, new RegExp(escapeRegExp(packageManager.dev)));
+      assert.match(readme, new RegExp(escapeRegExp(packageManager.migrate)));
+      assert.match(readme, new RegExp(escapeRegExp(packageManager.start)));
+      assert.match(farmConfig, new RegExp(escapeRegExp(packageManager.migrate)));
+      assert.equal(packageJson.scripts.check, packageManager.check);
+      assert.match(output, new RegExp(escapeRegExp(packageManager.dev)));
+      if (packageManager.name !== "pnpm") {
+        assert.doesNotMatch(homePage, /<code>pnpm dev<\/code>/);
+      }
+    }
+
+    execFileSync(
+      process.execPath,
+      [
+        path.join(packageDir, "bin/create-farm-app.js"),
+        "npm-integration-app",
+        "--template",
+        "ai",
+        "--skip-install",
+      ],
+      {
+        cwd: tempDir,
+        encoding: "utf8",
+        env: { ...process.env, npm_config_user_agent: "npm/11.6.0 node/v22.0.0" },
+      },
+    );
+    const integrationDir = path.join(tempDir, "npm-integration-app");
+    assert.match(
+      await readFile(path.join(integrationDir, "src/app/page.tsx"), "utf8"),
+      /<code>npm run dev<\/code>/,
+    );
+    const integrationReadme = await readFile(path.join(integrationDir, "README.md"), "utf8");
+    assert.match(integrationReadme, /npm install/);
+    assert.match(integrationReadme, /npm run dev/);
+    assert.doesNotMatch(integrationReadme, /pnpm (?:install|dev)/);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("generates starters that start the built server and deploy to Vercel explicitly", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-self-host-"));
+  const builtServer = "node .farm/.output/server/index.mjs";
+  const starters = [
+    { template: "basic" },
+    ...["preact", "solid", "vue", "svelte"].map((renderer) => ({ template: "basic", renderer })),
+    { template: "auth" },
+    { template: "better-auth" },
+    ...betterAuthRenderers.map(({ name }) => ({ template: "better-auth", renderer: name })),
+  ];
+
+  try {
+    for (const { template, renderer } of starters) {
+      const projectName = `${template}-${renderer ?? "react"}-app`;
+      execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          projectName,
+          "--template",
+          template,
+          ...(renderer ? ["--renderer", renderer] : []),
+          "--typescript",
+          "--skip-install",
+        ],
+        { cwd: tempDir, stdio: "pipe" },
+      );
+
+      const generatedDir = path.join(tempDir, projectName);
+      const packageJson = JSON.parse(
+        await readFile(path.join(generatedDir, "package.json"), "utf8"),
+      );
+      const farmConfig = await readFile(path.join(generatedDir, "farm.config.ts"), "utf8");
+
+      // Hosts that prune devDependencies before `start` would lose the `farm`
+      // CLI, so `start` runs the self-contained server that `farm build` emits.
+      assert.equal(packageJson.scripts.start, builtServer, projectName);
+      assert.equal(packageJson.scripts.deploy, "farm deploy --vercel", projectName);
+      assert.doesNotMatch(farmConfig, /\btarget:/, projectName);
+    }
+
+    execFileSync(
+      process.execPath,
+      [
+        path.join(packageDir, "bin/create-farm-app.js"),
+        "react-compiler-app",
+        "--template",
+        "react-compiler",
+        "--typescript",
+        "--skip-install",
+      ],
+      { cwd: tempDir, stdio: "pipe" },
+    );
+    const compilerPackage = JSON.parse(
+      await readFile(path.join(tempDir, "react-compiler-app/package.json"), "utf8"),
+    );
+    assert.equal(compilerPackage.scripts.start, builtServer);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 function escapeRegExp(input) {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/**
+ * Feature packages that @farm.js/core declares as optional peers. A starter that
+ * uses the feature must declare the package, or it breaks on a clean install.
+ */
+const optionalCorePeers = [
+  {
+    name: "@tailwindcss/vite",
+    section: "devDependencies",
+    async isUsed(generatedDir) {
+      const stylesheets = await readGeneratedFiles(generatedDir, /\.css$/);
+      return stylesheets.some((source) => /@import\s+["']tailwindcss["']/.test(source));
+    },
+  },
+  {
+    name: "@farming-labs/docs",
+    section: "dependencies",
+    async isUsed(generatedDir) {
+      // Farm enables docs for an explicit config or a discovered docs.config.* / docs.json.
+      const [config] = await readGeneratedFiles(generatedDir, /^farm\.config\.[cm]?[jt]s$/);
+      const docsFiles = await readGeneratedFiles(
+        generatedDir,
+        /^docs\.(?:config\.[cm]?[jt]s|json)$/,
+      );
+      return docsFiles.length > 0 || /\bdocs:\s*(?:true|\{)/.test(config ?? "");
+    },
+  },
+];
+
+async function readGeneratedFiles(directory, pattern) {
+  const sources = [];
+  for (const entry of await readdir(directory, { withFileTypes: true, recursive: true })) {
+    const parent = entry.parentPath ?? entry.path;
+    if (!entry.isFile() || !pattern.test(entry.name) || parent.includes("node_modules")) continue;
+    sources.push(await readFile(path.join(parent, entry.name), "utf8"));
+  }
+  return sources;
+}
+
+test("generated starters declare the optional core peers their features use", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-optional-peers-"));
+  const starters = [
+    ...["basic", "auth", "better-auth", "react-compiler"].map((template) => ({ template })),
+    ...["preact", "solid", "svelte", "vue"].map((renderer) => ({ template: "basic", renderer })),
+    ...integrationTemplates.map(({ name }) => ({ template: name })),
+  ];
+  const used = new Set();
+
+  try {
+    for (const { template, renderer } of starters) {
+      const projectName = `${template}-${renderer || "react"}-app`;
+      execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          projectName,
+          "--template",
+          template,
+          ...(renderer ? ["--renderer", renderer] : []),
+          "--typescript",
+          "--skip-install",
+        ],
+        {
+          cwd: tempDir,
+          env: { ...process.env, npm_config_user_agent: "pnpm/11.18.0 npm/? node/v22.0.0" },
+          stdio: "pipe",
+        },
+      );
+      const generatedDir = path.join(tempDir, projectName);
+      const packageJson = JSON.parse(
+        await readFile(path.join(generatedDir, "package.json"), "utf8"),
+      );
+
+      for (const peer of optionalCorePeers) {
+        if (!(await peer.isUsed(generatedDir))) continue;
+        used.add(peer.name);
+        assert.equal(
+          typeof packageJson[peer.section]?.[peer.name],
+          "string",
+          `${projectName} uses ${peer.name} but does not declare it in ${peer.section}`,
+        );
+      }
+    }
+
+    // Guard against a detector that silently stops matching the starters.
+    assert.deepEqual([...used].sort(), optionalCorePeers.map(({ name }) => name).sort());
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

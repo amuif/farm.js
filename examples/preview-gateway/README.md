@@ -4,7 +4,7 @@ This is the Vercel gateway behind `farm preview`.
 
 This example is for Farming Labs maintainers or teams self-hosting their own gateway. Regular Farm app developers do not need to copy, deploy, or configure this app. The default `farm preview` command is backed by the hosted Farming Labs gateway.
 
-It accepts public requests on `*.preview.farming-labs.dev`, hands them to the local `farm preview` CLI over its persistent outbound WebSocket, and returns the local app response to the public caller. The existing outbound HTTPS polling gateway remains available as a compatibility fallback.
+It accepts public requests on `*.preview.farmjs.dev`, hands them to the local `farm preview` CLI over its persistent outbound WebSocket, and returns the local app response to the public caller. The existing outbound HTTPS polling gateway remains available as a compatibility fallback.
 
 The hosted relay uses Redis to coordinate WebSocket agents and HTTP requests across Vercel Function instances. Requests that reach the Function holding the agent socket stay on the direct in-memory path; requests that reach another instance cross the shared Redis queue.
 
@@ -21,8 +21,8 @@ Configure the Vercel project root directory as `examples/preview-gateway`. Deplo
 Attach both domains to the Vercel project:
 
 ```txt
-preview.farming-labs.dev
-*.preview.farming-labs.dev
+preview.farmjs.dev
+*.preview.farmjs.dev
 ```
 
 Vercel will show the DNS records it expects. After DNS is verified, Vercel handles HTTPS certificates for the apex and wildcard preview domains.
@@ -44,6 +44,9 @@ vercel integration add upstash/upstash-kv \
 ```
 
 The integration injects `REDIS_URL`. Without it, the WebSocket relay uses only the current Function's memory, which is suitable for local development but not multi-instance Vercel traffic.
+The same Redis connection enforces a shared per-client limit on managed login exchanges. A production
+deployment with managed authentication enabled refuses to start without `REDIS_URL`, `KV_URL`, or
+`UPSTASH_REDIS_URL` so API key verification cannot be exposed without shared abuse control.
 
 ### Compatibility polling storage
 
@@ -72,9 +75,66 @@ KV_REST_API_TOKEN
 Set:
 
 ```txt
-FARM_PREVIEW_DOMAIN=preview.farming-labs.dev
-FARM_PREVIEW_GATEWAY_URL=https://preview.farming-labs.dev
+FARM_PREVIEW_DOMAIN=preview.farmjs.dev
+FARM_PREVIEW_GATEWAY_URL=https://preview.farmjs.dev
 ```
+
+### Managed developer login
+
+Developers preview with a Farm.js Infrastructure API key: `FARMJS_API_KEY`, or the key
+`farm login` gets them by signing in at app.farmjs.dev. Turn managed login on with two secrets:
+
+```txt
+FARM_PREVIEW_AUTH_SECRET=<gateway-signing-secret-at-least-32-bytes>
+FARM_PREVIEW_GATEWAY_SECRET=<separate-random-secret-at-least-32-bytes>
+```
+
+Set the identical `FARM_PREVIEW_GATEWAY_SECRET` in Infra. It authenticates the private
+identity/activity backchannel; it is not a developer API key and must never reach the
+CLI or browser. Infra is `https://app.farmjs.dev`; `FARM_INFRA_URL` overrides it only for a
+local or self-hosted Infra (HTTPS, or loopback HTTP). The integration never follows redirects
+carrying credentials.
+
+Apply Infra's auth, API-key, and preview schema migrations **before** deploying and
+enabling this gateway mode. Production auth includes a database-backed rate limiter.
+Ship the compatible CLI update as well: older clients do not understand the `device`
+provider. Keep the existing Redis and Blob configuration described above.
+
+The gateway verifies API keys/device credentials with Infra on every grant. The signed
+grant contains the verified owner, preview name, and expiry. Only that short-lived grant
+reaches the tunnel transport. Identity may include a project restriction and credential
+expiry; grants must match that project and cannot outlive the credential.
+The Infra adapter also checks `/api/previews/access` on registration and before forwarding,
+so key revocation, expiry, and dashboard **Stop preview** apply to active previews.
+The signed nonce identifies the grant across reconnects and both transports. WebSocket
+relays check idle connections every 5 seconds; polling rechecks during waits. Calls have
+a 5-second deadline and fail closed. Already executed app work cannot be undone.
+Deploy the matching Infra key/preview migrations and access endpoint first, then this gateway.
+Legacy/self-hosted gateways that omit `authorizeSession` retain their existing behavior.
+
+Optional `observer` hooks in both gateway transports report session lifecycle and
+request metadata. This example forwards them using Vercel `waitUntil`, with bounded
+concurrency and timeouts; failures never break public requests. Heartbeats are throttled
+to one report per session per 20 seconds. No request bodies, headers, or query strings
+are reported. Paths may contain identifiers or embedded credentials; never put secrets in URL paths. Reporting
+is best-effort; it is not a durable audit stream. The dashboard marks old heartbeats stale.
+
+Infra keeps the latest 200 requests per session and lists the latest 50 sessions that
+expired less than seven days ago. Configure the maintenance POST described in the Infra
+README to physically delete expired sessions and their request records. This gateway
+does not automatically provision that scheduler.
+
+The signing secret must contain at least 32 bytes and must not be distributed to CLI users. Set
+`FARM_PREVIEW_DEFAULT_TTL_MS` and `FARM_PREVIEW_MAX_TTL_MS` to override the default one-hour and
+maximum 24-hour lifetimes.
+
+The included Redis limiter trusts `x-forwarded-for` only when Vercel's `VERCEL=1` runtime marker is
+present, because Vercel overwrites that header at the edge. If the marker or client address is
+missing, managed login fails closed with a retryable `503`. A port to another hosting platform must
+derive its rate-limit identity from the connection address or a proxy-authenticated header instead
+of enabling trust for client-supplied forwarding headers. Keep **Automatically expose System
+Environment Variables** enabled in the Vercel project so the runtime marker is available. Redis
+client errors are logged server-side while callers receive the same generic `503` response.
 
 Without Blob or Redis REST env vars, compatibility polling falls back to in-memory storage. That is useful for local development, but not reliable for production Vercel traffic because requests can be handled by different Function instances.
 
@@ -84,13 +144,13 @@ After the gateway is deployed:
 
 ```bash
 farm dev
-farm preview --name stripe-webhook
+farm preview --name stripe-webhook --expires 2h
 ```
 
 The CLI prints:
 
 ```txt
-Public: https://stripe-webhook.preview.farming-labs.dev
+Public: https://stripe-webhook.preview.farmjs.dev
 ```
 
 ## Local gateway development
@@ -108,11 +168,24 @@ Then point the CLI at it:
 farm preview --gateway http://localhost:3000 --name local-check
 ```
 
-For local gateway runs, the public URL uses the path fallback:
+By default, local gateway runs use the path fallback:
 
 ```txt
 http://localhost:3000/__preview/local-check
 ```
+
+For interactive websites, set `FARM_PREVIEW_DOMAIN=localhost` on the local gateway
+as well. The public URL becomes `http://local-check.localhost:3000`, preserving
+the gateway port. Each preview gets its own origin, so root-relative scripts,
+styles, API calls, and links reach that preview without rewriting the app. Use a
+browser that resolves `*.localhost` to loopback. The path fallback is useful for
+individual HTTP requests but does not relocate an app's root-relative URLs.
+
+When composing the Node adapters yourself, pass `domain: "localhost"` to
+`createNodePreviewGatewayHandler` and `publicDomain: "localhost"` to
+`createPersistentPreviewRelay`. Keep the CLI's gateway/relay endpoints on the
+gateway origin, not on a preview subdomain. Target WebSocket upgrades, including
+Vite HMR, remain subject to the limits below.
 
 ## Limits
 

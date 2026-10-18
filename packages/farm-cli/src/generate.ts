@@ -1,17 +1,33 @@
 import {
+  assertNoSchemaListField,
+  collectSchemaExtensions,
+  collectSchemaModels,
+  describeSchemaReference,
+  escapeSqlString,
+  findSchemaTableOwners,
   generateFarmTypeArtifacts,
   getFarmDocsRouteTypeEntries,
   getIntegrationSchemas,
+  isNullableField,
   loadConfig,
   logger,
+  renderSqlSchemaFile,
   resolveConfig,
-  type FarmIntegrationSchema,
-  type FarmIntegrationSchemaField,
-  type FarmIntegrationSchemaModel,
+  toCamelCase,
+} from "@farm.js/core/internal/cli-runtime";
+import type {
+  CollectedSchemaModel,
+  FarmSchema,
+  FarmSchemaExtension,
+  FarmSchemaReference,
+  ResolvedSchemaField,
 } from "@farm.js/core";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+// Kept exported here: this is where it has always been part of the cli surface.
+export { escapeSqlString } from "@farm.js/core/internal/cli-runtime";
 
 export type GenerateFarmSchemaTarget =
   | "prisma"
@@ -54,26 +70,91 @@ type PackageManifest = {
   optionalDependencies?: Record<string, string>;
 };
 
-type ResolvedSchemaField = FarmIntegrationSchemaField & {
-  name: string;
-};
-
-type ResolvedSchemaModel = Omit<FarmIntegrationSchemaModel, "fields"> & {
-  name: string;
-  fields: Record<string, ResolvedSchemaField>;
-};
-
-type CollectedSchemaModel = {
-  integrationKey: string;
-  modelKey: string;
-  modelName: string;
-  exportName: string;
-  prismaModelName: string;
-  model: ResolvedSchemaModel;
-};
-
 const PRISMA_GENERATED_START = "// Farm.js integrations generated schema: start";
 const PRISMA_GENERATED_END = "// Farm.js integrations generated schema: end";
+const PRISMA_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+const JAVASCRIPT_IDENTIFIER_PATTERN = /^[$_\p{ID_Start}][$\u200c\u200d_\p{ID_Continue}]*$/u;
+const JAVASCRIPT_RESERVED_BINDINGS = new Set([
+  "arguments",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "eval",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+
+type GeneratedIdentifierTarget = "prisma" | "drizzle" | "mongodb";
+
+type InternalOrmReference = {
+  sourceModel: CollectedSchemaModel;
+  sourceFieldKey: string;
+  sourceField: ResolvedSchemaField;
+  targetModel: CollectedSchemaModel;
+  targetFieldKey: string;
+};
+
+type PrismaRelation = InternalOrmReference & {
+  relationName: string;
+  sourceRelationFieldName: string;
+  targetRelationFieldName: string;
+  sourceIsUnique: boolean;
+};
+
+const PRISMA_ON_DELETE_ACTIONS = {
+  cascade: "Cascade",
+  restrict: "Restrict",
+  setNull: "SetNull",
+  noAction: "NoAction",
+} satisfies Record<NonNullable<FarmSchemaReference["onDelete"]>, string>;
+
+const DRIZZLE_ON_DELETE_ACTIONS = {
+  cascade: "cascade",
+  restrict: "restrict",
+  setNull: "set null",
+  noAction: "no action",
+} satisfies Record<NonNullable<FarmSchemaReference["onDelete"]>, string>;
 
 export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
   const root = path.resolve(options.root || process.cwd());
@@ -88,7 +169,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
     throw new Error("No Farm config found. Please create farm.config.ts or config.ts.");
   }
 
-  const resolvedConfig = await resolveConfig({ root, ...userConfig }, "development");
+  const resolvedConfig = await resolveConfig({ ...userConfig, root }, "development");
   const extraRoutes = [
     ...(resolvedConfig.openapi?.enabled && resolvedConfig.openapi.route
       ? [resolvedConfig.openapi.route]
@@ -122,12 +203,21 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
     `Generated route, API, env${resolvedConfig.i18n.enabled ? ", and i18n" : ""} types (${typeArtifacts.apiRoutes.length} API route${typeArtifacts.apiRoutes.length === 1 ? "" : "s"}).`,
   );
 
+  // Integrations declare a schema directly; plugins declare one by owning
+  // tables, so both feed the same artifacts.
   const schemas = getIntegrationSchemas(resolvedConfig.integrations);
-  const schemaEntries = Object.entries(schemas);
+  const schemaEntries: Array<readonly [string, FarmSchema, (readonly string[])?]> = Object.entries(
+    schemas,
+  ).map(([key, schema]) => [key, schema] as const);
+
+  for (const owner of findSchemaTableOwners(resolvedConfig)) {
+    if (schemas[owner.name]) continue; // already collected as an integration
+    schemaEntries.push([owner.name, owner.schema, owner.models]);
+  }
 
   if (!schemaEntries.length) {
     if (hasSchemaOptions(options)) {
-      logger.warn("No integration schemas were found in the current Farm config.");
+      logger.warn("No schemas were found in the current Farm config.");
     }
     return typeArtifacts;
   }
@@ -142,7 +232,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
       throw error;
     }
     logger.warn(
-      `Integration schemas were found, but Farm could not choose a schema target automatically: ${(error as Error).message}`,
+      `Schemas were found, but Farm could not choose a schema target automatically: ${(error as Error).message}`,
     );
     return typeArtifacts;
   }
@@ -150,7 +240,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
   if (!orm) {
     if (!schemaOptionsExplicit) {
       logger.warn(
-        "Integration schemas were found, but no data layer was detected. Pass --orm prisma|drizzle|postgres|mysql|sqlite|mongodb to generate schema artifacts.",
+        "Schemas were found, but no data layer was detected. Pass --orm prisma|drizzle|postgres|mysql|sqlite|mongodb to generate schema artifacts.",
       );
       return typeArtifacts;
     }
@@ -160,6 +250,9 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
   }
 
   const collectedModels = collectSchemaModels(schemaEntries);
+  const extensions = schemaEntries.flatMap(([owner, schema, models]) =>
+    collectSchemaExtensions(owner, schema, models),
+  );
 
   switch (orm) {
     case "prisma": {
@@ -175,6 +268,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
 
       await writePrismaSchema(schemaPath, collectedModels);
       logger.success(`Generated Prisma integration schema in ${path.relative(root, schemaPath)}.`);
+      warnAboutExtensions(extensions, "prisma", "postgres");
       return typeArtifacts;
     }
 
@@ -193,6 +287,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
         : path.join(root, "farm-integrations.generated.ts");
       await writeGeneratedFile(outputPath, generateDrizzleSchema(collectedModels, dialect));
       logger.success(`Generated Drizzle integration schema in ${path.relative(root, outputPath)}.`);
+      warnAboutExtensions(extensions, "drizzle", dialect);
       return typeArtifacts;
     }
 
@@ -202,7 +297,7 @@ export async function generateFarmArtifacts(options: GenerateFarmOptions = {}) {
       const outputPath = options.output
         ? path.resolve(root, options.output)
         : path.join(root, `farm-integrations.generated.${orm}.sql`);
-      await writeGeneratedFile(outputPath, generateSqlSchema(collectedModels, orm));
+      await writeGeneratedFile(outputPath, renderSqlSchemaFile(collectedModels, orm));
       logger.success(`Generated ${orm} integration schema in ${path.relative(root, outputPath)}.`);
       return typeArtifacts;
     }
@@ -350,6 +445,69 @@ async function detectDrizzleDialect(
   return candidates.size === 1 ? Array.from(candidates)[0]! : null;
 }
 
+/**
+ * Generated files only hold the tables Farm's owners create. Columns they add
+ * to the app's own tables belong in the app's schema, so say exactly what.
+ */
+function warnAboutExtensions(
+  extensions: readonly FarmSchemaExtension[],
+  orm: "prisma" | "drizzle",
+  dialect: GenerateFarmSqlDialect,
+) {
+  for (const extension of extensions) {
+    logger.warn(
+      `${extension.owner} adds columns to "${extension.table}", which your ${orm === "prisma" ? "Prisma" : "Drizzle"} schema owns. Add them there and run its migration:\n${renderSchemaExtensionForOrm(orm, extension, dialect)}`,
+    );
+  }
+}
+
+/**
+ * ORMs whose schema files own this app's tables. A column added behind their
+ * back is drift their next migration would undo, so Farm reports instead.
+ */
+export function detectOrmSchemaOwners(root: string): Array<"prisma" | "drizzle"> {
+  const owners: Array<"prisma" | "drizzle"> = [];
+  if (existsSync(path.join(root, "prisma", "schema.prisma"))) owners.push("prisma");
+  if (
+    findExistingPath(root, [
+      "drizzle.config.ts",
+      "drizzle.config.mts",
+      "drizzle.config.js",
+      "drizzle.config.mjs",
+      "drizzle.config.cjs",
+    ])
+  ) {
+    owners.push("drizzle");
+  }
+  return owners;
+}
+
+/** What to add to the app's own Prisma or Drizzle schema for an extension. */
+export function renderSchemaExtensionForOrm(
+  orm: "prisma" | "drizzle",
+  extension: FarmSchemaExtension,
+  dialect: GenerateFarmSqlDialect,
+): string {
+  if (orm === "prisma") {
+    return [
+      `// In the Prisma model mapped to "${extension.table}":`,
+      ...extension.fields.map(({ fieldKey, field }) => {
+        const attributes = [
+          getPrismaDefaultAttribute(field),
+          field.name !== fieldKey ? `@map("${escapeDoubleQuoted(field.name)}")` : undefined,
+        ].filter(Boolean);
+        return `${fieldKey} ${getPrismaFieldType(field)}${isNullableField(field) ? "?" : ""}${attributes.length ? ` ${attributes.join(" ")}` : ""}`;
+      }),
+    ].join("\n");
+  }
+  return [
+    `// In the Drizzle table for "${extension.table}":`,
+    ...extension.fields.map(
+      ({ fieldKey, field }) => `${fieldKey}: ${renderDrizzleColumn(field, dialect)},`,
+    ),
+  ].join("\n");
+}
+
 function findExistingPath(root: string, relativePaths: readonly string[]) {
   for (const relativePath of relativePaths) {
     const absolutePath = path.join(root, relativePath);
@@ -374,149 +532,6 @@ function hasAnyDependency(dependencies: Set<string>, candidates: readonly string
   return candidates.some((candidate) => dependencies.has(candidate));
 }
 
-function collectSchemaModels(
-  schemaEntries: ReadonlyArray<readonly [string, FarmIntegrationSchema]>,
-) {
-  const collectedModels: CollectedSchemaModel[] = [];
-  const seenModelNames = new Map<string, string>();
-
-  for (const [integrationKey, schema] of schemaEntries) {
-    const resolvedModels = resolveSchemaModels(integrationKey, schema);
-
-    for (const [modelKey, model] of Object.entries(resolvedModels)) {
-      const collisionKey = model.name.toLowerCase();
-      const previousOwner = seenModelNames.get(collisionKey);
-
-      if (previousOwner && previousOwner !== `${integrationKey}.${modelKey}`) {
-        throw new Error(
-          `Integration schema model "${integrationKey}.${modelKey}" resolves to "${model.name}", which conflicts with "${previousOwner}". Rename one of the models with schema.models.<model>.name.`,
-        );
-      }
-
-      seenModelNames.set(collisionKey, `${integrationKey}.${modelKey}`);
-
-      collectedModels.push({
-        integrationKey,
-        modelKey,
-        modelName: model.name,
-        exportName: toCamelCase(`${integrationKey}_${modelKey}`),
-        prismaModelName: toPascalCase(`${integrationKey}_${modelKey}`),
-        model,
-      });
-    }
-  }
-
-  return collectedModels;
-}
-
-function resolveSchemaModels(integrationKey: string, schema: FarmIntegrationSchema) {
-  const models: Record<string, FarmIntegrationSchemaModel> = Object.fromEntries(
-    Object.entries(schema.models).map(([modelKey, model]) => [modelKey, cloneSchemaModel(model)]),
-  );
-
-  for (const [modelKey, extension] of Object.entries(schema.extend || {})) {
-    const existing = models[modelKey];
-    models[modelKey] = {
-      ...(existing || { fields: {} }),
-      ...(extension.name ? { name: extension.name } : {}),
-      ...(extension.description ? { description: extension.description } : {}),
-      fields: {
-        ...existing?.fields,
-        ...extension.fields,
-      },
-      constraints: [...(existing?.constraints || []), ...(extension.constraints || [])],
-      meta: {
-        ...existing?.meta,
-        ...extension.meta,
-      },
-    };
-  }
-
-  for (const [modelKey, override] of Object.entries(schema.override || {})) {
-    const existing = models[modelKey];
-
-    if (!existing) {
-      throw new Error(
-        `Integration schema override for "${integrationKey}.${modelKey}" is invalid because that model does not exist.`,
-      );
-    }
-
-    const fields = {
-      ...existing.fields,
-    };
-
-    for (const [fieldKey, fieldOverride] of Object.entries(override.fields || {})) {
-      const existingField = fields[fieldKey];
-
-      if (!existingField && !fieldOverride.type) {
-        throw new Error(
-          `Integration schema override for "${integrationKey}.${modelKey}.${fieldKey}" is missing a field type.`,
-        );
-      }
-
-      fields[fieldKey] = {
-        ...existingField,
-        ...fieldOverride,
-      } as FarmIntegrationSchemaField;
-    }
-
-    models[modelKey] = {
-      ...existing,
-      ...(override.name ? { name: override.name } : {}),
-      ...(override.description ? { description: override.description } : {}),
-      fields,
-      constraints: override.constraints || existing.constraints,
-      meta: {
-        ...existing.meta,
-        ...override.meta,
-      },
-    };
-  }
-
-  const resolvedModels: Record<string, ResolvedSchemaModel> = {};
-
-  for (const [modelKey, model] of Object.entries(models)) {
-    const modelName = model.name || toSnakeCase(`${integrationKey}_${modelKey}`);
-    const fieldNames = new Set<string>();
-    const resolvedFields: Record<string, ResolvedSchemaField> = {};
-
-    for (const [fieldKey, field] of Object.entries(model.fields)) {
-      const fieldName = field.name || toSnakeCase(fieldKey);
-
-      if (fieldNames.has(fieldName)) {
-        throw new Error(
-          `Integration schema model "${integrationKey}.${modelKey}" contains duplicate field name "${fieldName}".`,
-        );
-      }
-
-      fieldNames.add(fieldName);
-      resolvedFields[fieldKey] = {
-        ...field,
-        name: fieldName,
-      };
-    }
-
-    resolvedModels[modelKey] = {
-      ...model,
-      name: modelName,
-      fields: resolvedFields,
-    };
-  }
-
-  return resolvedModels;
-}
-
-function cloneSchemaModel(model: FarmIntegrationSchemaModel): FarmIntegrationSchemaModel {
-  return {
-    ...model,
-    fields: Object.fromEntries(
-      Object.entries(model.fields).map(([fieldKey, field]) => [fieldKey, { ...field }]),
-    ),
-    constraints: model.constraints ? [...model.constraints] : undefined,
-    meta: model.meta ? { ...model.meta } : undefined,
-  };
-}
-
 async function writePrismaSchema(schemaPath: string, models: readonly CollectedSchemaModel[]) {
   const source = await readFile(schemaPath, "utf8");
   const generated = createPrismaGeneratedBlock(generatePrismaSchema(models));
@@ -533,20 +548,27 @@ async function writePrismaSchema(schemaPath: string, models: readonly CollectedS
 }
 
 function generatePrismaSchema(models: readonly CollectedSchemaModel[]) {
-  const sections = models.map((model) => renderPrismaModel(model));
+  assertGeneratedIdentifiers(models, "prisma");
+  const relations = createPrismaRelations(models);
+  const sections = models.map((model) => renderPrismaModel(model, relations));
   return sections.join("\n\n");
 }
 
-function renderPrismaModel(model: CollectedSchemaModel) {
+function renderPrismaModel(model: CollectedSchemaModel, relations: readonly PrismaRelation[]) {
   const lines: string[] = [
-    `/// Farm.js generated from integration "${model.integrationKey}" model "${model.modelKey}"`,
+    `/// Farm.js generated from "${model.ownerKey}" model "${model.modelKey}"`,
     `model ${model.prismaModelName} {`,
   ];
 
   const modelLevelConstraints: string[] = [];
+  const outgoingRelations = relations.filter((relation) => relation.sourceModel === model);
+  const incomingRelations = relations.filter((relation) => relation.targetModel === model);
 
   for (const [fieldKey, field] of Object.entries(model.model.fields)) {
-    if (field.reference) {
+    if (
+      field.reference &&
+      !outgoingRelations.some((relation) => relation.sourceFieldKey === fieldKey)
+    ) {
       lines.push(
         `  /// References ${field.reference.model}.${field.reference.field}${field.reference.onDelete ? ` (onDelete: ${field.reference.onDelete})` : ""}`,
       );
@@ -596,6 +618,26 @@ function renderPrismaModel(model: CollectedSchemaModel) {
     }
   }
 
+  for (const relation of outgoingRelations) {
+    const relationType = `${relation.targetModel.prismaModelName}${isNullableField(relation.sourceField) ? "?" : ""}`;
+    const relationArguments = [
+      `fields: [${relation.sourceFieldKey}]`,
+      `references: [${relation.targetFieldKey}]`,
+      `onDelete: ${relation.sourceField.reference?.onDelete ? PRISMA_ON_DELETE_ACTIONS[relation.sourceField.reference.onDelete] : "NoAction"}`,
+      "onUpdate: NoAction",
+    ];
+
+    lines.push(
+      `  ${relation.sourceRelationFieldName} ${relationType} @relation("${escapeDoubleQuoted(relation.relationName)}", ${relationArguments.join(", ")})`,
+    );
+  }
+
+  for (const relation of incomingRelations) {
+    lines.push(
+      `  ${relation.targetRelationFieldName} ${relation.sourceModel.prismaModelName}${relation.sourceIsUnique ? "?" : "[]"} @relation("${escapeDoubleQuoted(relation.relationName)}")`,
+    );
+  }
+
   for (const constraint of model.model.constraints || []) {
     const fields = constraint.fields.join(", ");
     const attribute = constraint.type === "unique" ? "@@unique" : "@@index";
@@ -611,6 +653,57 @@ function renderPrismaModel(model: CollectedSchemaModel) {
 
   lines.push("}");
   return lines.join("\n");
+}
+
+function createPrismaRelations(models: readonly CollectedSchemaModel[]): PrismaRelation[] {
+  const usedFieldNames = new Map(
+    models.map((model) => [model, new Set(Object.keys(model.model.fields))] as const),
+  );
+
+  return collectInternalOrmReferences(models, "Prisma").map((reference) => {
+    const sourceNames = usedFieldNames.get(reference.sourceModel)!;
+    const targetNames = usedFieldNames.get(reference.targetModel)!;
+    const sourceBase = toCamelCase(reference.sourceFieldKey.replace(/(?:Id|_id)$/u, ""));
+    const sourceRelationFieldName = allocateGeneratedFieldName(
+      sourceNames,
+      sourceBase || `${reference.sourceFieldKey}Relation`,
+      toCamelCase(`${reference.sourceFieldKey}_relation`),
+    );
+    const targetRelationFieldName = allocateGeneratedFieldName(
+      targetNames,
+      toCamelCase(reference.sourceModel.modelKey),
+      toCamelCase(`${reference.sourceModel.modelKey}_${reference.sourceFieldKey}`),
+    );
+
+    return {
+      ...reference,
+      relationName: `${reference.sourceModel.prismaModelName}_${reference.sourceFieldKey}_${reference.targetModel.prismaModelName}`,
+      sourceRelationFieldName,
+      targetRelationFieldName,
+      sourceIsUnique: isFieldUnique(reference.sourceModel, reference.sourceFieldKey),
+    };
+  });
+}
+
+function allocateGeneratedFieldName(
+  usedNames: Set<string>,
+  preferredName: string,
+  fallbackName: string,
+) {
+  if (!usedNames.has(preferredName)) {
+    usedNames.add(preferredName);
+    return preferredName;
+  }
+
+  let candidate = fallbackName;
+  let suffix = 2;
+  while (usedNames.has(candidate)) {
+    candidate = `${fallbackName}${suffix}`;
+    suffix += 1;
+  }
+
+  usedNames.add(candidate);
+  return candidate;
 }
 
 function getPrismaFieldType(field: ResolvedSchemaField) {
@@ -658,6 +751,17 @@ function generateDrizzleSchema(
   models: readonly CollectedSchemaModel[],
   dialect: GenerateFarmSqlDialect,
 ) {
+  assertGeneratedIdentifiers(models, "drizzle");
+  for (const model of models) {
+    for (const [fieldKey, field] of Object.entries(model.model.fields)) {
+      assertNoSchemaListField(
+        field,
+        `${model.ownerKey}.${model.modelKey}.${fieldKey}`,
+        `Drizzle ${dialect} generation`,
+      );
+    }
+  }
+
   const tableFactoryName =
     dialect === "postgres" ? "pgTable" : dialect === "mysql" ? "mysqlTable" : "sqliteTable";
   const importSource =
@@ -667,6 +771,7 @@ function generateDrizzleSchema(
         ? "drizzle-orm/mysql-core"
         : "drizzle-orm/sqlite-core";
   const imports = new Set<string>([tableFactoryName, "index", "uniqueIndex"]);
+  const references = collectInternalOrmReferences(models, "Drizzle", dialect);
 
   for (const model of models) {
     for (const field of Object.values(model.model.fields)) {
@@ -683,7 +788,7 @@ function generateDrizzleSchema(
   ];
 
   for (const model of models) {
-    lines.push(renderDrizzleModel(model, dialect, tableFactoryName));
+    lines.push(renderDrizzleModel(model, dialect, tableFactoryName, references));
     lines.push("");
   }
 
@@ -694,20 +799,25 @@ function renderDrizzleModel(
   model: CollectedSchemaModel,
   dialect: GenerateFarmSqlDialect,
   tableFactoryName: string,
+  references: readonly InternalOrmReference[],
 ) {
   const lines = [
-    `// Farm.js generated from integration "${model.integrationKey}" model "${model.modelKey}"`,
+    `// Farm.js generated from "${model.ownerKey}" model "${model.modelKey}"`,
     `export const ${model.exportName} = ${tableFactoryName}("${model.modelName}", {`,
   ];
 
   for (const [fieldKey, field] of Object.entries(model.model.fields)) {
-    if (field.reference) {
+    const reference = references.find(
+      (candidate) => candidate.sourceModel === model && candidate.sourceFieldKey === fieldKey,
+    );
+
+    if (field.reference && !reference) {
       lines.push(
-        `  // ${fieldKey} references ${field.reference.model}.${field.reference.field}${field.reference.onDelete ? ` (onDelete: ${field.reference.onDelete})` : ""}`,
+        `  // ${fieldKey} references ${describeSchemaReference(model, fieldKey)}${field.reference.onDelete ? ` (onDelete: ${field.reference.onDelete})` : ""}`,
       );
     }
 
-    lines.push(`  ${fieldKey}: ${renderDrizzleColumn(field, dialect)},`);
+    lines.push(`  ${fieldKey}: ${renderDrizzleColumn(field, dialect, reference)},`);
   }
 
   lines.push("}, (table) => ({");
@@ -785,7 +895,11 @@ function getDrizzleImportNames(dialect: GenerateFarmSqlDialect, field: ResolvedS
   }
 }
 
-function renderDrizzleColumn(field: ResolvedSchemaField, dialect: GenerateFarmSqlDialect) {
+function renderDrizzleColumn(
+  field: ResolvedSchemaField,
+  dialect: GenerateFarmSqlDialect,
+  reference?: InternalOrmReference,
+) {
   let expression: string;
 
   if (dialect === "postgres") {
@@ -794,6 +908,12 @@ function renderDrizzleColumn(field: ResolvedSchemaField, dialect: GenerateFarmSq
     expression = renderMysqlDrizzleColumn(field);
   } else {
     expression = renderSqliteDrizzleColumn(field);
+  }
+
+  if (reference) {
+    const onDelete = reference.sourceField.reference?.onDelete;
+    const actions = onDelete ? `, { onDelete: "${DRIZZLE_ON_DELETE_ACTIONS[onDelete]}" }` : "";
+    expression += `.references(() => ${reference.targetModel.exportName}.${reference.targetFieldKey}${actions})`;
   }
 
   if (field.primaryKey) {
@@ -814,6 +934,104 @@ function renderDrizzleColumn(field: ResolvedSchemaField, dialect: GenerateFarmSq
   }
 
   return expression;
+}
+
+function collectInternalOrmReferences(
+  models: readonly CollectedSchemaModel[],
+  target: "Prisma" | "Drizzle",
+  dialect?: GenerateFarmSqlDialect,
+): InternalOrmReference[] {
+  const modelLookup = new Map(
+    models.map((model) => [`${model.ownerKey}.${model.modelKey}`, model] as const),
+  );
+  const references: InternalOrmReference[] = [];
+
+  for (const sourceModel of models) {
+    for (const [sourceFieldKey, sourceField] of Object.entries(sourceModel.model.fields)) {
+      const declaration = sourceField.reference;
+      if (!declaration || !isDatabaseEnforcedReference(declaration)) {
+        continue;
+      }
+
+      const targetModel = modelLookup.get(`${sourceModel.ownerKey}.${declaration.model}`);
+      if (!targetModel) {
+        continue;
+      }
+
+      const targetField = targetModel.model.fields[declaration.field];
+      if (!targetField) {
+        throw new Error(
+          `${target} cannot generate reference "${sourceModel.ownerKey}.${sourceModel.modelKey}.${sourceFieldKey}" because target field "${declaration.model}.${declaration.field}" does not exist.`,
+        );
+      }
+
+      if (sourceField.list || targetField.list) {
+        throw new Error(
+          `${target} cannot generate reference "${sourceModel.ownerKey}.${sourceModel.modelKey}.${sourceFieldKey}" because reference columns must be scalar fields.`,
+        );
+      }
+
+      const sourceType = getOrmReferenceType(sourceField, target, dialect);
+      const targetType = getOrmReferenceType(targetField, target, dialect);
+      if (sourceType !== targetType) {
+        throw new Error(
+          `${target} cannot generate reference "${sourceModel.ownerKey}.${sourceModel.modelKey}.${sourceFieldKey}" because its ${sourceType} column type does not match target field "${declaration.model}.${declaration.field}" (${targetType}).`,
+        );
+      }
+
+      if (!isFieldUnique(targetModel, declaration.field)) {
+        throw new Error(
+          `${target} cannot generate reference "${sourceModel.ownerKey}.${sourceModel.modelKey}.${sourceFieldKey}" because target field "${declaration.model}.${declaration.field}" is not a primary or unique field.`,
+        );
+      }
+
+      if (declaration.onDelete === "setNull" && !isNullableField(sourceField)) {
+        throw new Error(
+          `${target} cannot generate reference "${sourceModel.ownerKey}.${sourceModel.modelKey}.${sourceFieldKey}" with onDelete "setNull" because the source field is not nullable.`,
+        );
+      }
+
+      references.push({
+        sourceModel,
+        sourceFieldKey,
+        sourceField,
+        targetModel,
+        targetFieldKey: declaration.field,
+      });
+    }
+  }
+
+  return references;
+}
+
+function getOrmReferenceType(
+  field: ResolvedSchemaField,
+  target: "Prisma" | "Drizzle",
+  dialect?: GenerateFarmSqlDialect,
+) {
+  if (target === "Prisma") {
+    return getPrismaFieldType(field);
+  }
+
+  return getDrizzleImportNames(dialect!, field)[0];
+}
+
+function isDatabaseEnforcedReference(reference: FarmSchemaReference) {
+  return reference.enforced === undefined || reference.enforced === "db";
+}
+
+function isFieldUnique(model: CollectedSchemaModel, fieldKey: string) {
+  const field = model.model.fields[fieldKey];
+  return (
+    field?.primaryKey === true ||
+    field?.unique === true ||
+    model.model.constraints?.some(
+      (constraint) =>
+        constraint.type === "unique" &&
+        constraint.fields.length === 1 &&
+        constraint.fields[0] === fieldKey,
+    ) === true
+  );
 }
 
 function renderPostgresDrizzleColumn(field: ResolvedSchemaField) {
@@ -887,217 +1105,8 @@ function getDrizzleDefaultExpression(field: ResolvedSchemaField, dialect: Genera
   return "";
 }
 
-function generateSqlSchema(
-  models: readonly CollectedSchemaModel[],
-  dialect: GenerateFarmSqlDialect,
-) {
-  const lines = ["-- Generated by Farm.js CLI. Review before applying.", ""];
-  const modelLookup = createModelLookup(models);
-
-  for (const model of models) {
-    lines.push(
-      `-- Integration "${model.integrationKey}" model "${model.modelKey}"`,
-      renderSqlTable(model, dialect, modelLookup),
-      "",
-    );
-
-    for (const statement of renderSqlIndexes(model, dialect)) {
-      lines.push(statement, "");
-    }
-  }
-
-  return lines.join("\n").trimEnd() + "\n";
-}
-
-function renderSqlTable(
-  model: CollectedSchemaModel,
-  dialect: GenerateFarmSqlDialect,
-  modelLookup: Map<string, CollectedSchemaModel>,
-) {
-  const tableName = quoteIdentifier(dialect, model.modelName);
-  const lines = [`CREATE TABLE IF NOT EXISTS ${tableName} (`];
-  const columns: string[] = [];
-  const internalReferences = createInternalReferenceLookup(model, dialect, modelLookup);
-
-  for (const [fieldKey, field] of Object.entries(model.model.fields)) {
-    const parts = [`  ${quoteIdentifier(dialect, field.name)}`, getSqlColumnType(field, dialect)];
-
-    if (field.primaryKey) {
-      parts.push("PRIMARY KEY");
-    } else if (!isNullableField(field)) {
-      parts.push("NOT NULL");
-    }
-
-    if (!field.primaryKey && field.unique) {
-      parts.push("UNIQUE");
-    }
-
-    const defaultValue = getSqlDefaultExpression(field, dialect);
-    if (defaultValue) {
-      parts.push(`DEFAULT ${defaultValue}`);
-    }
-
-    const reference = internalReferences.get(fieldKey);
-    if (reference) {
-      parts.push(reference);
-    } else if (field.reference) {
-      parts.push(
-        `/* references ${field.reference.model}.${field.reference.field}${field.reference.onDelete ? ` on delete ${field.reference.onDelete}` : ""} */`,
-      );
-    }
-
-    columns.push(parts.join(" "));
-  }
-
-  lines.push(columns.join(",\n"));
-  lines.push(");");
-  return lines.join("\n");
-}
-
-function renderSqlIndexes(model: CollectedSchemaModel, dialect: GenerateFarmSqlDialect) {
-  const statements: string[] = [];
-  const tableName = quoteIdentifier(dialect, model.modelName);
-
-  for (const [fieldKey, field] of Object.entries(model.model.fields)) {
-    if (!field.index) {
-      continue;
-    }
-
-    const indexName = `${model.modelName}_${field.name}_idx`;
-    statements.push(
-      `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(dialect, indexName)} ON ${tableName} (${quoteIdentifier(dialect, field.name)});`,
-    );
-  }
-
-  for (const constraint of model.model.constraints || []) {
-    const indexName =
-      constraint.name ||
-      `${model.modelName}_${constraint.fields.map((fieldKey) => model.model.fields[fieldKey]?.name || fieldKey).join("_")}_${constraint.type}`;
-    const fields = constraint.fields
-      .map((fieldKey) => quoteIdentifier(dialect, model.model.fields[fieldKey]?.name || fieldKey))
-      .join(", ");
-
-    if (constraint.type === "unique") {
-      statements.push(
-        `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier(dialect, indexName)} ON ${tableName} (${fields});`,
-      );
-    } else {
-      statements.push(
-        `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(dialect, indexName)} ON ${tableName} (${fields});`,
-      );
-    }
-  }
-
-  return statements;
-}
-
-function createInternalReferenceLookup(
-  model: CollectedSchemaModel,
-  dialect: GenerateFarmSqlDialect,
-  modelLookup: Map<string, CollectedSchemaModel>,
-) {
-  const lookup = new Map<string, string>();
-
-  for (const [fieldKey, field] of Object.entries(model.model.fields)) {
-    if (!field.reference) {
-      continue;
-    }
-
-    const referencedModel = modelLookup.get(`${model.integrationKey}.${field.reference.model}`);
-
-    if (referencedModel) {
-      const referencedField = field.reference.field;
-      const pieces = [
-        `REFERENCES ${quoteIdentifier(dialect, referencedModel.modelName)} (${quoteIdentifier(dialect, referencedModel.model.fields[referencedField]?.name || toSnakeCase(referencedField))})`,
-      ];
-
-      if (field.reference.onDelete) {
-        pieces.push(`ON DELETE ${field.reference.onDelete.toUpperCase()}`);
-      }
-
-      lookup.set(fieldKey, pieces.join(" "));
-    }
-  }
-
-  return lookup;
-}
-
-function getSqlColumnType(field: ResolvedSchemaField, dialect: GenerateFarmSqlDialect) {
-  if (dialect === "postgres") {
-    switch (field.type) {
-      case "boolean":
-        return "BOOLEAN";
-      case "integer":
-        return "INTEGER";
-      case "number":
-        return "DOUBLE PRECISION";
-      case "datetime":
-        return "TIMESTAMPTZ";
-      case "json":
-        return "JSONB";
-      default:
-        return "TEXT";
-    }
-  }
-
-  if (dialect === "mysql") {
-    switch (field.type) {
-      case "boolean":
-        return "BOOLEAN";
-      case "integer":
-        return "INT";
-      case "number":
-        return "DOUBLE";
-      case "datetime":
-        return "DATETIME";
-      case "json":
-        return "JSON";
-      case "text":
-        return "TEXT";
-      default:
-        return "VARCHAR(255)";
-    }
-  }
-
-  switch (field.type) {
-    case "boolean":
-    case "integer":
-      return "INTEGER";
-    case "number":
-      return "REAL";
-    default:
-      return "TEXT";
-  }
-}
-
-function getSqlDefaultExpression(field: ResolvedSchemaField, dialect: GenerateFarmSqlDialect) {
-  if (field.default === undefined) {
-    return null;
-  }
-
-  if (field.type === "datetime" && field.default === "now") {
-    return "CURRENT_TIMESTAMP";
-  }
-
-  if (typeof field.default === "string") {
-    return `'${escapeSqlString(field.default)}'`;
-  }
-
-  if (typeof field.default === "number") {
-    return String(field.default);
-  }
-
-  if (typeof field.default === "boolean") {
-    if (dialect === "sqlite") {
-      return field.default ? "1" : "0";
-    }
-    return field.default ? "TRUE" : "FALSE";
-  }
-
-  return null;
-}
-
 function generateMongoBootstrap(models: readonly CollectedSchemaModel[]) {
+  assertGeneratedIdentifiers(models, "mongodb");
   const lines = [
     "// Generated by Farm.js CLI. Review before committing.",
     'import type { Db } from "mongodb";',
@@ -1106,7 +1115,7 @@ function generateMongoBootstrap(models: readonly CollectedSchemaModel[]) {
   ];
 
   for (const model of models) {
-    lines.push(`  // Integration "${model.integrationKey}" model "${model.modelKey}"`);
+    lines.push(`  // Owner "${model.ownerKey}" model "${model.modelKey}"`);
     lines.push(
       `  const ${model.exportName} = db.collection("${escapeDoubleQuoted(model.modelName)}");`,
     );
@@ -1129,7 +1138,7 @@ function generateMongoBootstrap(models: readonly CollectedSchemaModel[]) {
 
       if (field.reference) {
         lines.push(
-          `  // ${fieldKey} references ${field.reference.model}.${field.reference.field}${field.reference.onDelete ? ` (onDelete: ${field.reference.onDelete})` : ""}`,
+          `  // ${fieldKey} references ${describeSchemaReference(model, fieldKey)}${field.reference.onDelete ? ` (onDelete: ${field.reference.onDelete})` : ""}`,
         );
       }
     }
@@ -1155,58 +1164,59 @@ function generateMongoBootstrap(models: readonly CollectedSchemaModel[]) {
   return lines.join("\n").trimEnd() + "\n";
 }
 
+function assertGeneratedIdentifiers(
+  models: readonly CollectedSchemaModel[],
+  target: GeneratedIdentifierTarget,
+) {
+  const targetName = target === "prisma" ? "Prisma" : target === "drizzle" ? "Drizzle" : "MongoDB";
+  const modelIdentifiers = new Map<string, string>();
+
+  for (const model of models) {
+    const modelPath = `${model.ownerKey}.${model.modelKey}`;
+    const modelIdentifier = target === "prisma" ? model.prismaModelName : model.exportName;
+    const identifierPattern =
+      target === "prisma" ? PRISMA_IDENTIFIER_PATTERN : JAVASCRIPT_IDENTIFIER_PATTERN;
+
+    if (
+      !identifierPattern.test(modelIdentifier) ||
+      (target !== "prisma" && JAVASCRIPT_RESERVED_BINDINGS.has(modelIdentifier))
+    ) {
+      throw new Error(
+        `Schema model "${modelPath}" generates invalid ${targetName} identifier "${modelIdentifier}". Rename the owner or model key and use schema.models.<model>.name to preserve the physical table name.`,
+      );
+    }
+
+    const previousModel = modelIdentifiers.get(modelIdentifier);
+    if (previousModel) {
+      throw new Error(
+        `Schema models "${previousModel}" and "${modelPath}" both generate ${targetName} identifier "${modelIdentifier}". Rename an owner or model key; schema.models.<model>.name can preserve each physical table name.`,
+      );
+    }
+    modelIdentifiers.set(modelIdentifier, modelPath);
+
+    if (target === "mongodb") {
+      continue;
+    }
+
+    for (const fieldKey of Object.keys(model.model.fields)) {
+      if (identifierPattern.test(fieldKey)) {
+        continue;
+      }
+
+      throw new Error(
+        `Schema field "${modelPath}.${fieldKey}" is not a valid ${targetName} identifier. Rename the field key and use name: ${JSON.stringify(fieldKey)} to preserve the physical column name.`,
+      );
+    }
+  }
+}
+
 async function writeGeneratedFile(filePath: string, contents: string) {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, contents, "utf8");
 }
 
-function isNullableField(field: ResolvedSchemaField) {
-  return field.nullable === true || field.required === false;
-}
-
-function quoteIdentifier(dialect: GenerateFarmSqlDialect, value: string) {
-  if (dialect === "mysql") {
-    return `\`${value.replace(/`/g, "``")}\``;
-  }
-
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-function createModelLookup(models: readonly CollectedSchemaModel[]) {
-  return new Map(models.map((model) => [`${model.integrationKey}.${model.modelKey}`, model]));
-}
-
-function toSnakeCase(value: string) {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/[\s.-]+/g, "_")
-    .replace(/__+/g, "_")
-    .toLowerCase();
-}
-
-function toPascalCase(value: string) {
-  return value
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[\s._-]+/g, " ")
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("");
-}
-
-function toCamelCase(value: string) {
-  const pascal = toPascalCase(value);
-  return pascal ? pascal.charAt(0).toLowerCase() + pascal.slice(1) : pascal;
-}
-
 export function escapeDoubleQuoted(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-export function escapeSqlString(value: string) {
-  // Standard-conforming SQL string literal: only quote doubling; backslashes
-  // are literal characters.
-  return value.replace(/'/g, "''");
 }
 
 function escapeRegExp(value: string) {

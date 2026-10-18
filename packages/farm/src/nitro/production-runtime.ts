@@ -1,7 +1,11 @@
 export { _runWithAfterRequest } from "../after";
+export { farmSecretsMatch } from "../secret-compare";
+export { createFarmLayoutSelector } from "../routing/layout-selector";
+export { mergeRouteRenderingDirectiveConfig } from "../route-rendering";
 export type { FarmServerConfig } from "../server-http";
 export {
   bufferFarmRequestBody,
+  cloneFarmRequestWithContext,
   createFarmNodeRequestAbortSignal,
   createFarmRequestBodyErrorResponse,
   matchesFarmIfNoneMatch,
@@ -10,7 +14,17 @@ export {
   resolveFarmServerConfig,
 } from "../server-http";
 export { createFarmProductionLifecycle } from "../production-lifecycle";
-export { _runWithCurrentRequest, getCurrentRequest } from "../server/request";
+export { resolveFarmPreviewDeployment } from "../deployment-environment";
+export { applyFarmPreviewRobotsTag } from "../preview-noindex";
+export {
+  createLateNotFoundRecovery,
+  createLateRedirectRecovery,
+} from "../navigation/late-navigation-recovery";
+export {
+  _runWithCurrentRequest,
+  getCurrentRequest,
+  resolveFarmWebRequestOrigin,
+} from "../server/request";
 export { _runWithAPIRequestRuntime } from "../api/server-context";
 export {
   configureFarmCache,
@@ -18,14 +32,33 @@ export {
   getFarmDataCache,
   normalizeRevalidatePath,
 } from "../cache";
+// Server-only, unlike `@farm.js/core/i18n`: `../i18n/config` imports `node:path`
+// and the generated client hydration entry imports that public entry.
+export { resolveFarmI18nConfig } from "../i18n/config";
 export { createFarmLocaleCookie, getFarmLocaleVaryHeaders } from "../i18n/resolver";
 export {
   localizeFarmHref,
   localizeFarmPathname,
   stripFarmLocaleFromPathname,
 } from "../i18n/routing";
-export { addMetadataImageReference, mergeMetadata, renderMetadataHead } from "../metadata";
+export { renderFarmLocaleAlternateLinks } from "../i18n/alternates";
+export {
+  addMetadataImageReference,
+  addMetadataMarkdownAlternate,
+  mergeMetadata,
+  renderMetadataHead,
+  resolveFarmNotFoundMetadata,
+} from "../metadata";
 export { createFarmMetadataRouteResponse } from "../metadata-route";
+export { createFarmAgentRobots } from "../agent-crawlers";
+export { createFarmApiCatalogResponse } from "../api-catalog";
+export {
+  collectFarmLlmsTxtPages,
+  createFarmDefaultLlmsTxt,
+  createFarmLlmsMarkdownReader,
+  renderFarmLlmsFullTxt,
+  createFarmLlmsFullRenderer,
+} from "../llms-txt";
 export {
   applyProductionMiddlewareHeaders,
   createProductionMiddlewareRunner,
@@ -74,6 +107,7 @@ export {
 } from "../trailing-slash";
 export { applyFarmBasePath, setFarmBasePath, stripFarmBasePath } from "../base-path";
 export { appendFarmRedirectQuery } from "../redirect-query";
+export { applyFarmCspNonceToResponse, resolveFarmSecurityConfig } from "../security";
 
 export function appendFarmLinkHeader(headers: Headers, value: string): void {
   const current = headers.get("Link");

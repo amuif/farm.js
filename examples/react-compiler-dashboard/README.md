@@ -76,11 +76,12 @@ and up to 20,000 rows, and at least 1.25x faster than the compiled control. The 
 nonzero `keyedArrayAppendHints` count; deterministic package tests separately require work to equal
 only the appended suffix.
 
-Queued structural appends have an independent 10,000-row comparison. One concise setter removes a
-row with `filter()` and the immediately adjacent setter appends one fresh row, while the
-block-bodied pair remains the compiled fallback control. Both compiler modes must remain at least
-2x faster than React and 1.25x faster than the compiled control. Every sample verifies the exact
-9,999 survivor identities and order, the disconnected rejected row, and the fresh final row.
+Queued structural appends have an independent 10,000-row comparison. One setter removes a row with
+`filter()` using an exact one-return predicate block, and the immediately adjacent setter appends
+one fresh row, while the paired updater with a local declaration remains the compiled fallback
+control. Both compiler modes must remain at least 2x faster than React and 1.25x faster than the
+compiled control. Every sample verifies the exact 9,999 survivor identities and order, the
+disconnected rejected row, and the fresh final row.
 Package tests also cover bounded slices, multiple later appends, 2,000 randomized transitions,
 controlled-input focus and selection, multi-boundary sharing, hydration, unmount cleanup, and
 pre-mutation fallback.
@@ -99,13 +100,14 @@ safe maps. The filter's recorded survivor positions let the commit avoid a secon
 scan while still validating the complete native result before mutation. Both compiler modes must
 remain at least 2x faster than React and 1.25x faster than the block-bodied compiled control.
 
-Direct keyed filters have an independent removal comparison. A single-return block-bodied filter
-removes the selected middle row and is measured against bracketed React and a compiled snapshot
-control whose updater block has a local target declaration. Both compiler modes must remain at least
-3x faster than React at 1,000 and 20,000 rows, and at least 1.25x faster than the compiled control at
-1,000 rows. The report must contain a nonzero `keyedArrayFilterHints` count; deterministic package
-tests separately cover queued and randomized removals, delegated event indexes, native method and
-predicate errors, hydration, Strict Mode, and unmount cleanup.
+Direct keyed filters have an independent removal comparison. A single-return updater whose filter
+predicate is also an exact one-return block removes the selected middle row and is measured against
+bracketed React and a compiled snapshot control whose updater block has a local target declaration.
+Both compiler modes must remain at least 3x faster than React at 1,000 and 20,000 rows, and at least
+1.25x faster than the compiled control at 1,000 rows. The report must contain a nonzero
+`keyedArrayFilterHints` count; deterministic package tests separately cover queued and randomized
+removals, delegated event indexes, native method and predicate errors, hydration, Strict Mode, and
+unmount cleanup.
 
 The mapped-append comparison uses the other common order: filter one row, update a surviving row,
 then append a fresh row. It verifies that the compiler retains the original survivor identity
@@ -190,6 +192,12 @@ at least 1.5x faster than the compiled snapshot control with an extra local decl
 is independent of the older single-row position gates, so a batch regression cannot hide inside
 their aggregate.
 
+Batch preparation checks collisions directly in the committed row map and tracks only new keys
+in a temporary set. It no longer copies every committed key before preparing incoming rows.
+Full source validation, final-map cleanup, DOM identity, focus/selection, and suffix event indexes
+are unchanged. Static/hybrid regressions cover repeated boundary and middle insertions, late
+duplicate-key collisions, and descriptor/binding failures before any live DOM insertion.
+
 The exact-window replacement case derives its delete count from the 64-row replacement array and
 swaps that window in the middle of a 10,000-row table. It must
 preserve both retained boundary nodes, disconnect both removed boundaries, add no owner
@@ -247,6 +255,24 @@ tests compare 1,000 deterministic queued updates with React and cover disjoint w
 last-update-wins semantics, atomic preparation, overlapping structural fallback, controlled-input selection,
 events, Strict Mode hydration, and cleanup.
 
+Fixed-length queued windows reuse the committed row map for collision checks. They no longer
+copy every existing key into a temporary set before preparing the touched rows. Static and hybrid
+regressions require zero key enumerations for retained refreshes and only the structural commit's
+required enumeration for fresh-key or mixed replacements. Repeated updates, overlap, DOM identity,
+and existing keys transferred between windows remain covered; full-chain validation is unchanged.
+
+Length-preserving queued windows also use a sorted range cursor during full-row validation,
+avoiding a touched-position set, a hash lookup per row, and sorting each touched position.
+The complete row snapshot and validation remain; this is not a constant-time update. Static/hybrid
+regressions cover reversed, overlapping, contained, adjacent, and edge ranges, including longer
+chains, and require each final position to be prepared once in row order before any commit.
+
+Source-level tests also read the actual queued-refresh buttons and require two position hints for
+the optimized handler and none for its snapshot control in both compiler modes. They compare both
+native handlers across repeated 10,000-row updates, including row values and object identity.
+The browser timing includes DOM snapshot preparation and completion checks, not just the update
+itself. Isolated timing diagnostics do not replace the full benchmark or its performance gates.
+
 Queued fresh-key exact-window replacement has a separate 10,000-row gate. One event replaces two
 overlapping 32-row windows with globally new final keys; their 16-row overlap leaves one 48-row
 final union. The benchmark requires the 48 old rows to disconnect, both surrounding anchors to
@@ -258,6 +284,12 @@ overlapping fresh-key commits, mixed same-key/fresh-key commits, atomic preparat
 existing-key-move fallback, events, controlled-input selection, Strict Mode hydration, cleanup,
 and 1,000 differential overlapping updates.
 
+Validated reorders transfer their runtime-owned row map directly to the block, avoiding a second
+full-map copy. Reorders that retain every row also retain the element lookup; structural removals
+still rebuild it and prune listeners. Package tests check repeated single, double, and triple
+reversals in static and hybrid modes, current delegated event indexes, removal cleanup, DOM
+identity, native fallbacks, and hydration.
+
 Native keyed-array reversal has a separate 10,000-row comparison. A single-return block-bodied
 `toReversed()` setter is measured against bracketed React and a compiled snapshot control whose
 updater block has an extra local declaration. Both compiler modes must remain at least 8x faster
@@ -265,6 +297,10 @@ than React and 1.25x faster than the compiled control. The report must contain a
 `keyedArrayReorderHints` count; package tests separately require the minimum `n - 1` connected DOM
 moves, zero key/descriptor/binding reads, randomized differential correctness, hydration, and
 cleanup.
+Source-level tests read the real reversal buttons and require exactly one reorder hint for the
+optimized handler and none for its snapshot control in both compiler modes. They also compare
+three consecutive native reversals for empty, single-row, small, and 10,000-row frozen arrays,
+checking that the source is not mutated and every row object keeps its identity.
 
 Queued native reorders have another independent 10,000-row comparison. One event queues two
 concise `toReversed()` setters, so the final order equals the committed order. Farm must validate
@@ -283,12 +319,13 @@ Package tests compile mixed sort/reverse pipelines and compare 2,000 determinist
 pipelines with normal React.
 
 Structural reorder pipelines add an independent 10,000-row comparison. One single-return
-block-bodied setter filters one row and then evaluates two native reversals; its compiled control
-adds a local declaration to the updater block. Farm must validate membership and final order before
-touching the DOM, preserve all 9,999 surviving row identities, remove only the rejected row, and
-remain at least 2x faster than React and 1.25x faster than the compiled control. Package tests also
-cover filter/slice/sort/reverse composition, queued filter-then-sort updates, 2,000 randomized
-removals, controlled-input focus and selection, hydration, cleanup, and conservative fallback.
+block-bodied setter filters one row through an exact one-return predicate block and then evaluates
+two native reversals; its compiled control adds a local declaration to the updater block. Farm must
+validate membership and final order before touching the DOM, preserve all 9,999 surviving row
+identities, remove only the rejected row, and remain at least 2x faster than React and 1.25x faster
+than the compiled control. Package tests also cover filter/slice/sort/reverse composition, queued
+filter-then-sort updates, 2,000 randomized removals, controlled-input focus and selection,
+hydration, cleanup, and conservative fallback.
 
 Consecutive same-order maps have their own 10,000-row comparison. One concise setter updates the
 label and amount of every tenth row in two native `map()` stages. The block-bodied form performs the
@@ -405,8 +442,36 @@ FARM_SCALE_CYCLES=3 \
 pnpm --filter farm-react-compiler-dashboard-example benchmark
 ```
 
+Sample counts, updates per sample and scale cycles must be positive safe integers. Warmup
+must be a nonnegative safe integer; `FARM_BENCHMARK_WARMUP=0` disables warmup. Unset or empty
+values keep the defaults above. Invalid values fail before report, browser or production-trial
+build work instead of starting an incomplete measurement. `FARM_DASHBOARD_PORT` defaults to
+4380 and accepts integers from 1 to 65532, reserving four consecutive trial ports.
+
 The default JSON report is `/tmp/farm-react-dashboard-benchmark.json`; change it with
 `FARM_DASHBOARD_REPORT`.
+
+Before starting the production trials, the runner checks that it can write beside the report.
+Use an existing parent directory and a regular report file, not a symlink or directory.
+It prints a unique `farm-dashboard-run-*` directory and saves each completed trial's JSON summary
+there, outside the timed work. These files always say `INCOMPLETE`: they are diagnostic evidence, not a benchmark
+pass, and the runner does not resume or combine interrupted runs. A `.pending` file may be
+truncated and must not be treated as a completed checkpoint. Run directories are kept for
+inspection; you can remove them when their diagnostic results are no longer needed.
+
+The final report is replaced atomically only after all four trials and the existing gates have
+run. If writing fails, the previous final report remains unchanged; it belongs to the previous
+run, not the failed attempt. A successful preflight cannot guarantee that disk space will remain
+available throughout the benchmark. Samples, timing boundaries, controls and gates are unchanged.
+
+Each trial attempts to stop its production server even if browser-context setup, page creation
+or context disposal fails. A failed trial still aborts the run; it does not publish an aggregate
+pass or continue with a potentially contaminated comparison.
+
+Server shutdown waits for the child process to exit, including after the existing two-second
+grace period escalates to a forced stop. Signal-delivery failures abort the run instead of
+reporting successful cleanup. Already-exited servers are left alone, and shutdown removes its
+own timer and event listeners. This teardown is outside the measured browser updates.
 
 ## Reading the result
 
@@ -471,8 +536,12 @@ The default JSON report is `/tmp/farm-react-dashboard-benchmark.json`; change it
   snapshot; the hinted path isolates the saved descriptor and unchanged-binding work while both
   paths run the same native map, sort, and LIS movement.
 - The multi-map update control changes every tenth row in two same-order native maps. Its
-  block-bodied equivalent rereads all 10,000 keys and bindings; the hinted path compares the
-  committed and final arrays once and patches each final changed row once.
+  snapshot pair assigns the same map result to a local variable before returning it, keeping it
+  on complete reconciliation without adding another array pass. A single-return block alone is
+  also optimized and is not a snapshot control. Package regression tests compile the actual
+  example handlers in static and hybrid modes: the optimized handler must emit two map hints,
+  while the snapshot handler must emit none. Both perform the same native updates; the hinted
+  path compares the committed and final arrays once and patches each final changed row once.
 - The multi-map reorder control changes one row's label and amount in two consecutive native maps,
   then sorts the same keyed rows through a single-return block-bodied setter. Its pair with a local
   declaration keeps complete reconciliation, while the hinted path checks each native call, scans

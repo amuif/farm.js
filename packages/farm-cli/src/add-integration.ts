@@ -12,6 +12,8 @@ import {
   jobsUIFeature,
   polarBillingUIFeature,
   resendEmailUIFeature,
+  sanityContentUIFeature,
+  strapiContentUIFeature,
   stripeBillingUIFeature,
   supabaseAuthUIFeature,
   unkeyApiKeysUIFeature,
@@ -71,6 +73,8 @@ export type FarmIntegrationProvider =
   | "jobs-trigger"
   | "polar"
   | "resend"
+  | "sanity"
+  | "strapi"
   | "stripe"
   | "supabase"
   | "unkey"
@@ -94,7 +98,12 @@ interface IntegrationProviderDefinition {
   }[];
   notes?: readonly string[];
   ui?: UIFeatureDefinition;
-  template(): string;
+  template(context: IntegrationTemplateContext): string;
+}
+
+interface IntegrationTemplateContext {
+  /** Import specifier for an app-root-relative file, from the generated integration file. */
+  importFrom(rootRelativePath: string): string;
 }
 
 const PROVIDERS: readonly IntegrationProviderDefinition[] = [
@@ -220,7 +229,7 @@ export const auth0Integration = auth0({
     description: "Clerk auth provider and protected route middleware",
     env: ["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY"],
     dependencies: {
-      "@clerk/react": "^6.1.0",
+      "@clerk/react": "^6.4.3",
     },
     ui: clerkAuthUIFeature(),
     template: () => `import { clerk } from "@farm.js/clerk";
@@ -472,8 +481,8 @@ better-auth.sqlite-wal
       },
     ],
     ui: betterAuthUIFeature(),
-    template: () => `import { betterAuth } from "@farm.js/better-auth";
-import { auth } from "../auth.ts";
+    template: ({ importFrom }) => `import { betterAuth } from "@farm.js/better-auth";
+import { auth } from "${importFrom("src/lib/auth.ts")}";
 
 export const betterAuthIntegration = betterAuth({
   instance: auth,
@@ -527,8 +536,8 @@ export const auth = {
       "The generated Auth.js instance uses GitHub OAuth through @auth/core; add or replace providers in src/lib/auth.ts.",
     ],
     ui: authjsUIFeature(),
-    template: () => `import { authjs } from "@farm.js/authjs";
-import { auth } from "../auth.ts";
+    template: ({ importFrom }) => `import { authjs } from "@farm.js/authjs";
+import { auth } from "${importFrom("src/lib/auth.ts")}";
 
 export const authjsIntegration = authjs({
   instance: auth,
@@ -561,6 +570,68 @@ export const unkeyIntegration = unkey({
 });
 `,
   },
+  {
+    provider: "sanity",
+    aliases: ["cms", "sanity-cms"],
+    defaultKey: "cms",
+    packageName: "@farm.js/sanity",
+    fileName: "sanity",
+    exportName: "sanityIntegration",
+    description: "Sanity content with server queries, CDN images, and webhook cache invalidation",
+    env: ["SANITY_PROJECT_ID", "SANITY_DATASET", "SANITY_API_READ_TOKEN", "SANITY_WEBHOOK_SECRET"],
+    dependencies: { "@sanity/client": "^8.4.0" },
+    ui: sanityContentUIFeature(),
+    template: () => `import { sanity } from "@farm.js/sanity";
+
+export const sanityIntegration = sanity({
+  projectId: process.env.SANITY_PROJECT_ID,
+  dataset: process.env.SANITY_DATASET,
+  token: process.env.SANITY_API_READ_TOKEN,
+  // The webhook fires before Sanity's CDN updates, so reads go through the API.
+  useCdn: false,
+  webhook: {
+    secret: process.env.SANITY_WEBHOOK_SECRET,
+    onChange(payload) {
+      console.log("[sanity]", payload._type, payload._id);
+      return undefined;
+    },
+  },
+  log(event) {
+    console.log("[sanity]", event.phase, event.route?.path || "none");
+  },
+});
+`,
+  },
+  {
+    provider: "strapi",
+    aliases: ["strapi-cms"],
+    defaultKey: "cms",
+    packageName: "@farm.js/strapi",
+    fileName: "strapi",
+    exportName: "strapiIntegration",
+    description: "Strapi content with typed reads, responsive media, and webhook invalidation",
+    env: ["STRAPI_API_URL", "STRAPI_API_TOKEN", "STRAPI_MEDIA_URL", "STRAPI_WEBHOOK_SECRET"],
+    dependencies: { "@strapi/client": "^1.6.2" },
+    ui: strapiContentUIFeature(),
+    template: () => `import { strapi } from "@farm.js/strapi";
+
+export const strapiIntegration = strapi({
+  apiUrl: process.env.STRAPI_API_URL,
+  token: process.env.STRAPI_API_TOKEN,
+  mediaUrl: process.env.STRAPI_MEDIA_URL,
+  webhook: {
+    secret: process.env.STRAPI_WEBHOOK_SECRET,
+    onChange(payload) {
+      console.log("[strapi]", payload.event, payload.model);
+      return undefined;
+    },
+  },
+  log(event) {
+    console.log("[strapi]", event.phase, event.route?.path || "none");
+  },
+});
+`,
+  },
 ] as const;
 
 export function listFarmIntegrationProviders() {
@@ -586,6 +657,7 @@ export async function addFarmIntegration(
 ): Promise<AddFarmIntegrationResult> {
   const root = path.resolve(options.root || process.cwd());
   const definition = resolveProvider(options.provider);
+  if (!options.skipPackageJson) await assertReadablePackageJson(root);
 
   if (definition.provider === "ai") {
     return addAIRouteIntegration({
@@ -625,6 +697,7 @@ export async function addFarmIntegration(
   };
 
   await writeIntegrationComponent({
+    root,
     path: integrationFile,
     definition,
     force: options.force,
@@ -709,6 +782,7 @@ async function addAIRouteIntegration(input: {
   };
 
   await writeIntegrationComponent({
+    root: input.root,
     path: routeFile,
     definition: input.definition,
     force: input.force,
@@ -761,6 +835,7 @@ function assertValidIntegrationKey(key: string) {
 }
 
 async function writeIntegrationComponent(input: {
+  root: string;
   path: string;
   definition: IntegrationProviderDefinition;
   force?: boolean;
@@ -775,7 +850,11 @@ async function writeIntegrationComponent(input: {
 
   if (!input.dryRun) {
     await mkdir(path.dirname(input.path), { recursive: true });
-    await writeFile(input.path, input.definition.template(), "utf8");
+    const importFrom = (rootRelativePath: string) =>
+      toImportPath(
+        path.relative(path.dirname(input.path), path.join(input.root, rootRelativePath)),
+      );
+    await writeFile(input.path, input.definition.template({ importFrom }), "utf8");
   }
 
   if (exists) {
@@ -917,6 +996,23 @@ async function writeIntegrationSetupFiles(input: {
   }
 }
 
+async function readPackageManifest(packageJsonPath: string) {
+  const source = await readFile(packageJsonPath, "utf8");
+  try {
+    return { source, manifest: JSON.parse(source) as PackageManifest };
+  } catch (error) {
+    throw new Error(
+      `Could not parse ${packageJsonPath}: ${error instanceof Error ? error.message : error}. Fix it, or pass --skip-package-json.`,
+    );
+  }
+}
+
+/** Fails before any file is written, so a broken package.json leaves the app untouched. */
+async function assertReadablePackageJson(root: string) {
+  const packageJsonPath = path.join(root, "package.json");
+  if (existsSync(packageJsonPath)) await readPackageManifest(packageJsonPath);
+}
+
 async function updatePackageJson(input: {
   root: string;
   definition: IntegrationProviderDefinition;
@@ -929,8 +1025,7 @@ async function updatePackageJson(input: {
     return;
   }
 
-  const source = await readFile(packageJsonPath, "utf8");
-  const manifest = JSON.parse(source) as PackageManifest;
+  const { source, manifest } = await readPackageManifest(packageJsonPath);
 
   const dependencies = missingDependencies(manifest, input.definition.dependencies);
   const devDependencies = missingDependencies(manifest, input.definition.devDependencies);

@@ -172,4 +172,113 @@ describe("autumn usage-report idempotency", () => {
     expect(response.status).toBe(400);
     expect(sdk.balances.update).not.toHaveBeenCalled();
   });
+  it.each([
+    ["a negative quantity", -1_000_000],
+    ["a small negative quantity", -1],
+    ["zero", 0],
+  ])("rejects %s without touching the provider balance", async (_label, quantity) => {
+    const sdk = createFakeSdk({
+      id: "cus_3",
+      balances: { credits: { usage: 100, granted: 100 } },
+      subscriptions: [],
+    });
+    const integration = createIntegration(sdk, "negative-user");
+
+    // Usage is an increment, and the projection is written back as the
+    // customer's absolute balance, so a negative quantity let a signed-in
+    // customer lower or invert their own metered usage. The hard-limit guard
+    // compares `projected > hardLimit`, which a negative always passes.
+    const response = await report(integration, {
+      key: "credits",
+      quantity,
+      idempotencyKey: `neg-${quantity}`,
+    });
+
+    expect(response.status).toBe(400);
+    expect(sdk.balances.update).not.toHaveBeenCalled();
+  });
+
+  it("still accepts an ordinary positive report", async () => {
+    const sdk = createFakeSdk({
+      id: "cus_4",
+      balances: { credits: { usage: 0, granted: 100 } },
+      subscriptions: [],
+    });
+    const integration = createIntegration(sdk, "positive-user");
+
+    const response = await report(integration, {
+      key: "credits",
+      quantity: 10,
+      idempotencyKey: "pos-1",
+    });
+
+    expect(response.status).toBe(200);
+    expect(sdk.balances.update).toHaveBeenCalled();
+  });
+});
+
+describe("autumn usage-report idempotency under concurrent retries", () => {
+  function deferred() {
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("applies a report once when a retry arrives while the first is in flight", async () => {
+    const sdk = createFakeSdk({
+      id: "cus_5",
+      balances: { credits: { usage: 0, granted: 100 } },
+      subscriptions: [],
+    });
+    const write = deferred();
+    sdk.balances.update.mockImplementation(async () => {
+      await write.promise;
+      return {};
+    });
+    const integration = createIntegration(sdk, "concurrent-user");
+    const body = { key: "credits", quantity: 10, idempotencyKey: "evt-concurrent" };
+
+    const first = report(integration, body);
+    const retry = report(integration, body);
+    await vi.waitFor(() => expect(sdk.balances.update).toHaveBeenCalledTimes(1));
+    write.resolve();
+
+    const [firstResponse, retryResponse] = await Promise.all([first, retry]);
+    expect(firstResponse.status).toBe(200);
+    expect(retryResponse.status).toBe(200);
+    const firstBody = await firstResponse.json();
+    expect(await retryResponse.json()).toEqual(firstBody);
+    expect(firstBody).toMatchObject({ projectedCurrentPeriodUsed: 10 });
+    expect(sdk.balances.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a later retry apply a report whose in-flight attempt failed", async () => {
+    const sdk = createFakeSdk({
+      id: "cus_6",
+      balances: { credits: { usage: 0, granted: 100 } },
+      subscriptions: [],
+    });
+    const write = deferred();
+    sdk.balances.update.mockImplementationOnce(async () => {
+      await write.promise;
+      return {};
+    });
+    const integration = createIntegration(sdk, "failed-user");
+    const body = { key: "credits", quantity: 10, idempotencyKey: "evt-failed" };
+
+    const first = report(integration, body);
+    const concurrent = report(integration, body);
+    await vi.waitFor(() => expect(sdk.balances.update).toHaveBeenCalledTimes(1));
+    write.reject(new Error("provider unavailable"));
+    await expect(first).rejects.toThrow("provider unavailable");
+    await expect(concurrent).rejects.toThrow("provider unavailable");
+
+    const later = await report(integration, body);
+    expect(later.status).toBe(200);
+    expect(sdk.balances.update).toHaveBeenCalledTimes(2);
+  });
 });

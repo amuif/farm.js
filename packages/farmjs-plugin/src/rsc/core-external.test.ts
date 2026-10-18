@@ -23,6 +23,7 @@ import { resolveFarmAPIRequestURL } from "@farm.js/core/api";
 import { resolveRscBuildOutputPath } from "./build-paths.js";
 import farmRsc, { defineConfig } from "./index.js";
 import { buildRscNitro } from "./nitro-build.js";
+import { linkRscFixtureDependencies } from "./test-fixture-dependencies.js";
 
 const delay = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -67,6 +68,7 @@ describe("RSC core runtime bundling", () => {
     async (command) => {
       const root = mkdtempSync(path.join(tmpdir(), "farm-rsc-api-config-"));
       try {
+        linkRscFixtureDependencies(root);
         const plugin = farmRsc().find(
           (candidate) => candidate.name === "@farm.js/plugin/rsc:config",
         );
@@ -239,6 +241,7 @@ export const schema = z.string();`;
   it.each([
     { name: "default", api: undefined, baseURL: "/api", mount: "/api" },
     { name: "cache-variants", api: undefined, baseURL: "/api", mount: "/api" },
+    { name: "config-middleware", api: undefined, baseURL: "/api", mount: "/api" },
     { name: "nested-layouts", api: undefined, baseURL: "/api", mount: "/api" },
     {
       name: "custom",
@@ -403,6 +406,34 @@ export const schema = z.string();`;
             type: "module",
           }),
         );
+        if (name === "config-middleware") {
+          writeFileSync(
+            path.join(fixtureRoot, "middleware-config.ts"),
+            `export const middlewareHeaderName = "x-config-middleware";
+export function shouldRunConfigMiddleware(context) {
+  return context.request.headers.get("x-run-config-middleware") === "yes";
+}`,
+          );
+          writeFileSync(
+            path.join(fixtureRoot, "farm.config.ts"),
+            `import { defineConfig } from "@farm.js/core";
+import farmRsc from "@farm.js/plugin/rsc";
+import { middlewareHeaderName, shouldRunConfigMiddleware } from "./middleware-config";
+const middlewareHeaderValue = "active";
+export default defineConfig({
+  plugins: [farmRsc()],
+  middleware: [
+    { matcher: /^\\/$/ },
+    {
+      matcher: shouldRunConfigMiddleware,
+      handler(context) {
+        context.headers.set(middlewareHeaderName, middlewareHeaderValue);
+      },
+    },
+  ],
+});`,
+          );
+        }
         if (name === "cache-variants") {
           writeFileSync(
             path.join(srcDir, "middleware.ts"),
@@ -577,6 +608,7 @@ export const echo = createEndpoint("/api/echo", { method: "POST" }, async ({ bod
           esbuild: { jsxDev: false },
           experimental: { serverComponents: true, serverActions: true },
           api,
+          middleware: name === "config-middleware" ? { matcher: "/", handler() {} } : undefined,
           plugins,
         } as never);
         expect(builder.config.define?.__FARM_API_BASE_URL__).toBe(JSON.stringify(baseURL));
@@ -587,6 +619,9 @@ export const echo = createEndpoint("/api/echo", { method: "POST" }, async ({ bod
         const clientDir = path.join(fixtureRoot, "dist", "client");
         const rscCode = readFileSync(rscPath, "utf-8");
         expect(rscCode).not.toMatch(/from\s*["']@farm.js\/core["']/);
+        if (name === "config-middleware") {
+          expect(rscCode).not.toContain("@farm.js/plugin/rsc");
+        }
 
         const outputDir = path.join(fixtureRoot, ".output");
         await buildRscNitro({
@@ -602,6 +637,7 @@ export const echo = createEndpoint("/api/echo", { method: "POST" }, async ({ bod
           readFileSync(path.join(outputDir, "server", "package.json"), "utf-8"),
         ) as { dependencies?: Record<string, string> };
         expect(outputPackage.dependencies).not.toHaveProperty("@farm.js/core");
+        expect(outputPackage.dependencies).not.toHaveProperty("@farm.js/plugin");
         for (const buildOnlyPackage of ["vite", "nitro", "rollup", "rolldown", "esbuild"]) {
           expect(outputPackage.dependencies).not.toHaveProperty(buildOnlyPackage);
           expect(existsSync(path.join(outputDir, "server", "node_modules", buildOnlyPackage))).toBe(
@@ -663,6 +699,17 @@ export const echo = createEndpoint("/api/echo", { method: "POST" }, async ({ bod
         });
 
         const origin = `http://127.0.0.1:${port}`;
+        if (name === "config-middleware") {
+          const skipped = await fetch(origin + "/");
+          expect(skipped.status, logs).toBe(200);
+          expect(skipped.headers.get("x-config-middleware")).toBeNull();
+
+          const handled = await fetch(origin + "/", {
+            headers: { "x-run-config-middleware": "yes" },
+          });
+          expect(handled.status, logs).toBe(200);
+          expect(handled.headers.get("x-config-middleware")).toBe("active");
+        }
         if (name === "default") {
           for (const [pathname, expected, excluded] of [
             ["/accounts/new", "Route error rendered", "Dynamic account error rendered"],
@@ -818,7 +865,9 @@ export const echo = createEndpoint("/api/echo", { method: "POST" }, async ({ bod
             expect(await page.text(), logs).toContain("RSC root runtime fixture");
             expect(page.headers.get("cache-control")).toBe("public, max-age=60");
             const fields = page.headers.get("vary")?.toLowerCase().split(/,\s*/);
-            expect(fields).toEqual(expect.arrayContaining(["accept", "origin", "accept-encoding"]));
+            // Nitro only adds Accept-Encoding when it actually negotiates a
+            // compressed representation; these are the app-owned variants.
+            expect(fields).toEqual(expect.arrayContaining(["accept", "origin"]));
             expect(fields?.filter((value) => value === "accept")).toHaveLength(1);
             const wildcard = await fetch(origin + "/?wildcard", {
               headers: { accept },

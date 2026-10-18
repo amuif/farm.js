@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "@farm.js/core/plugin";
 /**
  * Farm.js Middleware Plugin
  *
@@ -19,6 +20,9 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { createRequire } from "node:module";
 import { _withAfterNodeMiddleware } from "@farm.js/core/after";
 import { devServableFileExists } from "../dev-static.js";
+import { resolveDevRequestURL, resolveViteHtmlFallbackUrl } from "../dev-request.js";
+import { matchesMiddlewareConfig } from "@farm.js/core/middleware";
+import type { MiddlewareConfig } from "@farm.js/core/middleware";
 import { middlewareMatchesPath, parseCookies, serializeCookie } from "./matching.js";
 
 // Create require for ESM compatibility
@@ -138,7 +142,7 @@ export interface DiscoveredMiddleware {
   module:
     | MiddlewareHandler
     | { build: () => { handlers: MiddlewareHandler[] }; setBasePath?: (path: string) => void };
-  config?: { matcher?: string[] };
+  config?: MiddlewareConfig;
 }
 
 /**
@@ -184,12 +188,27 @@ function createContext(
   res: ServerResponse,
   viteServer?: ViteDevServer,
 ): MiddlewareContext {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const url = resolveDevRequestURL(req);
   const headers = new Map<string, string>();
   const data = new Map<string, any>();
   const cookies = createCookieJar(req, res);
 
   let handled = false;
+
+  // Mirror @farm.js/core's createContext: a header set on ctx.headers in the
+  // same handler that then short-circuits via a helper must still reach the
+  // response. The runner's tail flush is unreachable once a helper sets
+  // _handled, so each helper applies ctx.headers to res before its writeHead.
+  const applyResponseHeaders = () => {
+    for (const [key, value] of headers) {
+      try {
+        res.setHeader(key, value);
+      } catch {
+        // An invalid optional header must not prevent the response itself
+        // from completing.
+      }
+    }
+  };
 
   const ctx: MiddlewareContext = {
     request: req,
@@ -220,6 +239,7 @@ function createContext(
       ctx._handled = true;
       handled = true;
 
+      applyResponseHeaders();
       res.writeHead(status, {
         Location: redirectUrl,
         "Content-Type": "text/plain",
@@ -247,6 +267,7 @@ function createContext(
       ctx._handled = true;
       handled = true;
 
+      applyResponseHeaders();
       res.writeHead(status, {
         "Content-Type": "application/json",
       });
@@ -262,6 +283,7 @@ function createContext(
       ctx._handled = true;
       handled = true;
 
+      applyResponseHeaders();
       res.writeHead(status, {
         "Content-Type": "text/plain",
       });
@@ -277,6 +299,7 @@ function createContext(
       ctx._handled = true;
       handled = true;
 
+      applyResponseHeaders();
       res.writeHead(status, {
         "Content-Type": "text/html",
       });
@@ -327,7 +350,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           const middlewareFile = path.join(dir, `middleware${ext}`);
           if (fs.existsSync(middlewareFile)) {
             try {
-              const module = await server.ssrLoadModule(middlewareFile);
+              const module = await loadFarmDevModule(server, middlewareFile);
               if (module.default) {
                 middlewareCache.set(routePath, {
                   path: routePath,
@@ -385,9 +408,27 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           await discoveryPromise;
         }
 
-        // Find applicable middleware (cascading from root to specific)
+        // Create the context first: a function matcher in `export const
+        // config` receives it, so it has to exist before the filter runs.
+        const ctx = createContext(req, res, server);
+
+        // Use shared data if provided
+        if (sharedData) {
+          for (const [key, value] of sharedData) {
+            ctx.data.set(key, value);
+          }
+        }
+
+        // Find applicable middleware (cascading from root to specific). The
+        // directory path decides the subtree; `export const config` then
+        // narrows it, using core's own matcher so a matcher/exclude behaves
+        // here exactly as it does in the production runner.
         const applicable = Array.from(middlewareCache.values())
-          .filter((mw) => middlewareMatchesPath(pathname, mw.path))
+          .filter(
+            (mw) =>
+              middlewareMatchesPath(pathname, mw.path) &&
+              (!mw.config || matchesMiddlewareConfig(pathname, mw.config, ctx as never).matched),
+          )
           .sort((a, b) => a.path.split("/").length - b.path.split("/").length);
 
         if (applicable.length === 0) return false;
@@ -406,16 +447,6 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           pc.dim(` (${applicable.length} middleware)`),
         ].join(" ");
         console.log(logMsg);
-
-        // Create full middleware context
-        const ctx = createContext(req, res, server);
-
-        // Use shared data if provided
-        if (sharedData) {
-          for (const [key, value] of sharedData) {
-            ctx.data.set(key, value);
-          }
-        }
 
         for (const mw of applicable) {
           const middleware = mw.module;
@@ -486,8 +517,17 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
       return () => {
         server.middlewares.use(
           _withAfterNodeMiddleware(async (req, res, next) => {
-            const url = req.url || "/";
-            const pathname = url.split("?")[0];
+            // Run middleware for the URL the client sent, not Vite's SPA
+            // fallback rewrite, then hand Vite its rewrite back so it still
+            // serves the HTML shell (unless middleware rewrote the request).
+            const fallbackUrl = req.url;
+            const requestedUrl = resolveViteHtmlFallbackUrl(req, server.config.base);
+            if (requestedUrl) req.url = requestedUrl;
+            const passThrough = (error?: unknown) => {
+              if (requestedUrl && req.url === requestedUrl) req.url = fallbackUrl;
+              return error === undefined ? next() : next(error);
+            };
+            const pathname = resolveDevRequestURL(req).pathname;
 
             // Skip Vite internal requests and real static assets. Dotted
             // paths that don't map to a file on disk are app routes (route
@@ -500,7 +540,14 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
                 !pathname.endsWith("/") &&
                 devServableFileExists(pathname, [server.config.publicDir, server.config.root]))
             ) {
-              return next();
+              return passThrough();
+            }
+
+            // @farm.js/plugin/api runs middleware itself for the requests it
+            // serves, because it may be registered ahead of this hook. Running
+            // it here as well executed every middleware twice per API request.
+            if ((server as any).__farmApi__ && pathname.startsWith("/api/")) {
+              return passThrough();
             }
 
             try {
@@ -516,10 +563,13 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
                 return;
               }
             } catch (e) {
+              // Fail the request, as core's dev server does. Carrying on would
+              // render the page a throwing auth check was meant to protect.
               console.error("[FARM] Middleware error:", e);
+              return passThrough(e);
             }
 
-            next();
+            passThrough();
           }),
         );
       };
@@ -540,7 +590,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
           if (mw.filePath === file) {
             try {
               // Reload the module
-              const module = await server.ssrLoadModule(file);
+              const module = await loadFarmDevModule(server, file);
               if (module.default) {
                 middlewareCache.set(routePath, {
                   path: routePath,
@@ -567,7 +617,7 @@ export default function farmMiddleware(options: FarmMiddlewareOptions = {}): Plu
               .replace(/\/middleware\.(ts|tsx|js|jsx)$/, "");
             const routePath = relativePath === "" ? "/" : relativePath;
 
-            const module = await server.ssrLoadModule(file);
+            const module = await loadFarmDevModule(server, file);
             if (module.default) {
               middlewareCache.set(routePath, {
                 path: routePath,

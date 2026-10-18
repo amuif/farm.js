@@ -8,7 +8,7 @@ import {
   type FarmNavigationState,
 } from "./spa-router";
 import { notifyHistoryChange, subscribeHistoryChange } from "./history-sync";
-import { getFarmI18nClientState } from "../i18n/client-runtime";
+import { getFarmI18nClientState } from "../i18n/client-state";
 import { _resolveCurrentRequest } from "../server/request-bridge";
 import { stripFarmLocaleFromPathname } from "../i18n/routing";
 import {
@@ -72,13 +72,27 @@ function shouldBlockUnload(options: UseBlockerOptions): boolean {
  * the shared history channel, whose no-router fallback is the nuqs-style
  * synthetic popstate this code previously hand-rolled.
  */
-function navigateViaRouter(href: string, basePath: string, replace: boolean): void {
+/** The options Next.js's router accepts on `push` and `replace`. */
+export interface FarmRouterNavigateOptions {
+  /** Scroll to the top, or to the URL's hash, after navigating. Defaults to true. */
+  scroll?: boolean;
+}
+
+function navigateViaRouter(
+  href: string,
+  basePath: string,
+  replace: boolean,
+  options: FarmRouterNavigateOptions = {},
+): void {
   if (typeof window === "undefined") return;
 
   const url = applyFarmBasePath(href, basePath);
   const spaRouter = getInstalledFarmSPARouter();
   if (spaRouter) {
-    void spaRouter.navigate(url, { replace });
+    void spaRouter.navigate(url, {
+      replace,
+      ...(options.scroll === undefined ? {} : { scroll: options.scroll }),
+    });
     return;
   }
 
@@ -116,12 +130,12 @@ export function useRouter(options: UseRouterOptions = {}) {
     return unsubscribe;
   }, [basePath, routeMatcher]);
 
-  const push = (href: string) => {
-    navigateViaRouter(href, basePath, false);
+  const push = (href: string, navigateOptions?: FarmRouterNavigateOptions) => {
+    navigateViaRouter(href, basePath, false, navigateOptions);
   };
 
-  const replace = (href: string) => {
-    navigateViaRouter(href, basePath, true);
+  const replace = (href: string, navigateOptions?: FarmRouterNavigateOptions) => {
+    navigateViaRouter(href, basePath, true, navigateOptions);
   };
 
   const pushState = <TState>(pageState: TState, href?: string) => {

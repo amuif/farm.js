@@ -14,19 +14,22 @@ A compact map of the main package exports and where to learn more.
 | ----------------------------- | ------------------------------------------------------------------------------------ |
 | @farm.js/core                 | Config, app types, plugins, integrations, routing, OpenAPI, docs, cache.             |
 | @farm.js/core/client          | Link, router helpers, callable route actions, API client, integration client.        |
+| @farm.js/core/api/client      | Renderer-neutral typed API clients.                                                  |
 | @farm.js/core/plugin/client   | Advanced browser lifecycle manager and client plugin event types.                    |
 | @farm.js/core/navigation      | Next-compatible redirect, notFound, and client navigation hooks.                     |
 | @farm.js/core/headers         | Next-compatible request headers and cookies helpers.                                 |
+| @farm.js/core/json-ld         | Typed schema.org JSON-LD builders for `metadata.jsonLd`.                             |
 | @farm.js/core/router          | Lightweight route matching, href building, and active-route checks.                  |
 | @farm.js/core/query           | Query and route param types.                                                         |
 | @farm.js/core/storage         | Key/value clients, drivers, mounts, and `getStorage()`.                              |
 | @farm.js/core/cache           | Data cache, revalidation, cache keys.                                                |
 | @farm.js/cache-redis          | Distributed Redis cache, tag versions, and regeneration leases.                      |
 | @farm.js/core/after           | Post-response server work with `after()`.                                            |
+| @farm.js/core/og              | Server-only `ImageResponse` for PNG images rendered from JSX (install `@vercel/og`). |
 | @farm.js/core/cron            | Cron route authorization, schedule types, manifests, and deployment adapter helpers. |
 | @farm.js/core/observability   | Farm events, request tracing, custom spans, and active trace context.                |
 | @farm.js/core/instrumentation | Startup and shutdown convention types for development and production runtimes.       |
-| @farm.js/otel                 | Optional Node OpenTelemetry SDK, OTLP exporter, and auto-instrumentation setup.      |
+| @farm.js/otel                 | Node OpenTelemetry SDK, OTLP exporter, auto-instrumentation, and Farm event metrics. |
 | @farm.js/react                | React renderer descriptor and experimental AOT local-state compiler.                 |
 | @farm.js/preact               | Preact renderer descriptor, streaming SSR, hydration, and Vite integration.          |
 | @farm.js/solid                | Solid renderer descriptor, SSR runtime, browser hydration, and Vite integration.     |
@@ -46,7 +49,7 @@ A compact map of the main package exports and where to learn more.
 
 | Package                                                                       | Exports                                                                                                    |
 | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `@farm.js/core`                                                               | `defineIntegration`, `integrationRoute`, `defineIntegrationSchema`, `definePlugin`, `defineConfig`.        |
+| `@farm.js/core`                                                               | `defineIntegration`, `integrationRoute`, `defineSchema`, `definePlugin`, `defineConfig`.                   |
 | `@farm.js/core/theme/client`                                                  | `useTheme`, `getTheme`, `setTheme`, and `toggleTheme` for browser color-mode state.                        |
 | `@farm.js/core/theme/server`                                                  | `getTheme` and `getThemeSnapshot` for cookie-backed server rendering.                                      |
 | `@farm.js/core/cron`                                                          | `cronRoute`, cron config types, schedule manifests, and deployment adapter helpers.                        |
@@ -56,11 +59,13 @@ A compact map of the main package exports and where to learn more.
 | `@farm.js/core/navigation`                                                    | `redirect`, `permanentRedirect`, `notFound`, `useRouter`, `usePathname`, `useSearchParams`.                |
 | `@farm.js/core/font`                                                          | Build-time `localFont` and `remoteFont` loaders with generated CSS, hashed assets, and preload hints.      |
 | `@farm.js/core/headers`                                                       | `headers`, `cookies`.                                                                                      |
+| `@farm.js/core/json-ld`                                                       | `article`, `breadcrumbList`, `faqPage`, `product`, and `softwareApplication` JSON-LD builders.             |
 | `@farm.js/core/router`                                                        | `createFarmRouter`, `matchFarmRoute`, `buildFarmRoutePath`, `isFarmRouteActive`.                           |
 | `@farm.js/core/storage`                                                       | `sqliteStorage`, `postgresStorage`, `redisStorage`, `createStorageClient`, `defineStorageClient`.          |
 | `@farm.js/cache-redis`                                                        | `redisCache` distributed cache adapter.                                                                    |
 | `@farm.js/federation`                                                         | `federation` build plugin for browser Module Federation producers and hosts.                               |
 | `@farm.js/federation/client`                                                  | Typed `loadRemote` and `preloadRemote` browser helpers.                                                    |
+| `@farm.js/health`                                                             | `health` plugin for dependency-aware liveness, readiness, and startup probes.                              |
 | `@farm.js/search`                                                             | `search` build plugin and the headless `createSearch` browser client.                                      |
 | `@farm.js/core/after`                                                         | `after` for short work that starts after the current response finishes.                                    |
 | `@farm.js/stripe`, `@farm.js/polar`, `@farm.js/autumn`                        | Dedicated billing integration packages.                                                                    |

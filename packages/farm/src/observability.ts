@@ -1,3 +1,4 @@
+import type { FarmAgentIdentity } from "./agent-identity";
 import {
   _runWithFarmRequestSpan,
   configureFarmTracing,
@@ -201,6 +202,33 @@ export type FarmIntegrationEvent =
   | (FarmEventBase & { type: "integration.webhook.verified"; integration: string; event?: string })
   | (FarmEventBase & { type: "integration.webhook.failed"; integration: string; reason: string });
 
+/** A registered MCP tool callback completed; not an HTTP response or an agent run. */
+export type FarmMCPEvent = FarmEventBase & {
+  type: "mcp.tool.complete";
+  /** Configured transport path, never a raw request URL. */
+  route: string;
+  server: string;
+  tool: string;
+  outcome: "success" | "error";
+  durationMs: number;
+};
+
+/**
+ * An agent surface answered a request: a Markdown mirror or `page.md`, llms.txt,
+ * llms-full.txt, or the API catalog. `agent` is what the User-Agent declares,
+ * not a verified identity.
+ */
+export type FarmAgentEvent = FarmEventBase & {
+  type: "agent.read";
+  surface: "markdown" | "llms" | "llms-full" | "api-catalog";
+  /** The path served, such as `/pricing.md`; never the query string. */
+  route: string;
+  /** For Markdown, the partial view asked for. */
+  view?: "outline" | "section" | "parts" | "actions";
+  status: number;
+  agent: FarmAgentIdentity;
+};
+
 export type FarmMiddlewareEvent =
   | (FarmEventBase & { type: "middleware.start"; route?: string; name?: string })
   | (FarmEventBase & {
@@ -268,6 +296,8 @@ export type FarmEvent =
   | FarmPPREvent
   | FarmAPIEvent
   | FarmIntegrationEvent
+  | FarmMCPEvent
+  | FarmAgentEvent
   | FarmMiddlewareEvent
   | FarmStorageEvent
   | FarmBuildEvent
@@ -304,16 +334,33 @@ export interface FarmEventSubscriptionOptions {
   unfiltered?: boolean;
 }
 
-const runtimeHandlers = new Set<FarmEventHandler>();
-const unfilteredRuntimeHandlers = new Set<FarmEventHandler>();
-let observabilityState: FarmResolvedObservabilityConfig = {
-  logs: false,
-  handlers: [],
-  tracing: normalizeFarmTracingConfig(false),
+const OBSERVABILITY_RUNTIME = Symbol.for("@farm.js/core/observability-runtime/v1");
+interface ObservabilityRuntime {
+  handlers: Set<FarmEventHandler>;
+  unfilteredHandlers: Set<FarmEventHandler>;
+  config: FarmResolvedObservabilityConfig;
+}
+// Plugins can load a different core entry (CJS/ESM or Vite/source). Like the
+// request and after() stores, event delivery belongs to the runtime, not a copy
+// of this module. Keep the state object stable so reset/configure reach all copies.
+const runtime = globalThis as typeof globalThis & {
+  [OBSERVABILITY_RUNTIME]?: ObservabilityRuntime;
 };
+const shared = (runtime[OBSERVABILITY_RUNTIME] ??= {
+  handlers: new Set<FarmEventHandler>(),
+  unfilteredHandlers: new Set<FarmEventHandler>(),
+  config: { logs: false, handlers: [], tracing: normalizeFarmTracingConfig(false) },
+});
+const runtimeHandlers = shared.handlers;
+const unfilteredRuntimeHandlers = shared.unfilteredHandlers;
+const observabilityState = shared.config;
 
 export function configureFarmObservability(config: FarmObservabilityUserConfig | undefined): void {
-  observabilityState = normalizeFarmObservabilityConfig(config);
+  Object.assign(
+    observabilityState,
+    { events: undefined },
+    normalizeFarmObservabilityConfig(config),
+  );
   configureFarmTracing(observabilityState.tracing);
 }
 
@@ -356,11 +403,12 @@ export function onFarmEvent(
 export function resetFarmObservability(): void {
   runtimeHandlers.clear();
   unfilteredRuntimeHandlers.clear();
-  observabilityState = {
+  Object.assign(observabilityState, {
     logs: false,
     handlers: [],
+    events: undefined,
     tracing: normalizeFarmTracingConfig(false),
-  };
+  });
   resetFarmTracing();
 }
 
@@ -519,6 +567,9 @@ function formatFarmEventDetails(event: FarmEvent): string {
     "reason",
     "durationMs",
     "integration",
+    "server",
+    "tool",
+    "outcome",
     "operation",
     "plugin",
     "hook",

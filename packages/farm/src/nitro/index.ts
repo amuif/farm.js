@@ -1,4 +1,5 @@
-import type { NitroConfig } from "nitro/config";
+import { createBundledEnv } from "../env";
+import type { NitroConfig } from "nitro/types";
 import type { ResolvedFarmConfig } from "../config";
 import type { RouteManager } from "../routing/route-manager";
 import type { APIRouteManager } from "../api/route-manager";
@@ -92,7 +93,7 @@ export const farmRegistry: {
   clientManifest?: any;
   routePaths?: Record<string, string>;
 } = {
-  env: ${JSON.stringify(config.env || { server: {}, public: {} }, null, 2)},
+  env: ${JSON.stringify(createBundledEnv(config.env), null, 2)},
   deploymentId: ${JSON.stringify(config.deploymentId)},
   basePath: ${JSON.stringify(config.basePath)},
   apiBasePath: ${JSON.stringify(apiBasePath)},
@@ -523,23 +524,14 @@ export default defineEventHandler(async (event: H3Event) => {
     preset,
     // rootDir must be the project root for Nitro to correctly resolve paths
     rootDir: root,
-    // srcDir should point to where source files are (for scanning)
+    // serverDir should point to where source files are (for scanning)
     // But we're using scanDirs to point to our server directory
-    srcDir: root,
+    serverDir: root,
     // buildDir is where Nitro builds (temporary working directory)
     buildDir: nitroBuildDir,
     // output.dir is where the final deployable output goes
     // This ensures everything ends up in .farm/.output
     compatibilityDate: "2024-12-01",
-    // Vercel-specific configuration
-    ...(preset === "vercel"
-      ? {
-          vercel: {
-            // Ensure proper function configuration
-            config: {},
-          },
-        }
-      : {}),
     // Tell Nitro to scan the server directory we created
     // This ensures our handlers are discovered by Nitro
     scanDirs: [serverDir],
@@ -563,18 +555,6 @@ export default defineEventHandler(async (event: H3Event) => {
       : [],
     // Route rules for Vercel
     routeRules: {
-      ...(apiBasePath === "/"
-        ? {}
-        : {
-            [`${apiBasePath}/**`]: {
-              cors: true,
-              headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "*",
-                "Access-Control-Allow-Headers": "*",
-              },
-            },
-          }),
       "/**": {
         prerender: false,
       },
@@ -640,7 +620,7 @@ export default defineEventHandler(async (event: H3Event) => {
           farmRegistry.apiRouteManager = apiRouteManager;
           farmRegistry.routeManager = routeManager;
           farmRegistry.serverRenderer = serverRenderer;
-          farmRegistry.env = config.env || { server: {}, public: {} };
+          farmRegistry.env = createBundledEnv(config.env);
           farmRegistry.deploymentId = config.deploymentId;
           farmRegistry.basePath = config.basePath;
         };
@@ -677,7 +657,7 @@ export default defineEventHandler(async (event: H3Event) => {
     ],
     // Build configuration
     minify: process.env.NODE_ENV === "production",
-    sourceMap: true,
+    sourcemap: true,
     // Bundle all dependencies to avoid workspace issues on Vercel
     // This ensures all farm package code is bundled into the serverless function
     // so it doesn't need to resolve workspace dependencies at runtime
@@ -685,10 +665,8 @@ export default defineEventHandler(async (event: H3Event) => {
     // bundle: true,
     // External dependencies that should NOT be bundled (provided by runtime)
     // We exclude React/ReactDOM to reduce bundle size (they're in node_modules)
-    externals: {
+    rollupConfig: {
       external: ["react", "react-dom"],
-      // Keep React external - it's in the serverless function's node_modules
-      // This reduces bundle size significantly
     },
     // Runtime config
     runtimeConfig: {
@@ -697,8 +675,8 @@ export default defineEventHandler(async (event: H3Event) => {
     // Experimental features
     experimental: {
       tasks: farmWorkflows.workflows.length > 0 || farmCron.jobs.length > 0,
-      wasm: false, // Disable for now to avoid issues
     },
+    wasm: false, // Disable for now to avoid issues
   };
 
   return nitroConfig;

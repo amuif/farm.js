@@ -1,3 +1,5 @@
+export {};
+
 declare module "@farm.js/core" {
   export type FarmIntegrationCategory =
     | "auth"
@@ -644,15 +646,22 @@ declare module "@farm.js/core" {
   type InferFarmEndpointSchema<TSchema> =
     TSchema extends FarmEndpointSchema<infer TValue> ? TValue : unknown;
 
-  export type FarmTypedEndpoint<TBody = never, TQuery = never, TResponse = unknown> = {
+  export type FarmTypedEndpoint<
+    TBody = never,
+    TQuery = never,
+    TResponse = unknown,
+    THeaders = never,
+  > = {
     __types: {
       body: TBody;
       query: TQuery;
+      headers: THeaders;
+      inputHeaders: THeaders;
       response: TResponse;
     };
     __path?: string;
     __method?: string;
-  } & ((options?: { body?: TBody; query?: TQuery }) => Promise<TResponse>);
+  } & ((options?: { body?: TBody; query?: TQuery; headers?: THeaders }) => Promise<TResponse>);
 
   export function createEndpoint<
     TBodySchema extends FarmEndpointSchema | undefined = undefined,
@@ -680,7 +689,8 @@ declare module "@farm.js/core" {
   ): FarmTypedEndpoint<
     InferFarmEndpointSchema<TBodySchema>,
     InferFarmEndpointSchema<TQuerySchema>,
-    Awaited<TResponse>
+    Awaited<TResponse>,
+    THeadersSchema extends FarmEndpointSchema ? InferFarmEndpointSchema<THeadersSchema> : never
   >;
 
   export const integrationRoute: {
@@ -745,4 +755,26 @@ declare module "@farm.js/core" {
   ): Record<string, FarmIntegrationSchema>;
 
   export function getRegisteredIntegrationSchemas(): Record<string, FarmIntegrationSchema>;
+
+  export type FarmSqlDialect = "postgres" | "mysql" | "sqlite";
+
+  /** What an owner may read when resolving its client. */
+  export type FarmSchemaOwnerConfig = {
+    storage?: unknown;
+    integrations?: Record<string, unknown> | readonly unknown[];
+    [key: string]: unknown;
+  };
+
+  export interface FarmSchemaTablesDeclaration {
+    name: string;
+    schema: FarmIntegrationSchema;
+    models?: readonly string[];
+    resolveClient(config: FarmSchemaOwnerConfig): Promise<unknown>;
+    dialect?: FarmSqlDialect;
+  }
+
+  export function declareSchemaTables<TTarget extends object>(
+    target: TTarget,
+    declaration: FarmSchemaTablesDeclaration,
+  ): TTarget;
 }

@@ -1,3 +1,5 @@
+export {};
+
 declare module "@farm.js/core" {
   export type FarmIntegrationCategory =
     | "auth"
@@ -93,6 +95,26 @@ declare module "@farm.js/core" {
   export type FarmIntegrationRequestContextStore = FarmRequestStore;
 
   export const FARM_INTEGRATION_INTERNAL_DISPATCH_CONTEXT_KEY: "farm.integration.internalDispatch";
+
+  /**
+   * Request-context key under which an integration middleware hands refreshed
+   * `Set-Cookie` values to the runtime when it returns `void` (lets the request
+   * continue to the downstream route/page handler). The runtime reads this key
+   * back and forwards the cookies onto the response it ultimately sends.
+   */
+  export const FARM_INTEGRATION_SET_COOKIES_KEY: "farm:integration:set-cookies";
+
+  /**
+   * Forward `Set-Cookie` values from an integration middleware that returns
+   * `void` (the authenticated/passthrough branch) to the runtime, so they are
+   * merged onto the response the runtime sends for the matched route. This is
+   * the passthrough counterpart to appending `Set-Cookie` to a `Response` the
+   * middleware returns directly.
+   */
+  export function forwardIntegrationSetCookies(
+    context: Pick<FarmIntegrationHandlerContext, "req">,
+    cookies: string[],
+  ): void;
 
   export type FarmIntegrationRouteDb<TSchema extends FarmIntegrationSchema | undefined> = Record<
     string,
@@ -644,15 +666,22 @@ declare module "@farm.js/core" {
   type InferFarmEndpointSchema<TSchema> =
     TSchema extends FarmEndpointSchema<infer TValue> ? TValue : unknown;
 
-  export type FarmTypedEndpoint<TBody = never, TQuery = never, TResponse = unknown> = {
+  export type FarmTypedEndpoint<
+    TBody = never,
+    TQuery = never,
+    TResponse = unknown,
+    THeaders = never,
+  > = {
     __types: {
       body: TBody;
       query: TQuery;
+      headers: THeaders;
+      inputHeaders: THeaders;
       response: TResponse;
     };
     __path?: string;
     __method?: string;
-  } & ((options?: { body?: TBody; query?: TQuery }) => Promise<TResponse>);
+  } & ((options?: { body?: TBody; query?: TQuery; headers?: THeaders }) => Promise<TResponse>);
 
   export function createEndpoint<
     TBodySchema extends FarmEndpointSchema | undefined = undefined,
@@ -680,7 +709,8 @@ declare module "@farm.js/core" {
   ): FarmTypedEndpoint<
     InferFarmEndpointSchema<TBodySchema>,
     InferFarmEndpointSchema<TQuerySchema>,
-    Awaited<TResponse>
+    Awaited<TResponse>,
+    THeadersSchema extends FarmEndpointSchema ? InferFarmEndpointSchema<THeadersSchema> : never
   >;
 
   export const integrationRoute: {

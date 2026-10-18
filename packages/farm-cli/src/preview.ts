@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { loadConfig, logger } from "@farm.js/core";
+import { loadConfig, logger } from "@farm.js/core/internal/cli-runtime";
 import type { PreviewAgentSession } from "@farm.js/tunnel";
 import {
   createPreviewGatewayPlan,
@@ -11,6 +11,8 @@ import {
 } from "./preview-gateway";
 import { runNativePreviewTunnel } from "./preview-native";
 import { createHttpLocalUrl } from "./local-url";
+import { authorizePreviewGatewayPlan, parsePreviewDuration } from "./preview-auth";
+import { resolvePreviewProject } from "./preview-project";
 
 export interface PreviewFarmOptions {
   root?: string;
@@ -20,10 +22,13 @@ export interface PreviewFarmOptions {
   url?: string;
   gatewayUrl?: string;
   name?: string;
+  project?: string;
   dryRun?: boolean;
   noProbe?: boolean;
   timeoutMs?: number;
   provider?: "farm" | "local";
+  expires?: string | number;
+  login?: boolean;
 }
 
 export interface PreviewTarget {
@@ -37,6 +42,7 @@ export interface PreviewTunnelPlan {
   command: string;
   args: string[];
   shell?: boolean;
+  provider?: "custom" | "cloudflared" | "localtunnel";
   target: PreviewTarget;
   requestedName: string;
   requestedHostname: string;
@@ -44,42 +50,72 @@ export interface PreviewTunnelPlan {
 
 export interface PreviewFarmResult {
   target: PreviewTarget;
-  plan: PreviewTunnelPlan | PreviewGatewayPlan;
+  plan: PreviewTunnelPlan | PreviewFarmGatewayPlan;
   publicUrl?: string;
-  session?: PreviewAgentSession | PreviewGatewaySession;
+  session?: PreviewAgentSession | PreviewFarmGatewaySession;
 }
 
+/** The managed plan exposed to callers, without its internal relay credential. */
+export type PreviewFarmGatewayPlan = Omit<PreviewGatewayPlan, "relayToken">;
+
+/** The compatibility gateway session exposed to callers, without its control credential. */
+export type PreviewFarmGatewaySession = Omit<PreviewGatewaySession, "token">;
+
+const MAX_TUNNEL_SCAN_CHARS = 64 * 1024;
 const DEFAULT_PREVIEW_PORTS = [3000, 4319, 5173, 4173, 8080];
 const PREVIEW_URL_PATTERN = /https:\/\/[^\s"')\]}]+/g;
 
 export async function previewFarm(options: PreviewFarmOptions = {}): Promise<PreviewFarmResult> {
+  // Loading the config reads the app's .env files the way farm dev does, so a
+  // FARMJS_API_KEY kept there signs the preview in. A broken config doesn't stop it.
+  await loadPreviewEnvironment(options.root, options.configPath);
   const target = await resolvePreviewTarget(options);
 
   logger.info("Creating public preview for the running app...");
   logger.info(`Local:  ${target.localUrl}`);
 
   if (shouldUseManagedGateway(options)) {
-    const plan = createPreviewGatewayPlan(target, options);
+    const expiresInMs = parsePreviewDuration(options.expires);
+    const plan = {
+      ...createPreviewGatewayPlan(target, options),
+      project: await resolvePreviewProject(options),
+      ...(expiresInMs ? { expiresInMs } : {}),
+    };
 
     if (options.dryRun) {
       logger.info(formatGatewayPlan(plan));
       logger.success("Preview gateway dry run completed.");
-      return { target, plan };
+      return { target, plan: redactPreviewGatewayPlan(plan) };
     }
 
-    logger.info(`Relay: ${plan.relayUrl}`);
+    const authorizedPlan = await authorizePreviewGatewayPlan(plan, {
+      expiresInMs,
+      forceLogin: options.login,
+      root: options.root,
+    });
+    logger.info(`Relay: ${authorizedPlan.relayUrl}`);
     logger.info("Opening native Farm preview tunnel...");
     try {
-      const session = await runNativePreviewTunnel(plan);
-      return { target, plan, publicUrl: session.publicUrl, session };
+      const session = await runNativePreviewTunnel(authorizedPlan);
+      return {
+        target,
+        plan: redactPreviewGatewayPlan(authorizedPlan),
+        publicUrl: session.publicUrl,
+        session,
+      };
     } catch (error) {
       logger.warn(
         `Native preview relay unavailable; using compatibility gateway polling.${formatPreviewError(error)}`,
       );
-      const session = await runPreviewGateway(plan, {
+      const session = await runPreviewGateway(authorizedPlan, {
         timeoutMs: options.timeoutMs,
       });
-      return { target, plan, publicUrl: session.publicUrl, session };
+      return {
+        target,
+        plan: redactPreviewGatewayPlan(authorizedPlan),
+        publicUrl: session.publicUrl,
+        session: redactPreviewGatewaySession(session),
+      };
     }
   }
 
@@ -94,6 +130,16 @@ export async function previewFarm(options: PreviewFarmOptions = {}): Promise<Pre
   logger.info("Opening public tunnel...");
   const publicUrl = await runPreviewTunnel(plan, options.timeoutMs ?? 30000);
   return { target, plan, publicUrl };
+}
+
+function redactPreviewGatewayPlan(plan: PreviewGatewayPlan): PreviewFarmGatewayPlan {
+  const { relayToken: _relayToken, ...publicPlan } = plan;
+  return publicPlan;
+}
+
+function redactPreviewGatewaySession(session: PreviewGatewaySession): PreviewFarmGatewaySession {
+  const { token: _token, ...publicSession } = session;
+  return publicSession;
 }
 
 function formatPreviewError(error: unknown) {
@@ -152,13 +198,16 @@ export async function resolvePreviewTarget(
     throw new Error("Preview port must be an integer between 1 and 65535.");
   }
   const configPort = explicitPort ? undefined : await readConfigPort(root, options.configPath);
-  const candidates = uniqueNumbers([
-    explicitPort,
-    normalizePort(process.env.FARM_PORT),
-    normalizePort(process.env.PORT),
-    configPort,
-    ...DEFAULT_PREVIEW_PORTS,
-  ]);
+  // A port that was asked for is the only one probed: falling back to whatever
+  // else answers would publish a different local app.
+  const candidates = explicitPort
+    ? [explicitPort]
+    : uniqueNumbers([
+        normalizePort(process.env.FARM_PORT),
+        normalizePort(process.env.PORT),
+        configPort,
+        ...DEFAULT_PREVIEW_PORTS,
+      ]);
 
   if (!candidates.length) {
     throw new Error("No preview port candidates were available.");
@@ -200,9 +249,7 @@ export function createPreviewTunnelPlan(
 ): PreviewTunnelPlan {
   const requestedName =
     sanitizePreviewName(options.name || process.env.FARM_PREVIEW_NAME) || randomPreviewName();
-  const domain = normalizePreviewDomain(
-    process.env.FARM_PREVIEW_DOMAIN || "preview.farming-labs.dev",
-  );
+  const domain = normalizePreviewDomain(process.env.FARM_PREVIEW_DOMAIN || "preview.farmjs.dev");
   const requestedHostname = `${requestedName}.${domain}`;
   const template = process.env.FARM_PREVIEW_TUNNEL_COMMAND;
 
@@ -211,6 +258,7 @@ export function createPreviewTunnelPlan(
       command: expandTunnelTemplate(template, target, requestedName, requestedHostname),
       args: [],
       shell: true,
+      provider: "custom",
       target,
       requestedName,
       requestedHostname,
@@ -221,6 +269,7 @@ export function createPreviewTunnelPlan(
     return {
       command: "cloudflared",
       args: ["tunnel", "--url", target.localUrl],
+      provider: "cloudflared",
       target,
       requestedName,
       requestedHostname,
@@ -240,6 +289,9 @@ export function createPreviewTunnelPlan(
         "--subdomain",
         requestedName,
       ],
+      // Windows exposes npx as a .cmd shim; spawn needs a shell to resolve it.
+      shell: process.platform === "win32",
+      provider: "localtunnel",
       target,
       requestedName,
       requestedHostname,
@@ -254,6 +306,7 @@ export function createPreviewTunnelPlan(
 export function parsePreviewPublicUrl(
   output: string,
   preferredHostname?: string,
+  options: { allowUnknownHost?: boolean } = {},
 ): string | undefined {
   const matches = output.match(PREVIEW_URL_PATTERN) || [];
   const urls = matches.filter((value) => {
@@ -270,24 +323,27 @@ export function parsePreviewPublicUrl(
     if (preferred) return preferred;
   }
 
-  return (
-    urls.find((value) => {
-      const host = new URL(value).hostname;
-      return (
-        host.endsWith(".trycloudflare.com") ||
-        host.endsWith(".loca.lt") ||
-        host.endsWith(".localtunnel.me") ||
-        host.endsWith(".ngrok.app") ||
-        host.endsWith(".ngrok-free.app") ||
-        host.endsWith(".ngrok.dev") ||
-        host.endsWith(".ngrok.io") ||
-        host.endsWith(".preview.farming-labs.dev")
-      );
-    }) || urls[0]
-  );
+  const knownUrl = urls.find((value) => {
+    const host = new URL(value).hostname;
+    return (
+      host.endsWith(".trycloudflare.com") ||
+      host.endsWith(".loca.lt") ||
+      host.endsWith(".localtunnel.me") ||
+      host.endsWith(".ngrok.app") ||
+      host.endsWith(".ngrok-free.app") ||
+      host.endsWith(".ngrok.dev") ||
+      host.endsWith(".ngrok.io") ||
+      host.endsWith(".preview.farmjs.dev") ||
+      host.endsWith(".preview.farming-labs.dev")
+    );
+  });
+  return knownUrl || (options.allowUnknownHost === false ? undefined : urls[0]);
 }
 
-async function runPreviewTunnel(plan: PreviewTunnelPlan, timeoutMs: number): Promise<string> {
+export async function runPreviewTunnel(
+  plan: PreviewTunnelPlan,
+  timeoutMs: number,
+): Promise<string> {
   const child = spawn(plan.command, plan.args, {
     env: {
       ...process.env,
@@ -312,14 +368,27 @@ async function runPreviewTunnel(plan: PreviewTunnelPlan, timeoutMs: number): Pro
   try {
     publicUrl = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         reject(new Error("Timed out waiting for the preview URL."));
       }, timeoutMs);
 
       const handleChunk = (chunk: Buffer) => {
         const text = chunk.toString();
-        output += text;
         process.stdout.write(text);
-        const nextUrl = parsePreviewPublicUrl(output, plan.requestedHostname);
+        // The buffer exists only to find the public URL. Once that is known it
+        // has no further use, and until then only a bounded trailing window is
+        // needed - a long-lived or noisy tunnel would otherwise grow one string
+        // for the whole session. The window is far larger than any URL line, so
+        // a URL split across chunks is still matched.
+        if (settled) return;
+        output =
+          output.length + text.length > MAX_TUNNEL_SCAN_CHARS
+            ? (output + text).slice(-MAX_TUNNEL_SCAN_CHARS)
+            : output + text;
+        const nextUrl = parsePreviewPublicUrl(output, plan.requestedHostname, {
+          allowUnknownHost: plan.provider === undefined || plan.provider === "custom",
+        });
         if (nextUrl && !settled) {
           settled = true;
           clearTimeout(timer);
@@ -339,7 +408,9 @@ async function runPreviewTunnel(plan: PreviewTunnelPlan, timeoutMs: number): Pro
           reject(error);
         }
       });
-      child.on("exit", (code, signal) => {
+      // "close" fires after stdout and stderr are drained. "exit" can arrive
+      // first (notably on Windows pipes), before the chunk that holds the URL.
+      child.on("close", (code, signal) => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
@@ -354,6 +425,13 @@ async function runPreviewTunnel(plan: PreviewTunnelPlan, timeoutMs: number): Pro
 
     await waitForTunnelExit(child);
     return publicUrl;
+  } catch (error) {
+    // The timeout (and any spawn or early-exit failure) rejects while the child
+    // may still be running. Nothing else terminates it: the SIGINT/SIGTERM
+    // handlers are removed below, so without this the tunnel process outlives
+    // the command that started it.
+    cleanup();
+    throw error;
   } finally {
     process.removeListener("SIGINT", cleanup);
     process.removeListener("SIGTERM", cleanup);
@@ -388,9 +466,27 @@ async function isReachable(url: string, timeoutMs: number) {
   }
 }
 
+/** The app's .env files, loaded the way farm dev loads them. A broken config is ignored. */
+export async function loadPreviewEnvironment(root = process.cwd(), configPath?: string) {
+  await loadAppConfig(root, configPath).catch(() => undefined);
+}
+
+const appConfigs = new Map<string, ReturnType<typeof loadConfig>>();
+
+/** The app's config, loaded once per root for this process. */
+function loadAppConfig(root: string, configPath?: string) {
+  const key = `${root}\0${configPath ?? ""}`;
+  let config = appConfigs.get(key);
+  if (!config) {
+    config = loadConfig(root, configPath, "development");
+    appConfigs.set(key, config);
+  }
+  return config;
+}
+
 async function readConfigPort(root: string, configPath?: string) {
   try {
-    const config = await loadConfig(root, configPath, "development");
+    const config = await loadAppConfig(root, configPath);
     const vite = config?.vite;
     if (!vite || typeof vite === "function") return undefined;
     return normalizePort(vite.server?.port);

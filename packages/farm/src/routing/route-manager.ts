@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 import type {
   FarmConfig,
   ParsedRoute,
@@ -8,7 +9,10 @@ import type {
 import {
   parseRoutePath,
   matchRoute,
+  matchRouteParts,
   matchRoutePrefix,
+  matchRoutePrefixParts,
+  splitRoutePath,
   resolveAppPath,
   globFiles,
   logger,
@@ -32,13 +36,17 @@ import {
   createFarmMarkdownRouteModuleFromFile,
   isFarmMarkdownPageFile,
   loadFarmMdxComponents,
+  resolveFarmMdxComponentsModulePath,
   resolveMdxConfig,
 } from "../app-markdown";
 import path from "path";
 import type { ViteDevServer } from "vite";
+import { toFileModuleUrl } from "../utils/file-module";
 import {
   enforceFarmIsolatedHydrationRouteBudget,
   getClientModuleHydrationPlan,
+  createMarkdownPageHydrationPlanner,
+  getFarmClientHydrationPlanOptions,
   getClientModuleMetadata,
   resolveFarmIsolatedClientHydrationMode,
   type IsolatedClientBoundaryReference,
@@ -69,6 +77,7 @@ import {
   stripFarmLocaleFromPathname,
 } from "../i18n/routing";
 import type { ResolvedFarmI18nConfig } from "../i18n/types";
+import { stripFarmBasePath } from "../base-path";
 import { appendFarmRedirectQuery } from "../redirect-query";
 import { createRouteSlotContainerId, parseRouteSlotFile } from "./route-slots";
 import { getFarmRendererComponentExtensions } from "../renderer";
@@ -119,6 +128,8 @@ export interface FarmClientRouteManifest {
     isolatedBoundaries?: IsolatedClientBoundaryReference[];
     renderPlan: FarmRouteRenderPlan;
     suppressedAsyncHydration?: true;
+    /** Why an async page's client components could not become islands. */
+    suppressedAsyncHydrationReason?: string;
     search?: ProgrammaticRouteSearchClientOptions;
     segments: Array<{
       segment: string;
@@ -135,6 +146,9 @@ export interface FarmClientRouteManifest {
     islandStrategy: FarmIslandStrategy | null;
     hasIsolatedClientBoundaries?: true;
     isolatedBoundaries?: IsolatedClientBoundaryReference[];
+    suppressedAsyncHydration?: true;
+    /** Why an async layout's client-side hydration could not become islands. */
+    suppressedAsyncHydrationReason?: string;
   }>;
   slots: Array<{
     name: string;
@@ -169,8 +183,8 @@ interface MetadataImageEntry extends RouteEntry {
 
 export interface ApplicationMetadataRouteEntry extends RouteEntry {
   kind: ApplicationMetadataRouteKind;
-  fileName: "sitemap" | "robots" | "manifest";
-  outputName: "sitemap.xml" | "robots.txt" | "manifest.webmanifest";
+  fileName: "sitemap" | "robots" | "manifest" | "llms" | "llms-full";
+  outputName: "sitemap.xml" | "robots.txt" | "manifest.webmanifest" | "llms.txt" | "llms-full.txt";
 }
 
 interface RedirectEntry {
@@ -199,7 +213,9 @@ export class RouteManager {
   private routes: Map<string, RouteEntry> = new Map();
   private pageRouteShapes: Map<string, RouteEntry> = new Map();
   private layouts: Map<string, RouteEntry> = new Map();
+  private orderedLayouts: RouteEntry[] = [];
   private routeSlots: Map<string, RouteSlotEntry> = new Map();
+  private routeSlotOwnerSegments: Map<string, ParsedRoute["segments"]> = new Map();
   private loadings: Map<string, RouteEntry> = new Map();
   private errors: Map<string, RouteEntry> = new Map();
   private metadataImages: Map<string, MetadataImageEntry> = new Map();
@@ -232,7 +248,9 @@ export class RouteManager {
     this.routes.clear();
     this.pageRouteShapes.clear();
     this.layouts.clear();
+    this.orderedLayouts = [];
     this.routeSlots.clear();
+    this.routeSlotOwnerSegments.clear();
     this.loadings.clear();
     this.errors.clear();
     this.metadataImages.clear();
@@ -264,6 +282,17 @@ export class RouteManager {
         compareRouteEntries(left, right),
       ),
     );
+    this.orderedLayouts = Array.from(this.layouts.values()).sort(
+      (left, right) => left.route.segments.length - right.route.segments.length,
+    );
+    for (const slot of this.routeSlots.values()) {
+      if (!this.routeSlotOwnerSegments.has(slot.ownerPattern)) {
+        this.routeSlotOwnerSegments.set(
+          slot.ownerPattern,
+          parseRoutePath(`${slot.ownerPattern}/page.tsx`).segments,
+        );
+      }
+    }
 
     // Silent discovery - only log if verbose mode enabled
     if (process.env.FARM_VERBOSE) {
@@ -294,12 +323,13 @@ export class RouteManager {
     // Remove trailing slash except for root
     const routePathname = this.toRoutePathname(pathname);
     const normalizedPath = routePathname === "/" ? "/" : routePathname.replace(/\/$/, "");
+    const pathParts = splitRoutePath(normalizedPath);
     // Find matching page route
     let matchedRoute: RouteEntry | null = null;
     let params: Record<string, string> = {};
 
     for (const routeEntry of this.routes.values()) {
-      const match = matchRoute(normalizedPath, routeEntry.route.segments);
+      const match = matchRouteParts(pathParts, routeEntry.route.segments);
       if (match.matches) {
         matchedRoute = routeEntry;
         params = match.params;
@@ -308,8 +338,8 @@ export class RouteManager {
     }
 
     // Find all matching layouts (from root to specific)
-    const layouts = this.findMatchingLayouts(normalizedPath);
-    const slots = this.findMatchingRouteSlots(normalizedPath, options.interceptFrom);
+    const layouts = this.findMatchingLayouts(normalizedPath, pathParts);
+    const slots = this.findMatchingRouteSlots(normalizedPath, pathParts, options.interceptFrom);
 
     return {
       route: matchedRoute,
@@ -623,15 +653,62 @@ export class RouteManager {
         hasUnsupportedIntegrationProvider: Boolean(unsupportedIntegrationProvider),
       },
     );
+    const planOptions = getFarmClientHydrationPlanOptions(
+      this.config.renderer,
+      Boolean(unsupportedIntegrationProvider),
+    );
     const layoutEntries = Array.from(this.layouts.values()).map((entry) => ({
       entry,
-      metadata: getClientModuleHydrationPlan(entry.modulePath, normalizedProjectRoot, isolatedMode),
+      metadata: getClientModuleHydrationPlan(
+        entry.modulePath,
+        normalizedProjectRoot,
+        isolatedMode,
+        planOptions,
+      ),
     }));
 
+    // A Markdown page's client components come from the configured MDX components module.
+    const markdownPagePlan = createMarkdownPageHydrationPlanner(
+      resolveFarmMdxComponentsModulePath(resolveMdxConfig(this.config.mdx), normalizedProjectRoot),
+      normalizedProjectRoot,
+      isolatedMode,
+      planOptions,
+    );
     const routeEntries = Array.from(this.routes.values()).map((entry) => ({
       entry,
-      metadata: getClientModuleHydrationPlan(entry.modulePath, normalizedProjectRoot, isolatedMode),
+      metadata: isFarmMarkdownPageFile(entry.modulePath)
+        ? markdownPagePlan()
+        : getClientModuleHydrationPlan(
+            entry.modulePath,
+            normalizedProjectRoot,
+            isolatedMode,
+            planOptions,
+          ),
     }));
+    // Every Markdown page shares the components module, so one warning covers them all.
+    const markdownFallback = routeEntries.find(
+      ({ entry, metadata }) => isFarmMarkdownPageFile(entry.modulePath) && metadata.fallbackReason,
+    );
+    if (markdownFallback) {
+      logger.warn(
+        `[Farm.js] client components in Markdown pages stay static: ${markdownFallback.metadata.fallbackReason}.`,
+      );
+    }
+    const markdownStaticPackages = routeEntries.find(
+      ({ entry, metadata }) =>
+        isFarmMarkdownPageFile(entry.modulePath) && metadata.staticPackageBoundaries,
+    )?.metadata.staticPackageBoundaries;
+    if (markdownStaticPackages) {
+      logger.info(
+        `[Farm.js] Markdown pages render client components from ${markdownStaticPackages.join(", ")} as static HTML: package client components cannot be isolated yet.`,
+      );
+    }
+    for (const { entry, metadata } of [...layoutEntries, ...routeEntries]) {
+      if (isFarmMarkdownPageFile(entry.modulePath) || !metadata.staticPackageBoundaries) continue;
+      logger.info(
+        `[Farm.js] ${entry.pattern} is async, so it renders client components from ${metadata.staticPackageBoundaries.join(", ")} as static HTML: package client components cannot be isolated yet.`,
+      );
+    }
 
     enforceFarmIsolatedHydrationRouteBudget(
       layoutEntries.map(({ entry, metadata }) => ({
@@ -695,6 +772,9 @@ export class RouteManager {
           islandStrategy: metadata.islandStrategy,
         }),
         suppressedAsyncHydration: metadata.suppressedAsyncHydration,
+        ...(metadata.suppressedAsyncHydration && metadata.fallbackReason
+          ? { suppressedAsyncHydrationReason: metadata.fallbackReason }
+          : {}),
         search: getProgrammaticRouteSearchClientOptions(programmaticPage?.search),
         segments: entry.route.segments.map((seg) => ({
           segment: seg.segment,
@@ -719,6 +799,10 @@ export class RouteManager {
               modulePath: toUrlPath(boundary.modulePath),
             })),
           }
+        : {}),
+      suppressedAsyncHydration: metadata.suppressedAsyncHydration,
+      ...(metadata.suppressedAsyncHydration && metadata.fallbackReason
+        ? { suppressedAsyncHydrationReason: metadata.fallbackReason }
         : {}),
     }));
 
@@ -755,6 +839,24 @@ export class RouteManager {
     return manifest;
   }
 
+  /**
+   * Rebuild route metadata transactionally for HMR. If a file is temporarily
+   * invalid while it is being edited, keep the last usable plan so unrelated
+   * updates and the next repair can still compare against it.
+   *
+   * @internal
+   */
+  regenerateClientManifest(projectRoot: string = this.config.root): FarmClientRouteManifest {
+    const previousCache = this.clientManifestCache;
+    this.clientManifestCache = undefined;
+    try {
+      return this.generateClientManifest(projectRoot);
+    } catch (error) {
+      this.clientManifestCache = previousCache;
+      throw error;
+    }
+  }
+
   /** @internal Client modules selected by the compiled hydration ownership plan. */
   getIsolatedClientBoundaryModules(projectRoot: string = this.config.root): ReadonlySet<string> {
     const normalizedProjectRoot = path.resolve(projectRoot);
@@ -786,7 +888,7 @@ export class RouteManager {
         const components = await loadFarmMdxComponents(mdxConfig, {
           root: this.config.root,
           loadModule: this.viteServer
-            ? (componentModulePath) => this.viteServer!.ssrLoadModule(componentModulePath)
+            ? (componentModulePath) => loadFarmDevModule(this.viteServer!, componentModulePath)
             : undefined,
         });
         return await createFarmMarkdownRouteModuleFromFile(modulePath, {
@@ -796,7 +898,7 @@ export class RouteManager {
       }
 
       if (this.viteServer) {
-        const module = await this.viteServer.ssrLoadModule(modulePath);
+        const module = await loadFarmDevModule(this.viteServer, modulePath);
         return module as RouteModule;
       } else {
         const module = await import(/* @vite-ignore */ modulePath);
@@ -820,7 +922,7 @@ export class RouteManager {
       }
 
       if (this.viteServer) {
-        const module = await this.viteServer.ssrLoadModule(modulePath);
+        const module = await loadFarmDevModule(this.viteServer, modulePath);
         return module as LayoutModule;
       } else {
         const module = await import(/* @vite-ignore */ modulePath);
@@ -887,7 +989,10 @@ export class RouteManager {
       `**/{opengraph-image,twitter-image}.{${componentGlob},png,jpg,jpeg,gif,webp}`,
       appDir,
     );
-    const metadataRouteFiles = await safeGlobFiles("**/{sitemap,robots,manifest}.{ts,js}", appDir);
+    const metadataRouteFiles = await safeGlobFiles(
+      "**/{sitemap,robots,manifest,llms,llms-full}.{ts,js}",
+      appDir,
+    );
 
     const canonicalPageGroups = new Map<
       string,
@@ -1138,25 +1243,23 @@ export class RouteManager {
   private async loadProgrammaticRoutesModule(filePath: string): Promise<Record<string, any>> {
     if (this.viteServer) {
       const viteRoot = this.viteServer.config?.root || this.config.root || process.cwd();
-      return await this.viteServer.ssrLoadModule(toViteModuleId(filePath, viteRoot));
+      return await loadFarmDevModule(this.viteServer, toViteModuleId(filePath, viteRoot));
     }
 
-    const fileUrl = `file://${filePath}`;
-    return await import(/* @vite-ignore */ fileUrl);
+    return await import(/* @vite-ignore */ toFileModuleUrl(filePath));
   }
 
   /**
    * Find all layouts that should wrap a given path
    */
-  private findMatchingLayouts(pathname: string): RouteEntry[] {
+  private findMatchingLayouts(
+    pathname: string,
+    pathnameParts = splitRoutePath(pathname),
+  ): RouteEntry[] {
     const matchingLayouts: RouteEntry[] = [];
 
-    const sortedLayouts = Array.from(this.layouts.values()).sort((a, b) => {
-      return a.route.segments.length - b.route.segments.length;
-    });
-
-    for (const layoutEntry of sortedLayouts) {
-      if (matchRoutePrefix(pathname, layoutEntry.route.segments)) {
+    for (const layoutEntry of this.orderedLayouts) {
+      if (matchRoutePrefixParts(pathnameParts, layoutEntry.route.segments)) {
         matchingLayouts.push(layoutEntry);
       }
     }
@@ -1164,10 +1267,14 @@ export class RouteManager {
     return matchingLayouts;
   }
 
-  private findMatchingRouteSlots(pathname: string, interceptFrom?: string): MatchedRouteSlot[] {
+  private findMatchingRouteSlots(
+    pathname: string,
+    pathnameParts: readonly string[],
+    interceptFrom?: string,
+  ): MatchedRouteSlot[] {
     const groups = new Map<string, RouteSlotEntry[]>();
     for (const entry of this.routeSlots.values()) {
-      if (!this.matchesRoutePrefix(pathname, entry.ownerPattern)) continue;
+      if (!this.matchesRoutePrefix(pathname, entry.ownerPattern, pathnameParts)) continue;
       const key = `${entry.ownerPattern}:${entry.name}`;
       const entries = groups.get(key) ?? [];
       entries.push(entry);
@@ -1177,6 +1284,7 @@ export class RouteManager {
     const normalizedFrom = interceptFrom
       ? this.toRoutePathname(new URL(interceptFrom, "http://farm.local").pathname)
       : undefined;
+    const normalizedFromParts = normalizedFrom ? splitRoutePath(normalizedFrom) : undefined;
     const matches: MatchedRouteSlot[] = [];
 
     for (const entries of groups.values()) {
@@ -1186,11 +1294,11 @@ export class RouteManager {
           (entry) =>
             !entry.interception ||
             (normalizedFrom !== undefined &&
-              this.matchesRoutePrefix(normalizedFrom, entry.ownerPattern)),
+              this.matchesRoutePrefix(normalizedFrom, entry.ownerPattern, normalizedFromParts)),
         )
         .map((entry) => ({
           entry,
-          match: matchRoute(pathname, entry.route.segments),
+          match: matchRouteParts(pathnameParts, entry.route.segments),
         }))
         .filter((candidate) => candidate.match.matches)
         .sort((left, right) => {
@@ -1234,10 +1342,15 @@ export class RouteManager {
     });
   }
 
-  private matchesRoutePrefix(pathname: string, pattern: string): boolean {
+  private matchesRoutePrefix(
+    pathname: string,
+    pattern: string,
+    pathnameParts: readonly string[] = splitRoutePath(pathname),
+  ): boolean {
     if (pattern === "/") return true;
-    const patternSegments = parseRoutePath(`${pattern}/page.tsx`).segments;
-    return matchRoutePrefix(pathname, patternSegments);
+    const patternSegments =
+      this.routeSlotOwnerSegments.get(pattern) ?? parseRoutePath(`${pattern}/page.tsx`).segments;
+    return matchRoutePrefixParts(pathnameParts, patternSegments);
   }
 
   private findNearestBoundary(
@@ -1323,7 +1436,10 @@ export class RouteManager {
 
   private toRoutePathname(pathname: string): string {
     const i18n = this.getI18nConfig();
-    return i18n ? stripFarmLocaleFromPathname(pathname, i18n) : pathname;
+    // Locale stripping removes the basePath too; production strips it the same way.
+    return i18n
+      ? stripFarmLocaleFromPathname(pathname, i18n)
+      : stripFarmBasePath(pathname, this.config.basePath);
   }
 
   private localizeRedirectDestination(destination: string, locale?: string): string {
@@ -1426,6 +1542,12 @@ function getApplicationMetadataRouteDescriptor(fileName: string): {
   if (fileName === "manifest") {
     return { kind: "manifest", fileName: "manifest", outputName: "manifest.webmanifest" };
   }
+  if (fileName === "llms") {
+    return { kind: "llms", fileName: "llms", outputName: "llms.txt" };
+  }
+  if (fileName === "llms-full") {
+    return { kind: "llms-full", fileName: "llms-full", outputName: "llms-full.txt" };
+  }
   return null;
 }
 
@@ -1433,7 +1555,7 @@ function getApplicationMetadataRouteSuffix(pathname: string): {
   kind: ApplicationMetadataRouteKind;
   outputName: ApplicationMetadataRouteEntry["outputName"];
 } | null {
-  for (const fileName of ["sitemap", "robots", "manifest"] as const) {
+  for (const fileName of ["sitemap", "robots", "manifest", "llms", "llms-full"] as const) {
     const descriptor = getApplicationMetadataRouteDescriptor(fileName)!;
     if (
       pathname === `/${descriptor.outputName}` ||

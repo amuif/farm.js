@@ -1,10 +1,14 @@
+import { observeWeakMapSets } from "./observe-weak-map-sets";
 import React, { StrictMode, useState } from "react";
 import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCompiledComponent,
+  createCompilerKeyedArrayMapReorder,
+  createCompilerKeyedArrayQueuedMapPipeline,
   createCompilerKeyedArrayReorder,
   createCompilerKeyedArraySort,
   type CompilerKeyedRowElement,
@@ -70,7 +74,13 @@ function rowDescriptor(item: Item): CompilerKeyedRowElement {
   };
 }
 
-function createSortHarness(initialItems: Item[], readsCollection = false) {
+function createSortHarness(
+  initialItems: Item[],
+  readsCollection = false,
+  reactivity?: "static" | "hybrid",
+  delegateEvents = false,
+) {
+  const calls: string[] = [];
   const counters = {
     executions: 0,
     renders: 0,
@@ -79,6 +89,7 @@ function createSortHarness(initialItems: Item[], readsCollection = false) {
     bindings: 0,
   };
   let sort: (compare: (left: Item, right: Item) => number) => void = () => undefined;
+  let editAndSort: (compare: (left: Item, right: Item) => number) => void = () => undefined;
   let queueSorts: (compares: Array<(left: Item, right: Item) => number>) => void = () => undefined;
   let queueTwo: () => void = () => undefined;
   let plainThenSort: () => void = () => undefined;
@@ -92,11 +103,26 @@ function createSortHarness(initialItems: Item[], readsCollection = false) {
   let mismatchedSort: () => void = () => undefined;
   const Table = createCompiledComponent({
     displayName: "SortTable",
+    reactivity,
     initialize: () => [initialItems],
-    render(_props: Record<string, never>, state, blocks) {
+    render(props: { onRowClick?: (item: Item, index: number) => void }, state, blocks) {
       counters.executions += 1;
       const items = () => state[0].get() as Item[];
       sort = (compare) => state[0].set((previous) => hintedSort(previous as Item[], compare));
+      editAndSort = (compare) => {
+        state[0].set((previous) => {
+          const source = previous as Item[];
+          return createCompilerKeyedArrayQueuedMapPipeline(source, (current, applyMap) =>
+            applyMap(current, source.map, (item: Item) =>
+              item.id === "row-0" ? { ...item, label: `${item.label}!` } : item,
+            ),
+          );
+        });
+        state[0].set((previous) => {
+          const source = previous as SortableArray;
+          return createCompilerKeyedArrayMapReorder(source, source.toSorted, compare);
+        });
+      };
       queueSorts = (compares) => {
         for (const compare of compares) {
           state[0].set((previous) => hintedSort(previous as Item[], compare));
@@ -184,7 +210,23 @@ function createSortHarness(initialItems: Item[], readsCollection = false) {
         <section>
           <blocks.KeyedRows
             collectionDependency={0}
+            delegateEvents={delegateEvents}
             dependencies={[0]}
+            events={
+              delegateEvents
+                ? [
+                    {
+                      name: "onClick",
+                      path: [],
+                      invoke: (item, index) => {
+                        const row = item as Item;
+                        calls.push(`${row.id}:${row.label}:${index}`);
+                        props.onRowClick?.(row, index);
+                      },
+                    },
+                  ]
+                : undefined
+            }
             id={0}
             items={items}
             reorderIndexIndependent
@@ -228,7 +270,10 @@ function createSortHarness(initialItems: Item[], readsCollection = false) {
   });
   return {
     Table,
+    calls,
     counters,
+    captureSort: () => sort,
+    editAndSort: (compare: (left: Item, right: Item) => number) => editAndSort(compare),
     customSort: () => customSort(),
     customSortThenReversePipeline: () => customSortThenReversePipeline(),
     mismatchedSort: () => mismatchedSort(),
@@ -264,7 +309,487 @@ function lisLength(sequence: readonly number[]): number {
   return tails.length;
 }
 
+function trackRowIndexWrites() {
+  const writes = { count: 0 };
+  observeWeakMapSets((key, value) => {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      "element" in value &&
+      value.element === key
+    ) {
+      writes.count += 1;
+    }
+  });
+  return writes;
+}
+
 describe("compiled keyed-array sort hints", () => {
+  for (const reactivity of ["static", "hybrid"] as const) {
+    it.each(["batched", "parent-first", "local-first"] as const)(
+      `keeps delegated callbacks current across %s parent updates in ${reactivity}`,
+      async (ordering) => {
+        const initialItems = Array.from(
+          { length: 16 },
+          (_, index): Item => ({
+            id: `row-${index}`,
+            label: `Row ${index}`,
+            rank: (index * 5) % 16,
+          }),
+        );
+        const harness = createSortHarness(initialItems, false, reactivity, true);
+        const compiledCalls: string[] = [];
+        const normalCalls: string[] = [];
+        let setVersion: React.Dispatch<React.SetStateAction<number>> = () => undefined;
+        let updateNormal: (compare: (left: Item, right: Item) => number) => void = () => undefined;
+        function NormalTable({ version }: { version: number }) {
+          const [items, setItems] = useState(initialItems);
+          updateNormal = (compare) => {
+            setItems((previous) =>
+              previous.map((item) =>
+                item.id === "row-0" ? { ...item, label: `${item.label}!` } : item,
+              ),
+            );
+            setItems((previous) => previous.toSorted(compare));
+          };
+          return (
+            <ul>
+              {items.map((item, index) => (
+                <li
+                  data-key={item.id}
+                  key={item.id}
+                  onClick={() => normalCalls.push(`${version}:${item.id}:${item.label}:${index}`)}
+                >
+                  {item.label}
+                </li>
+              ))}
+            </ul>
+          );
+        }
+        function Parent() {
+          const [version, updateVersion] = useState(0);
+          setVersion = updateVersion;
+          return (
+            <>
+              <div data-compiled>
+                <harness.Table
+                  onRowClick={(item, index) =>
+                    compiledCalls.push(`${version}:${item.id}:${item.label}:${index}`)
+                  }
+                />
+              </div>
+              <div data-control>
+                <NormalTable version={version} />
+              </div>
+            </>
+          );
+        }
+        const container = document.createElement("div");
+        document.body.append(container);
+        const root = createRoot(container);
+        roots.push(root);
+        await act(async () =>
+          root.render(
+            <StrictMode>
+              <Parent />
+            </StrictMode>,
+          ),
+        );
+        const compiledContainer = container.querySelector("[data-compiled]")!;
+        const normalContainer = container.querySelector("[data-control]")!;
+        const rows = new Map(
+          [...compiledContainer.querySelectorAll("li")].map((row) => [
+            row.getAttribute("data-key"),
+            row,
+          ]),
+        );
+        const moves = vi.spyOn(compiledContainer.querySelector("ul")!, "insertBefore");
+        const writes = trackRowIndexWrites();
+        const renders = harness.counters.renders;
+        let expectedItems = initialItems;
+        for (const version of [1, 2]) {
+          const compare =
+            version === 1
+              ? (left: Item, right: Item) => right.rank - left.rank
+              : (left: Item, right: Item) => left.rank - right.rank;
+          // The second commit has no parent update and must retain the fast path.
+          for (const parentUpdate of [true, false]) {
+            const previousIndices = new Map(expectedItems.map((item, index) => [item.id, index]));
+            const localCompare = parentUpdate
+              ? compare
+              : (left: Item, right: Item) => -compare(left, right);
+            expectedItems = expectedItems
+              .map((item) => (item.id === "row-0" ? { ...item, label: `${item.label}!` } : item))
+              .toSorted(localCompare);
+            const before = { ...harness.counters };
+            moves.mockClear();
+            writes.count = 0;
+            const updateRows = () => {
+              harness.editAndSort(localCompare);
+              updateNormal(localCompare);
+            };
+            await act(async () => {
+              if (!parentUpdate) updateRows();
+              else if (ordering === "parent-first") {
+                flushSync(() => setVersion(version));
+                updateRows();
+              } else if (ordering === "local-first") {
+                updateRows();
+                flushSync(() => setVersion(version));
+              } else {
+                setVersion(version);
+                updateRows();
+              }
+              await flushCompilerUpdates();
+            });
+            expect(itemLabels(compiledContainer)).toEqual(expectedItems.map((item) => item.label));
+            expect(itemLabels(compiledContainer)).toEqual(itemLabels(normalContainer));
+            const currentRows = [...compiledContainer.querySelectorAll("li")];
+            currentRows.forEach((row, index) =>
+              expect(row).toBe(rows.get(expectedItems[index].id)),
+            );
+            expect(moves).toHaveBeenCalledTimes(
+              expectedItems.length -
+                lisLength(expectedItems.map((item) => previousIndices.get(item.id)!)),
+            );
+            expect(harness.counters.renders).toBe(renders);
+            expect(harness.counters.descriptors).toBe(before.descriptors);
+            if (parentUpdate) {
+              expect(harness.counters.executions).toBeGreaterThan(before.executions);
+            } else {
+              expect(harness.counters).toEqual({
+                ...before,
+                keys: before.keys + 1,
+                bindings: before.bindings + 1,
+              });
+              expect(writes.count).toBe(0);
+            }
+            compiledCalls.length = 0;
+            normalCalls.length = 0;
+            await act(async () => {
+              currentRows.forEach((row) => row.click());
+              normalContainer.querySelectorAll("li").forEach((row) => row.click());
+            });
+            expect(compiledCalls).toEqual(
+              expectedItems.map((item, index) => `${version}:${item.id}:${item.label}:${index}`),
+            );
+            expect(compiledCalls).toEqual(normalCalls);
+          }
+        }
+      },
+    );
+
+    it.each(["hydration", "remount"] as const)(
+      `preserves retained delegated lookups through StrictMode %s in ${reactivity}`,
+      async (lifecycle) => {
+        const initialItems = Array.from(
+          { length: 16 },
+          (_, index): Item => ({
+            id: `row-${index}`,
+            label: `Row ${index}`,
+            rank: (index * 5) % 16,
+          }),
+        );
+        const harness = createSortHarness(initialItems, false, reactivity, true);
+        const container = document.createElement("div");
+        document.body.append(container);
+        const initialTree = (
+          <StrictMode>
+            <harness.Table key="initial" />
+          </StrictMode>
+        );
+        const recoverableError = vi.fn();
+        let initialRows: Element[] = [];
+        if (lifecycle === "hydration") {
+          container.innerHTML = renderToString(initialTree);
+          initialRows = [...container.querySelectorAll("li")];
+        }
+        let root!: Root;
+        await act(async () => {
+          root =
+            lifecycle === "hydration"
+              ? hydrateRoot(container, initialTree, { onRecoverableError: recoverableError })
+              : createRoot(container);
+          roots.push(root);
+          if (lifecycle === "remount") root.render(initialTree);
+          await flushCompilerUpdates();
+        });
+        expect(recoverableError).not.toHaveBeenCalled();
+        if (lifecycle === "hydration") {
+          [...container.querySelectorAll("li")].forEach((row, index) => {
+            expect(row).toBe(initialRows[index]);
+          });
+        } else {
+          initialRows = [...container.querySelectorAll("li")];
+          const previousList = container.querySelector("ul")!;
+          const oldMoves = vi.spyOn(previousList, "insertBefore");
+          const staleSort = harness.captureSort();
+          await act(async () => {
+            // Replace the owner synchronously before its queued compiler flush.
+            harness.editAndSort((left, right) => right.rank - left.rank);
+            flushSync(() =>
+              root.render(
+                <StrictMode>
+                  <harness.Table key="replacement" />
+                </StrictMode>,
+              ),
+            );
+            await flushCompilerUpdates();
+          });
+          expect(itemLabels(container)).toEqual(initialItems.map((item) => item.label));
+          [...container.querySelectorAll("li")].forEach((row, index) => {
+            expect(row).not.toBe(initialRows[index]);
+            expect(initialRows[index].isConnected).toBe(false);
+          });
+          const afterRemount = { ...harness.counters };
+          await act(async () => {
+            staleSort((left, right) => right.rank - left.rank);
+            for (const row of initialRows) (row as HTMLElement).click();
+            await flushCompilerUpdates();
+          });
+          expect(oldMoves).not.toHaveBeenCalled();
+          expect(harness.counters).toEqual(afterRemount);
+          expect(harness.calls).toEqual([]);
+          expect(itemLabels(container)).toEqual(initialItems.map((item) => item.label));
+        }
+
+        const rows = new Map(
+          [...container.querySelectorAll("li")].map((row) => [row.getAttribute("data-key"), row]),
+        );
+        const moves = vi.spyOn(container.querySelector("ul")!, "insertBefore");
+        const writes = trackRowIndexWrites();
+        const executions = harness.counters.executions;
+        const renders = harness.counters.renders;
+        let expectedItems = initialItems;
+        for (const action of ["sort", "editAndSort", "sort"] as const) {
+          const compare =
+            action === "editAndSort"
+              ? (left: Item, right: Item) => left.rank - right.rank
+              : (left: Item, right: Item) => right.rank - left.rank;
+          const previousIndices = new Map(expectedItems.map((item, index) => [item.id, index]));
+          if (action === "editAndSort") {
+            expectedItems = expectedItems.map((item) =>
+              item.id === "row-0" ? { ...item, label: `${item.label}!` } : item,
+            );
+          }
+          expectedItems = expectedItems.toSorted(compare);
+          const expectedMoves =
+            expectedItems.length -
+            lisLength(expectedItems.map((item) => previousIndices.get(item.id)!));
+          moves.mockClear();
+          writes.count = 0;
+          harness.counters.keys = 0;
+          harness.counters.bindings = 0;
+          harness.counters.descriptors = 0;
+          harness.calls.length = 0;
+          await act(async () => {
+            harness[action](compare);
+            await flushCompilerUpdates();
+          });
+          expect(itemLabels(container)).toEqual(expectedItems.map((item) => item.label));
+          const currentRows = [...container.querySelectorAll("li")];
+          currentRows.forEach((row, index) => expect(row).toBe(rows.get(expectedItems[index].id)));
+          expect(moves).toHaveBeenCalledTimes(expectedMoves);
+          expect(writes.count).toBe(0);
+          expect(harness.counters).toEqual({
+            executions,
+            renders,
+            keys: action === "editAndSort" ? 1 : 0,
+            bindings: action === "editAndSort" ? 1 : 0,
+            descriptors: 0,
+          });
+          await act(async () => currentRows.forEach((row) => row.click()));
+          expect(harness.calls).toEqual(
+            expectedItems.map((item, index) => `${item.id}:${item.label}:${index}`),
+          );
+          expect(recoverableError).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each(["sort", "queueSorts", "reorderPipeline", "editAndSort"] as const)(
+      `retains owned row maps and delegated lookups after %s in ${reactivity}`,
+      async (action) => {
+        const initialItems = Array.from(
+          { length: 128 },
+          (_, index): Item => ({
+            id: `row-${index}`,
+            label: `Row ${index}`,
+            rank: (index * 37) % 128,
+          }),
+        );
+        const harness = createSortHarness(initialItems, false, reactivity, true);
+        const container = document.createElement("div");
+        document.body.append(container);
+        const root = createRoot(container);
+        roots.push(root);
+        await act(async () => root.render(<harness.Table />));
+        const rows = new Map(
+          [...container.querySelectorAll("li")].map((row) => [row.getAttribute("data-key"), row]),
+        );
+        const insertBefore = vi.spyOn(container.querySelector("ul")!, "insertBefore");
+        const indexWrites = trackRowIndexWrites();
+        let rowMapCopies = 0;
+        const originalIterator = Map.prototype[Symbol.iterator];
+        vi.spyOn(Map.prototype, Symbol.iterator).mockImplementation(
+          function (this: Map<string, { element?: Element }>) {
+            if (
+              this.size === initialItems.length &&
+              this.get("row-0")?.element === rows.get("row-0")
+            ) {
+              rowMapCopies += 1;
+            }
+            return originalIterator.call(this);
+          },
+        );
+
+        const compares = [
+          (left: Item, right: Item) => left.rank - right.rank,
+          // Sorting an already sorted collection must not move or reindex rows.
+          (left: Item, right: Item) => left.rank - right.rank,
+          (left: Item, right: Item) => right.rank - left.rank,
+          // Equal ranks must preserve the native stable ordering from the previous commit.
+          (left: Item, right: Item) => (left.rank % 7) - (right.rank % 7),
+        ];
+        let expectedItems = initialItems;
+        for (const compare of compares) {
+          const previousIndices = new Map(expectedItems.map((item, index) => [item.id, index]));
+          const opposite = (left: Item, right: Item) => -compare(left, right);
+          if (action === "editAndSort") {
+            expectedItems = expectedItems.map((item) =>
+              item.id === "row-0" ? { ...item, label: `${item.label}!` } : item,
+            );
+          } else if (action === "queueSorts") {
+            expectedItems = expectedItems.toSorted(opposite);
+          } else if (action === "reorderPipeline") {
+            expectedItems = expectedItems.toReversed();
+          }
+          expectedItems = expectedItems.toSorted(compare);
+          const expectedMoves =
+            expectedItems.length -
+            lisLength(expectedItems.map((item) => previousIndices.get(item.id)!));
+          rowMapCopies = 0;
+          indexWrites.count = 0;
+          harness.counters.keys = 0;
+          harness.counters.descriptors = 0;
+          harness.counters.bindings = 0;
+          insertBefore.mockClear();
+
+          await act(async () => {
+            if (action === "queueSorts") harness.queueSorts([opposite, compare]);
+            else if (action === "reorderPipeline") {
+              harness.reorderPipeline([{ kind: "reverse" }, { kind: "sort", compare }]);
+            } else harness[action](compare);
+            await flushCompilerUpdates();
+          });
+
+          expect(itemLabels(container)).toEqual(expectedItems.map((item) => item.label));
+          const currentRows = [...container.querySelectorAll("li")];
+          currentRows.forEach((row, index) => expect(row).toBe(rows.get(expectedItems[index].id)));
+          expect(insertBefore).toHaveBeenCalledTimes(expectedMoves);
+          expect(harness.counters).toEqual({
+            executions: 1,
+            renders: 1,
+            keys: action === "editAndSort" ? 1 : 0,
+            descriptors: 0,
+            bindings: action === "editAndSort" ? 1 : 0,
+          });
+          expect(rowMapCopies).toBe(0);
+          expect(indexWrites.count).toBe(0);
+          harness.calls.length = 0;
+          const clickedIndices = [
+            ...new Set([0, 63, 127, expectedItems.findIndex((item) => item.id === "row-0")]),
+          ];
+          await act(async () => {
+            for (const index of clickedIndices) currentRows[index].click();
+          });
+          expect(harness.calls).toEqual(
+            clickedIndices.map((index) => {
+              const item = expectedItems[index];
+              return `${item.id}:${item.label}:${index}`;
+            }),
+          );
+        }
+      },
+    );
+
+    it.each(["customSort", "mismatchedSort"] as const)(
+      `rebuilds delegated lookups for %s between native sorts in ${reactivity}`,
+      async (action) => {
+        const initialItems = Array.from(
+          { length: 16 },
+          (_, index): Item => ({
+            id: `row-${index}`,
+            label: `Row ${index}`,
+            rank: (index * 5) % 16,
+          }),
+        );
+        const harness = createSortHarness(initialItems, false, reactivity, true);
+        const container = document.createElement("div");
+        document.body.append(container);
+        const root = createRoot(container);
+        roots.push(root);
+        await act(async () => root.render(<harness.Table />));
+        const writes = trackRowIndexWrites();
+        await act(async () => {
+          harness.sort((left, right) => right.rank - left.rank);
+          await flushCompilerUpdates();
+        });
+        expect(writes.count).toBe(0);
+        let expectedItems = initialItems.toSorted((left, right) => left.rank - right.rank);
+        const previousRows = [...container.querySelectorAll("li")];
+        harness.counters.keys = 0;
+
+        await act(async () => {
+          harness[action]();
+          await flushCompilerUpdates();
+        });
+        // The general reconcile indexes only the rows it creates.
+        expect(writes.count).toBe(action === "mismatchedSort" ? 1 : 0);
+        expect(harness.counters.keys).toBeGreaterThan(0);
+        if (action === "mismatchedSort") {
+          expectedItems[0] = { ...expectedItems[0], id: `${expectedItems[0].id}-replacement` };
+          expect(previousRows.at(-1)!.isConnected).toBe(false);
+          expect(container.querySelector("li")).not.toBe(previousRows.at(-1));
+          await act(async () => previousRows.at(-1)!.click());
+          expect(harness.calls).toEqual([]);
+        }
+        const fallbackRows = [...container.querySelectorAll("li")];
+        fallbackRows.forEach((row, index) => {
+          if (action === "customSort" || index > 0) expect(row).toBe(previousRows.at(-index - 1));
+        });
+        await act(async () => {
+          for (const row of fallbackRows) row.click();
+        });
+        expect(harness.calls).toEqual(
+          expectedItems.map((item, index) => `${item.id}:${item.label}:${index}`),
+        );
+
+        writes.count = 0;
+        harness.counters.keys = 0;
+        harness.calls.length = 0;
+        await act(async () => {
+          harness.sort((left, right) => right.rank - left.rank);
+          await flushCompilerUpdates();
+        });
+        expectedItems = expectedItems.toSorted((left, right) => right.rank - left.rank);
+        const currentRows = [...container.querySelectorAll("li")];
+        currentRows.forEach((row, index) => expect(row).toBe(fallbackRows.at(-index - 1)));
+        expect(itemLabels(container)).toEqual(expectedItems.map((item) => item.label));
+        expect(writes.count).toBe(0);
+        expect(harness.counters.keys).toBe(0);
+        expect(harness.counters.executions).toBe(1);
+        expect(harness.counters.renders).toBe(1);
+        await act(async () => {
+          for (const row of currentRows) row.click();
+        });
+        expect(harness.calls).toEqual(
+          expectedItems.map((item, index) => `${item.id}:${item.label}:${index}`),
+        );
+      },
+    );
+  }
+
   stressIt(
     "sorts 4,096 rows with minimum DOM moves and no key, descriptor, or binding reads",
     async () => {

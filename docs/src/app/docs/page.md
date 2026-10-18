@@ -66,7 +66,8 @@ Cache, PPR, observability, instant preview, and deployment output.
 - [Post-response Work](/docs/after): Schedule short server work with after() without delaying the response.
 - [Cache and PPR](/docs/cache-ppr): Use shared runtime cache helpers, tag/path invalidation, ISR-style revalidation, and static shell caching for PPR pages.
 - [Observability](/docs/observability): Export OpenTelemetry traces and consume correlated Farm runtime events in development and production.
-- [DevTools and Doctor](/docs/devtools): Inspect the resolved app runtime in the browser and run the same diagnostics from the terminal or CI.
+- [Built-in DevTools](/docs/devtools): Inspect the resolved app runtime in the browser during development.
+- [Doctor](/docs/doctor): Run the same runtime diagnostics from the terminal or CI, against a live app or offline.
 - [Cron](/docs/cron): Map portable UTC schedules to ordinary API routes, run them locally, and compile them to deployment-native triggers.
 - [Instant Preview](/docs/preview): Expose the current local app through a public URL for sharing, webhooks, OAuth callbacks, and external testing.
 - [Deployment](/docs/deployment): Build deployable output with Farm's deploy config and Nitro presets, from first-class targets to custom Nitro output.
@@ -84,9 +85,11 @@ Docs runtime, markdown mirrors, and OpenAPI.
 Plugin system and lifecycle hooks.
 
 - [Plugin Ecosystem](/docs/plugins): Extend server and browser behavior across config, requests, routing, rendering, hydration, navigation, builds, and HMR.
+- [API MCP Plugin](/docs/plugins/mcp): Expose opted-in typed API routes as authenticated MCP tools over Streamable HTTP.
 - [Hints Plugin](/docs/plugins/hints): Find accessibility, Web Vitals, HTML, and third-party script problems on the route you are developing.
 - [Content Plugin](/docs/plugins/content): Validate local Markdown, MDX, JSON, and YAML as typed server collections without a second config file.
 - [Federation Plugin](/docs/plugins/federation): Publish and load independently deployed browser modules while Farm keeps server code and credentials isolated.
+- [Health Plugin](/docs/plugins/health): Expose dependency-aware liveness, readiness, and startup probes to hosting platforms.
 - [Partytown Plugin](/docs/plugins/partytown): Move explicitly opted-in analytics and tag-manager scripts into a web worker with typed callers.
 - [PWA Plugin](/docs/plugins/pwa): Generate a route-aware service worker with offline navigation, update prompts, and concise SWR image caching.
 - [Search Plugin](/docs/plugins/search): Build a chunked index from static pages and query it through a typed, renderer-neutral browser client.

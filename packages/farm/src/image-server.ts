@@ -5,6 +5,7 @@ import type {
   ResolvedFarmImageConfig,
 } from "./image-config";
 import { matchesFarmIfNoneMatch } from "./server-http";
+import { matchesImagePathPattern } from "./image-pattern";
 
 export interface FarmImageTransformInput {
   source: Uint8Array;
@@ -15,6 +16,12 @@ export interface FarmImageTransformInput {
   accept: string;
   formats: readonly FarmImageFormat[];
   signal: AbortSignal;
+  /**
+   * Byte ceiling for any source the transformer fetches itself. Supplied by the
+   * image handler; transformers that re-fetch the origin (Cloudflare) must
+   * enforce it, since they bypass the handler's bounded read.
+   */
+  maximumResponseBody?: number;
 }
 
 export interface FarmImageTransformResult {
@@ -32,11 +39,21 @@ export interface CreateFarmImageHandlerOptions {
   fetchRemote?: typeof globalThis.fetch;
   transform: FarmImageTransformer;
   validateRemoteUrl?: (url: URL) => void | Promise<void>;
+  /** Adapter-owned origin for local asset fetches. Never derive this from request headers. @internal */
+  trustedLocalOrigin?: string | URL | (() => string | URL | undefined);
   onError?: (error: unknown, request: Request) => void;
   cacheEntries?: number;
 }
 
-export type FarmImageHandler = (request: Request) => Promise<Response | null>;
+export interface FarmImageHandlerContext {
+  /** Adapter-owned origin for this request. Never derive this from request headers. @internal */
+  trustedLocalOrigin?: string | URL;
+}
+
+export type FarmImageHandler = (
+  request: Request,
+  context?: FarmImageHandlerContext,
+) => Promise<Response | null>;
 
 type OptimizedImage = FarmImageTransformResult & {
   etag: string;
@@ -71,14 +88,21 @@ export function createFarmImageHandler(
 ): FarmImageHandler {
   const fetcher = options.fetch ?? globalThis.fetch;
   const cache = new FarmImageMemoryCache(options.cacheEntries ?? 100);
+  // Identical concurrent misses share one fetch + transform. Without this a
+  // burst for an uncached image (a new page going live, a CDN cold start)
+  // fetches the origin and runs the codec once per request.
+  const inflight = new Map<string, InflightOptimization>();
   const allowedWidths = new Set([...config.deviceSizes, ...config.imageSizes]);
   const allowedQualities = new Set(config.qualities);
 
-  return async function handleFarmImage(request): Promise<Response | null> {
+  return async function handleFarmImage(request, context): Promise<Response | null> {
     const requestUrl = new URL(request.url);
     if (requestUrl.pathname !== config.path) return null;
 
     try {
+      const trustedLocalOrigin = resolveTrustedLocalOrigin(
+        context?.trustedLocalOrigin ?? options.trustedLocalOrigin,
+      );
       if (config.provider === "none") {
         throw new FarmImageRequestError(
           "DISALLOWED_SOURCE",
@@ -94,7 +118,12 @@ export function createFarmImageHandler(
         );
       }
 
-      const sourceUrl = await resolveImageSourceUrl(requestUrl, config, options.validateRemoteUrl);
+      const sourceUrl = await resolveImageSourceUrl(
+        requestUrl,
+        trustedLocalOrigin,
+        config,
+        options.validateRemoteUrl,
+      );
       const width = parseAllowedInteger(requestUrl.searchParams.get("w"), allowedWidths, "width");
       const quality = parseAllowedInteger(
         requestUrl.searchParams.get("q"),
@@ -102,50 +131,62 @@ export function createFarmImageHandler(
         "quality",
       );
       const accept = request.headers.get("accept") ?? "";
-      const cacheKey = `${sourceUrl.href}\n${width}\n${quality}\n${accept}`;
+      // Key on the format the Accept header negotiates to, not the header text.
+      // Both transformers derive their output from `selectOutputFormat(accept,
+      // formats)` alone, so every header that negotiates to the same format
+      // produces byte-identical output. Keying on the raw header let a caller
+      // vary it freely (`image/webp,*/*;q=0.8`, reordered lists, extra params)
+      // and force an uncached fetch and transform each time.
+      const negotiatedFormat = selectOutputFormat(accept, config.formats) ?? "";
+      const cacheKey = `${sourceUrl.href}\n${width}\n${quality}\n${negotiatedFormat}`;
       let optimized = cache.get(cacheKey);
 
       if (!optimized) {
-        const fetchedSource = await fetchImageSource(
-          sourceUrl,
-          requestUrl.origin,
-          config,
-          fetcher,
-          options.fetchRemote,
-          options.validateRemoteUrl,
-          request.signal,
-        );
-        const source = await readResponseWithLimit(
-          fetchedSource.response,
-          config.maximumResponseBody,
-        );
-        const sourceType = detectImageContentType(source);
-        validateSourceType(sourceType, config);
-        throwIfAborted(request.signal);
+        optimized = await runCoalesced(inflight, cacheKey, request.signal, async (signal) => {
+          const fetchedSource = await fetchImageSource(
+            sourceUrl,
+            requestUrl.origin,
+            trustedLocalOrigin,
+            config,
+            fetcher,
+            options.fetchRemote,
+            options.validateRemoteUrl,
+            signal,
+          );
+          const source = await readResponseWithLimit(
+            fetchedSource.response,
+            config.maximumResponseBody,
+          );
+          const sourceType = detectImageContentType(source);
+          validateSourceType(sourceType, config);
+          throwIfAborted(signal);
 
-        const result = await options.transform({
-          source,
-          sourceUrl: fetchedSource.url,
-          sourceType,
-          width,
-          quality,
-          accept,
-          formats: config.formats,
-          signal: request.signal,
+          const result = await options.transform({
+            source,
+            sourceUrl: fetchedSource.url,
+            sourceType,
+            width,
+            quality,
+            accept,
+            formats: config.formats,
+            signal,
+            maximumResponseBody: config.maximumResponseBody,
+          });
+          throwIfAborted(signal);
+          validateTransformedResult(result, config);
+
+          const entry = {
+            ...result,
+            etag: createImageEtag(result.body),
+            cacheControl: `public, max-age=${config.minimumCacheTTL}, stale-while-revalidate=${Math.max(
+              config.minimumCacheTTL,
+              60,
+            )}`,
+            expiresAt: Date.now() + config.minimumCacheTTL * 1_000,
+          };
+          cache.set(cacheKey, entry);
+          return entry;
         });
-        throwIfAborted(request.signal);
-        validateTransformedResult(result, config);
-
-        optimized = {
-          ...result,
-          etag: createImageEtag(result.body),
-          cacheControl: `public, max-age=${config.minimumCacheTTL}, stale-while-revalidate=${Math.max(
-            config.minimumCacheTTL,
-            60,
-          )}`,
-          expiresAt: Date.now() + config.minimumCacheTTL * 1_000,
-        };
-        cache.set(cacheKey, optimized);
       }
 
       return createOptimizedImageResponse(request, optimized, config);
@@ -162,13 +203,22 @@ export function createFarmImageHandler(
   };
 }
 
+/** Mirrors the `images.maximumResponseBody` default ("10mb"). */
+const DEFAULT_IMAGE_TRANSFORM_BODY_LIMIT = 10 * 1024 * 1024;
+
 export function createCloudflareImageTransformer(
   fetcher: typeof globalThis.fetch = globalThis.fetch,
 ): FarmImageTransformer {
-  return async ({ sourceUrl, width, quality, accept, formats, signal }) => {
+  return async ({ sourceUrl, width, quality, accept, formats, signal, maximumResponseBody }) => {
     const format = selectOutputFormat(accept, formats);
+    // Cloudflare resizing works by letting the edge fetch the origin, so this
+    // request cannot reuse the bytes the handler already read. It still must not
+    // be a weaker fetch than the validated one: `redirect: "manual"` keeps it
+    // from silently following a hop the handler never validated, and the body is
+    // read under the same ceiling as the handler's own read.
     const response = await fetcher(sourceUrl, {
       signal,
+      redirect: "manual",
       headers: { accept: "image/*" },
       cf: {
         image: {
@@ -180,6 +230,15 @@ export function createCloudflareImageTransformer(
       },
     } as RequestInit);
 
+    if (response.status >= 300 && response.status < 400) {
+      void cancelResponseBody(response);
+      throw new FarmImageRequestError(
+        "UNSUPPORTED_IMAGE",
+        502,
+        "Source image redirected after validation",
+      );
+    }
+
     if (!response.ok) {
       throw new FarmImageRequestError(
         "UNSUPPORTED_IMAGE",
@@ -188,7 +247,10 @@ export function createCloudflareImageTransformer(
       );
     }
 
-    const body = new Uint8Array(await response.arrayBuffer());
+    const body = await readResponseWithLimit(
+      response,
+      maximumResponseBody ?? DEFAULT_IMAGE_TRANSFORM_BODY_LIMIT,
+    );
     return {
       body,
       contentType:
@@ -233,18 +295,70 @@ export function selectOutputFormat(
   return selected;
 }
 
-export function isPrivateImageAddress(address: string): boolean {
-  const value = address.toLowerCase().replace(/^\[|\]$/g, "");
-  if (value === "::" || value === "::1") return true;
-  if (/^(?:fc|fd)[0-9a-f]{2}:/.test(value) || /^fe[89ab][0-9a-f]:/.test(value)) return true;
-  if (value.startsWith("::ffff:")) return isPrivateImageAddress(value.slice(7));
+/**
+ * Expand an IPv6 address into its eight 16-bit hextets, or null when the value
+ * is not a parseable IPv6 address.
+ *
+ * Textual comparison is not enough for this boundary: the same address has many
+ * spellings, and `new URL()` rewrites some of them. `::ffff:127.0.0.1` becomes
+ * `::ffff:7f00:1`, and `::1` may arrive fully expanded, so every form has to be
+ * reduced to numbers before any range check.
+ */
+function parseIpv6Hextets(value: string): number[] | null {
+  // Drop any zone index (fe80::1%eth0); it does not affect the address.
+  let text = value.split("%", 1)[0] ?? "";
+  if (!text.includes(":")) return null;
 
+  // A trailing dotted quad (::ffff:127.0.0.1) contributes the low two hextets.
+  let tail: number[] = [];
+  const lastColon = text.lastIndexOf(":");
+  const candidate = text.slice(lastColon + 1);
+  if (candidate.includes(".")) {
+    const octets = parseIpv4Octets(candidate);
+    if (!octets) return null;
+    tail = [(octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!];
+    text = text.slice(0, lastColon);
+    // "::1.2.3.4" leaves "::" here, and "1.2.3.4" alone leaves "" — not IPv6.
+    if (text === "") return null;
+  }
+
+  const compressionParts = text.split("::");
+  if (compressionParts.length > 2) return null;
+
+  const parseGroup = (group: string): number[] | null => {
+    if (group === "") return [];
+    const hextets: number[] = [];
+    for (const part of group.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+      hextets.push(Number.parseInt(part, 16));
+    }
+    return hextets;
+  };
+
+  const head = parseGroup(compressionParts[0] ?? "");
+  const rest = parseGroup(compressionParts[1] ?? "");
+  if (!head || !rest) return null;
+
+  const explicit = [...head, ...rest, ...tail];
+  if (compressionParts.length === 1) {
+    return explicit.length === 8 ? explicit : null;
+  }
+
+  // "::" stands for at least one zero hextet.
+  if (explicit.length >= 8) return null;
+  const zeros = Array.from({ length: 8 - explicit.length }, () => 0);
+  return [...head, ...zeros, ...rest, ...tail];
+}
+
+function parseIpv4Octets(value: string): number[] | null {
   const parts = value.split(".");
-  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return false;
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return null;
   const octets = parts.map(Number);
-  if (octets.some((part) => part > 255)) return false;
+  return octets.some((part) => part > 255) ? null : octets;
+}
 
-  const [a, b] = octets;
+function isPrivateIpv4(octets: readonly number[]): boolean {
+  const [a, b] = octets as [number, number];
   return (
     a === 0 ||
     a === 10 ||
@@ -256,6 +370,49 @@ export function isPrivateImageAddress(address: string): boolean {
     (a === 198 && (b === 18 || b === 19)) ||
     a >= 224
   );
+}
+
+export function isPrivateImageAddress(address: string): boolean {
+  const value = address
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+
+  const hextets = parseIpv6Hextets(value);
+  if (hextets) {
+    const [h0, h1, h2, h3, h4, h5, h6, h7] = hextets as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    const zeroPrefix = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0;
+
+    // An address that embeds IPv4 is only as safe as that IPv4 address:
+    // IPv4-mapped (::ffff:0:0/96), IPv4-translated (::ffff:0:0:0/96), and the
+    // deprecated IPv4-compatible (::/96) forms all reach the v4 host.
+    const embedsIpv4 =
+      zeroPrefix &&
+      ((h4 === 0 && h5 === 0xffff) || (h4 === 0xffff && h5 === 0) || (h4 === 0 && h5 === 0));
+    if (embedsIpv4 && (h6 !== 0 || h7 !== 0)) {
+      return isPrivateIpv4([h6 >> 8, h6 & 0xff, h7 >> 8, h7 & 0xff]);
+    }
+
+    // Unspecified (::) and loopback (::1) in any spelling.
+    if (zeroPrefix && h4 === 0 && h5 === 0 && h6 === 0 && (h7 === 0 || h7 === 1)) return true;
+    // Unique-local fc00::/7, link-local fe80::/10, multicast ff00::/8.
+    if ((h0 & 0xfe00) === 0xfc00) return true;
+    if ((h0 & 0xffc0) === 0xfe80) return true;
+    if ((h0 & 0xff00) === 0xff00) return true;
+    return false;
+  }
+
+  const octets = parseIpv4Octets(value);
+  return octets ? isPrivateIpv4(octets) : false;
 }
 
 function parseAllowedInteger(
@@ -279,6 +436,7 @@ function parseAllowedInteger(
 
 async function resolveImageSourceUrl(
   requestUrl: URL,
+  trustedLocalOrigin: string | undefined,
   config: ResolvedFarmImageConfig,
   validateRemoteUrl: CreateFarmImageHandlerOptions["validateRemoteUrl"],
 ): Promise<URL> {
@@ -289,18 +447,27 @@ async function resolveImageSourceUrl(
 
   let sourceUrl: URL;
   try {
-    sourceUrl = raw.startsWith("/") ? new URL(raw, requestUrl.origin) : new URL(raw);
+    sourceUrl = raw.startsWith("/")
+      ? new URL(raw, trustedLocalOrigin ?? requestUrl.origin)
+      : new URL(raw);
   } catch {
     throw new FarmImageRequestError("INVALID_PARAMETER", 400, "Invalid image source URL");
   }
 
-  await validateImageSourceUrl(sourceUrl, requestUrl.origin, config, validateRemoteUrl);
+  await validateImageSourceUrl(
+    sourceUrl,
+    requestUrl.origin,
+    trustedLocalOrigin,
+    config,
+    validateRemoteUrl,
+  );
   return sourceUrl;
 }
 
 async function validateImageSourceUrl(
   sourceUrl: URL,
   requestOrigin: string,
+  trustedLocalOrigin: string | undefined,
   config: ResolvedFarmImageConfig,
   validateRemoteUrl: CreateFarmImageHandlerOptions["validateRemoteUrl"],
 ): Promise<void> {
@@ -311,7 +478,9 @@ async function validateImageSourceUrl(
     throw new FarmImageRequestError("DISALLOWED_SOURCE", 400, "Unsafe image source URL");
   }
 
-  if (sourceUrl.origin === requestOrigin) {
+  const isLocalSource =
+    sourceUrl.origin === requestOrigin || sourceUrl.origin === trustedLocalOrigin;
+  if (isLocalSource) {
     if (
       sourceUrl.pathname === config.path ||
       !matchesLocalPatterns(sourceUrl, config.localPatterns)
@@ -322,10 +491,8 @@ async function validateImageSourceUrl(
         "Local image source is not allowed",
       );
     }
-    return;
-  }
-
-  if (!matchesRemoteSource(sourceUrl, config)) {
+    if (sourceUrl.origin === trustedLocalOrigin) return;
+  } else if (!matchesRemoteSource(sourceUrl, config)) {
     throw new FarmImageRequestError("DISALLOWED_SOURCE", 400, "Remote image source is not allowed");
   }
   if (!config.dangerouslyAllowLocalIP && isPrivateImageAddress(sourceUrl.hostname)) {
@@ -339,6 +506,7 @@ async function validateImageSourceUrl(
 async function fetchImageSource(
   initialUrl: URL,
   requestOrigin: string,
+  trustedLocalOrigin: string | undefined,
   config: ResolvedFarmImageConfig,
   fetcher: typeof globalThis.fetch,
   fetchRemote: typeof globalThis.fetch | undefined,
@@ -349,7 +517,8 @@ async function fetchImageSource(
 
   for (let redirectCount = 0; ; redirectCount += 1) {
     throwIfAborted(signal);
-    const sourceFetcher = currentUrl.origin === requestOrigin ? fetcher : (fetchRemote ?? fetcher);
+    const sourceFetcher =
+      currentUrl.origin === trustedLocalOrigin ? fetcher : (fetchRemote ?? fetcher);
     const response = await sourceFetcher(currentUrl, {
       method: "GET",
       redirect: "manual",
@@ -387,8 +556,95 @@ async function fetchImageSource(
     }
     await cancelResponseBody(response);
     currentUrl = new URL(location, currentUrl);
-    await validateImageSourceUrl(currentUrl, requestOrigin, config, validateRemoteUrl);
+    await validateImageSourceUrl(
+      currentUrl,
+      requestOrigin,
+      trustedLocalOrigin,
+      config,
+      validateRemoteUrl,
+    );
   }
+}
+
+function resolveTrustedLocalOrigin(
+  configured: CreateFarmImageHandlerOptions["trustedLocalOrigin"],
+): string | undefined {
+  const value = typeof configured === "function" ? configured() : configured;
+  if (!value) return undefined;
+
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new TypeError("trustedLocalOrigin must use http or https");
+  }
+  return url.origin;
+}
+
+type InflightOptimization = {
+  promise: Promise<OptimizedImage>;
+  controller: AbortController;
+  waiters: number;
+};
+
+/**
+ * Share one in-flight optimization between identical concurrent requests.
+ *
+ * The shared work runs under its own AbortController rather than any single
+ * request's signal, so one caller going away cannot cancel the image everyone
+ * else is waiting for. The controller is aborted only when the last waiter
+ * leaves, so an abandoned burst still stops promptly.
+ */
+async function runCoalesced(
+  inflight: Map<string, InflightOptimization>,
+  key: string,
+  requestSignal: AbortSignal,
+  run: (signal: AbortSignal) => Promise<OptimizedImage>,
+): Promise<OptimizedImage> {
+  let entry = inflight.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const created: InflightOptimization = {
+      controller,
+      waiters: 0,
+      promise: undefined as unknown as Promise<OptimizedImage>,
+    };
+    created.promise = run(controller.signal).finally(() => {
+      if (inflight.get(key) === created) inflight.delete(key);
+    });
+    // Every waiter can detach before the shared work settles: an already
+    // aborted request returns early without ever attaching to this promise,
+    // and the last waiter leaving aborts the controller. Keep one no-op
+    // handler so that rejection is never reported as unhandled. Waiters still
+    // observe it, because this does not replace the promise they await.
+    created.promise.catch(() => {});
+    inflight.set(key, created);
+    entry = created;
+  }
+
+  const pending = entry;
+  pending.waiters += 1;
+  try {
+    return await raceRequestAbort(pending.promise, requestSignal);
+  } finally {
+    pending.waiters -= 1;
+    if (pending.waiters === 0 && inflight.get(key) === pending) {
+      inflight.delete(key);
+      pending.controller.abort();
+    }
+  }
+}
+
+function raceRequestAbort(
+  promise: Promise<OptimizedImage>,
+  signal: AbortSignal,
+): Promise<OptimizedImage> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Aborted"));
+
+  return new Promise<OptimizedImage>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("Aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 async function readResponseWithLimit(response: Response, limit: number): Promise<Uint8Array> {
@@ -507,7 +763,7 @@ function matchesRemotePattern(url: URL, pattern: FarmImageRemotePattern): boolea
     (!pattern.protocol || url.protocol === `${pattern.protocol}:`) &&
     matchesHostname(url.hostname, pattern.hostname) &&
     (pattern.port === undefined || url.port === pattern.port) &&
-    matchesGlob(url.pathname, pattern.pathname ?? "/**") &&
+    matchesImagePathPattern(url.pathname, pattern) &&
     (pattern.search === undefined || url.search === pattern.search)
   );
 }
@@ -515,7 +771,7 @@ function matchesRemotePattern(url: URL, pattern: FarmImageRemotePattern): boolea
 function matchesLocalPatterns(url: URL, patterns: readonly FarmImageLocalPattern[]): boolean {
   return patterns.some(
     (pattern) =>
-      matchesGlob(url.pathname, pattern.pathname) &&
+      matchesImagePathPattern(url.pathname, pattern) &&
       (pattern.search === undefined || url.search === pattern.search),
   );
 }
@@ -533,12 +789,6 @@ function matchesHostname(hostname: string, pattern: string): boolean {
     return normalizedHostname.endsWith(`.${suffix}`) && !!prefix && !prefix.includes(".");
   }
   return normalizedHostname === normalizedPattern;
-}
-
-function matchesGlob(value: string, pattern: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-  const source = escaped.replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\0/g, ".*");
-  return new RegExp(`^${source}$`).test(value);
 }
 
 function createOptimizedImageResponse(

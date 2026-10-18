@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/integrations",
-  "version": "0.1.0-beta.95",
+  "version": "0.1.26",
   "description": "Compatibility package that re-exports official Farm.js integrations",
   "license": "MIT",
   "repository": {
@@ -104,6 +104,14 @@
       "types": "./dist/supabase/client.d.ts",
       "import": "./dist/supabase/client.js"
     },
+    "./sanity": {
+      "types": "./dist/sanity/index.d.ts",
+      "import": "./dist/sanity/index.js"
+    },
+    "./strapi": {
+      "types": "./dist/strapi/index.d.ts",
+      "import": "./dist/strapi/index.js"
+    },
     "./unkey": {
       "types": "./dist/unkey/index.d.ts",
       "import": "./dist/unkey/index.js"
@@ -130,6 +138,8 @@
     "@farm.js/integration-utils": "workspace:*",
     "@farm.js/jobs": "workspace:*",
     "@farm.js/polar": "workspace:*",
+    "@farm.js/sanity": "workspace:*",
+    "@farm.js/strapi": "workspace:*",
     "@farm.js/stripe": "workspace:*",
     "@farm.js/supabase": "workspace:*",
     "@farm.js/unkey": "workspace:*",

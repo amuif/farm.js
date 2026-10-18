@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -21,6 +22,7 @@ async function createFixture(externalRewriteOrigin?: string): Promise<string> {
   await fs.symlink(packageRoot, path.join(root, "node_modules", "@farm.js", "core"), "junction");
   await fs.mkdir(path.join(root, "src", "app", "static"), { recursive: true });
   await fs.mkdir(path.join(root, "src", "app", "refreshing"), { recursive: true });
+  await fs.mkdir(path.join(root, "src", "app", "refreshing-directive"), { recursive: true });
   await fs.mkdir(path.join(root, "src", "app", "blog", "[slug]"), { recursive: true });
   await fs.mkdir(path.join(root, "src", "app", "guarded"), { recursive: true });
   await fs.mkdir(path.join(root, "src", "app", "configured"), { recursive: true });
@@ -131,6 +133,15 @@ export const ssg = true;
 export const revalidate = 60;
 export default function RefreshingPage() {
   return <main data-rendered-at={Date.now()}>refreshing-page</main>;
+}
+`.trim(),
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "refreshing-directive", "page.tsx"),
+    `
+"use ssg; 60";
+export default function RefreshingDirectivePage() {
+  return <main data-rendered-at={Date.now()}>refreshing-directive-page</main>;
 }
 `.trim(),
   );
@@ -296,6 +307,120 @@ export default {
   return root;
 }
 
+async function createStaticCspFixture(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(packageRoot, ".tmp-production-ssg-csp-"));
+  await fs.mkdir(path.join(root, "node_modules", "@farm.js"), { recursive: true });
+  await fs.symlink(packageRoot, path.join(root, "node_modules", "@farm.js", "core"), "junction");
+  await fs.mkdir(path.join(root, "src", "app", "static"), { recursive: true });
+  await fs.mkdir(path.join(root, "src", "app", "dynamic"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "package.json"),
+    JSON.stringify({ private: true, type: "module" }, null, 2),
+  );
+  await fs.writeFile(path.join(root, "src", "app", "globals.css"), "");
+  await fs.writeFile(
+    path.join(root, "farm.config.ts"),
+    `
+export default {
+  srcDir: "src",
+  images: { provider: "none" },
+  security: {
+    csp: {
+      policy: "script-src 'self'; object-src 'none'",
+      nonce: true,
+    },
+  },
+  routeRules: {
+    "/dynamic": { render: "dynamic" },
+  },
+};
+`.trim(),
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "layout.tsx"),
+    `
+export default function Layout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <script dangerouslySetInnerHTML={{ __html: "globalThis.__farmStaticCsp = true;" }} />
+      </body>
+    </html>
+  );
+}
+`.trim(),
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "static", "page.tsx"),
+    `
+export const ssg = true;
+export default function StaticPage() {
+  return <main data-rendered-at={Date.now()}>static-csp-page</main>;
+}
+`.trim(),
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "dynamic", "page.tsx"),
+    `
+export default function DynamicPage() {
+  return <main data-rendered-at={Date.now()}>dynamic-csp-page</main>;
+}
+`.trim(),
+  );
+  return root;
+}
+
+async function createRuntimeEndpointFixture(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(packageRoot, ".tmp-production-ssg-endpoint-"));
+  await fs.mkdir(path.join(root, "node_modules", "@farm.js"), { recursive: true });
+  await fs.symlink(packageRoot, path.join(root, "node_modules", "@farm.js", "core"), "junction");
+  await fs.mkdir(path.join(root, "src", "app", "static"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "package.json"),
+    JSON.stringify({ private: true, type: "module" }, null, 2),
+  );
+  await fs.writeFile(path.join(root, "src", "app", "globals.css"), "");
+  await fs.writeFile(
+    path.join(root, "src", "app", "layout.tsx"),
+    `export default function Layout({ children }) { return <html><body>{children}</body></html>; }`,
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "static", "page.tsx"),
+    `
+export const ssg = true;
+export default function StaticPage() {
+  return <main>endpoint-plugin-static-page</main>;
+}
+`.trim(),
+  );
+  await fs.writeFile(
+    path.join(root, "farm.config.ts"),
+    `
+export default {
+  srcDir: "src",
+  images: { provider: "none" },
+  plugins: [{
+    name: "runtime-endpoint-test",
+    setup() {
+      return { status: "ok" };
+    },
+    runtime: {
+      endpoints: [{
+        path: "/health/ready",
+        handler({ state }) {
+          return Response.json(state, { headers: { "cache-control": "no-store" } });
+        },
+      }],
+      close() {},
+    },
+  }],
+};
+`.trim(),
+  );
+  return root;
+}
+
 async function loadFixtureConfig(root: string) {
   const userConfig = await loadConfig(root, undefined, "production");
   return resolveConfig({ ...userConfig, root }, "production");
@@ -405,7 +530,90 @@ function renderedAt(html: string): string {
   return match[1];
 }
 
+function inlineScriptHashes(html: string): string[] {
+  return [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+    .filter((match) => !/(?:^|\s)src\s*=/i.test(match[1]!))
+    .map((match) => `sha256-${createHash("sha256").update(match[2]!).digest("base64")}`);
+}
+
 describe("production SSG output", () => {
+  it("emits per-page CSP hashes for static HTML and keeps nonces dynamic", async () => {
+    const root = await createStaticCspFixture();
+    let production: Awaited<ReturnType<typeof startProductionServer>> | undefined;
+
+    try {
+      const config = await loadFixtureConfig(root);
+      await build(config, { root, preset: "node-server" });
+
+      const outputDir = path.join(root, ".farm", ".output");
+      const staticArtifact = await fs.readFile(
+        path.join(outputDir, "public", "static", "index.html"),
+        "utf8",
+      );
+      expect(staticArtifact).toContain("static-csp-page");
+      expect(staticArtifact).not.toMatch(/<script\b[^>]*\bnonce\s*=/i);
+      await expect(
+        fs.access(path.join(outputDir, "public", "dynamic", "index.html")),
+      ).rejects.toThrow();
+
+      production = await startProductionServer(path.join(outputDir, "server"));
+      const staticResponse = await fetch(`${production.origin}/static`);
+      const staticPolicy = staticResponse.headers.get("content-security-policy");
+      const staticHtml = await staticResponse.text();
+      expect(staticHtml).toBe(staticArtifact);
+      expect(staticPolicy).toContain("script-src 'self'");
+      expect(staticPolicy).not.toContain("'nonce-");
+      for (const hash of inlineScriptHashes(staticHtml)) {
+        expect(staticPolicy).toContain(`'${hash}'`);
+      }
+
+      const dynamicResponse = await fetch(`${production.origin}/dynamic`);
+      const dynamicPolicy = dynamicResponse.headers.get("content-security-policy");
+      const dynamicHtml = await dynamicResponse.text();
+      const nonce = dynamicPolicy?.match(/'nonce-([^']+)'/)?.[1];
+      expect(nonce).toBeTruthy();
+      expect(dynamicPolicy).not.toContain("'sha256-");
+      expect(dynamicHtml).toContain(`nonce="${nonce}"`);
+    } finally {
+      await production?.stop();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("preserves per-page CSP hash headers in Vercel output", async () => {
+    const root = await createStaticCspFixture();
+
+    try {
+      const userConfig = await loadConfig(root, undefined, "production");
+      const config = await resolveConfig(
+        { ...userConfig, root, deploy: { target: "vercel" } },
+        "production",
+      );
+      await build(config, { root, preset: config.deploy.preset });
+
+      const outputDir = path.join(root, ".vercel", "output");
+      const staticArtifact = await fs.readFile(
+        path.join(outputDir, "static", "static", "index.html"),
+        "utf8",
+      );
+      const outputConfig = JSON.parse(
+        await fs.readFile(path.join(outputDir, "config.json"), "utf8"),
+      );
+      const staticHashes = inlineScriptHashes(staticArtifact);
+      const cspRoute = outputConfig.routes.find((route: { headers?: Record<string, string> }) =>
+        route.headers?.["Content-Security-Policy"]?.includes("'sha256-"),
+      );
+
+      expect(cspRoute).toBeTruthy();
+      expect(cspRoute.src).toMatch(/static/);
+      for (const hash of staticHashes) {
+        expect(cspRoute.headers["Content-Security-Policy"]).toContain(`'${hash}'`);
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("emits and serves pure SSG HTML while keeping revalidated pages dynamic", async () => {
     const upstream = await startRewriteUpstream();
     const root = await createFixture(upstream.origin);
@@ -472,6 +680,15 @@ describe("production SSG output", () => {
         "public, s-maxage=60, stale-while-revalidate=300",
       );
       expect(renderedAt(secondRefreshingHtml)).not.toBe(renderedAt(firstRefreshingHtml));
+
+      // The directive form must reach production with the same ISR contract
+      // as the export form; it previously served private, no-store because
+      // the runtime reads only module exports.
+      const directiveRefreshing = await fetch(`${production.origin}/refreshing-directive`);
+      expect(directiveRefreshing.status).toBe(200);
+      expect(directiveRefreshing.headers.get("cache-control")).toBe(
+        "public, s-maxage=60, stale-while-revalidate=300",
+      );
 
       const firstGuarded = await fetch(`${production.origin}/guarded`);
       expect(firstGuarded.headers.get("x-app-middleware")).toBe("yes");
@@ -648,15 +865,26 @@ describe("production SSG output", () => {
           expect(secondHtml).not.toBe(firstHtml);
         } else {
           const english = await fetch(`${production.origin}/app/en/sensitive`);
-          const french = await fetch(`${production.origin}/app/fr/sensitive`);
+          // Without server.trustProxy a forwarded host must not move the alternates.
+          const french = await fetch(`${production.origin}/app/fr/sensitive`, {
+            headers: { "x-forwarded-host": "evil.test", "x-forwarded-proto": "https" },
+          });
           expect(english.status).toBe(200);
           expect(french.status).toBe(200);
           const englishHtml = await english.text();
           const frenchHtml = await french.text();
           expect(englishHtml).toContain("i18n-page");
           expect(frenchHtml).toContain("i18n-page");
-          expect(englishHtml).toContain('hreflang="fr" href="/app/fr/sensitive"');
-          expect(frenchHtml).toContain('hreflang="en" href="/app/en/sensitive"');
+          expect(englishHtml).toContain(
+            `hreflang="fr" href="${production.origin}/app/fr/sensitive"`,
+          );
+          expect(englishHtml).toContain(
+            `hreflang="x-default" href="${production.origin}/app/en/sensitive"`,
+          );
+          expect(frenchHtml).toContain(
+            `hreflang="en" href="${production.origin}/app/en/sensitive"`,
+          );
+          expect(frenchHtml).not.toContain("evil.test");
         }
       } finally {
         await production?.stop();
@@ -664,6 +892,35 @@ describe("production SSG output", () => {
       }
     }
   }, 180_000);
+
+  it("serves plugin endpoints without making unrelated SSG routes dynamic", async () => {
+    const root = await createRuntimeEndpointFixture();
+    let production: Awaited<ReturnType<typeof startProductionServer>> | undefined;
+
+    try {
+      const config = await loadFixtureConfig(root);
+      await build(config, { root, preset: "node-server" });
+      await expect(
+        fs.readFile(path.join(root, ".farm", ".output", "public", "static", "index.html"), "utf8"),
+      ).resolves.toContain("endpoint-plugin-static-page");
+
+      production = await startProductionServer(
+        path.join(root, ".farm", ".output", "server"),
+        "/health/ready",
+      );
+      const health = await fetch(`${production.origin}/health/ready`);
+      expect(health.status).toBe(200);
+      expect(health.headers.get("cache-control")).toBe("no-store");
+      await expect(health.json()).resolves.toEqual({ status: "ok" });
+
+      const staticPage = await fetch(`${production.origin}/static`);
+      expect(staticPage.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+      await expect(staticPage.text()).resolves.toContain("endpoint-plugin-static-page");
+    } finally {
+      await production?.stop();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it("keeps an explicitly static route that reads the request server-handled", async () => {
     const root = await createRuntimeSensitiveFixture("route");

@@ -1,5 +1,10 @@
 import type { ImageResponseOptions } from "@vercel/og";
 import type { ReactElement } from "react";
+import {
+  isMissingPackageError,
+  VERCEL_OG_INSTALL_HINT,
+  withOptionalPeerCause,
+} from "./optional-peer";
 import { omitFarmResponseBody } from "./response-body";
 import { matchesFarmIfNoneMatch } from "./server-http";
 
@@ -95,7 +100,18 @@ async function prepareMetadataImageNode(node: unknown): Promise<unknown> {
     }
     if (type.$$typeof === REACT_LAZY_TYPE) {
       const { createElement } = await import("react");
-      return prepareMetadataImageNode(createElement(type._init(type._payload), props));
+      let resolvedType: unknown;
+      try {
+        resolvedType = type._init(type._payload);
+      } catch (suspension) {
+        if (suspension && typeof (suspension as Promise<unknown>).then === "function") {
+          await suspension;
+          resolvedType = type._init(type._payload);
+        } else {
+          throw suspension;
+        }
+      }
+      return prepareMetadataImageNode(createElement(resolvedType as any, props));
     }
   }
 
@@ -176,6 +192,20 @@ async function finalizeMetadataImageResponse(
   });
 }
 
+async function loadVercelOg(): Promise<typeof import("@vercel/og")> {
+  try {
+    return await import("@vercel/og");
+  } catch (error) {
+    if (!isMissingPackageError(error, "@vercel/og")) throw error;
+    throw withOptionalPeerCause(
+      new Error(
+        `Rendering a metadata image from JSX needs @vercel/og, which is not installed. ${VERCEL_OG_INSTALL_HINT}`,
+      ),
+      error,
+    );
+  }
+}
+
 /** @internal */
 export async function createFarmMetadataImageResponse(
   value: unknown,
@@ -195,7 +225,7 @@ export async function createFarmMetadataImageResponse(
   const explicitContentType = imageModule.contentType?.split(";", 1)[0]?.trim().toLowerCase();
 
   if (isReactElement(value) && explicitContentType !== "image/svg+xml") {
-    const { ImageResponse } = await import("@vercel/og");
+    const { ImageResponse } = await loadVercelOg();
     const element = (await prepareMetadataImageNode(value)) as ReactElement;
     const response = new ImageResponse(element, {
       width: imageModule.size?.width || 1200,

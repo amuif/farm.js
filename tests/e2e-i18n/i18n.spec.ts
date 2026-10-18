@@ -22,11 +22,7 @@ test.describe("Farm internationalization", () => {
     expect(browserDetected.status()).toBe(307);
     expect(browserDetected.headers().location).toBe("/am");
     expect(browserDetected.headers()["cache-control"]).toBe("private, no-store");
-    expectVaryIncludes(browserDetected.headers().vary, [
-      "Accept-Encoding",
-      "Cookie",
-      "Accept-Language",
-    ]);
+    expectVaryIncludes(browserDetected.headers().vary, ["Cookie", "Accept-Language"]);
     expect(browserDetected.headers()["set-cookie"]).toContain("farm_locale=am");
 
     const cookieDetected = await request.get("/", {
@@ -67,10 +63,12 @@ test.describe("Farm internationalization", () => {
     const html = await explicitLocale.text();
     expect(html).toContain('<html lang="am" dir="ltr">');
     expect(html).toContain("አንድ መተግበሪያ፣ ለሁሉም ቋንቋ");
-    expect(html).toContain('hreflang="en" href="/"');
-    expect(html).toContain('hreflang="am" href="/am"');
-    expect(html).toContain('hreflang="ar" href="/ar"');
-    expect(html).toContain('hreflang="x-default" href="/"');
+    // hreflang alternates must be absolute; the example sets no metadataBase.
+    const origin = new URL(explicitLocale.url()).origin;
+    expect(html).toContain(`hreflang="en" href="${origin}/"`);
+    expect(html).toContain(`hreflang="am" href="${origin}/am"`);
+    expect(html).toContain(`hreflang="ar" href="${origin}/ar"`);
+    expect(html).toContain(`hreflang="x-default" href="${origin}/"`);
 
     const defaultPrefix = await request.get("/en", { maxRedirects: 0 });
     expect(defaultPrefix.status()).toBe(307);

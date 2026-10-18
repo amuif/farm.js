@@ -30,6 +30,7 @@ export type {
   InferMutationVariables,
   MutationAsync,
   MutationOptimisticContext,
+  MutationNetworkMode,
   MutationStatus,
   MutationTrigger,
   UseMutationOptions,
@@ -58,6 +59,37 @@ export type {
   UseServerQueryOptions,
   UseServerQueryResult,
 } from "./server-query-client";
+export {
+  enableCrossTabCacheInvalidation,
+  FARM_CACHE_INVALIDATION_CHANNEL,
+} from "./cache-invalidation-broadcast";
+export type { CrossTabCacheInvalidationOptions } from "./cache-invalidation-broadcast";
+export { enableLiveCacheInvalidation } from "./cache-invalidation-event-source";
+export type { LiveCacheInvalidationOptions } from "./cache-invalidation-event-source";
+export {
+  clearPersistedCache,
+  defineClientCacheAdapter,
+  FARM_CLIENT_CACHE_PERSIST_VERSION,
+  // The generated client entry imports this by name when `cache.client.adapter`
+  // is configured, so it has to be reachable from this entry point.
+  initConfiguredClientCachePersistence,
+  initPersistedClientCache,
+  storageClientCacheAdapter,
+} from "./client-cache-persistence";
+// The shared browser store. Features that keep their own rows (for example
+// `@farm.js/sync`) persist through it rather than opening a second store.
+export { getFarmClientDataCache, normalizeFarmClientCacheKey } from "./client-cache";
+export type {
+  FarmClientCacheEntry,
+  FarmClientCacheKey,
+  FarmClientCacheStatus,
+} from "./client-cache";
+export type {
+  ClientCachePersistenceOptions,
+  FarmClientCacheAdapter,
+  FarmClientCacheStorage,
+  PersistedEntry,
+} from "./client-cache-persistence";
 export {
   api,
   endpoint,

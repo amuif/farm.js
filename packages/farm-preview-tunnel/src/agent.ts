@@ -8,10 +8,13 @@ import type {
 } from "./protocol.js";
 import { isRelayToAgentMessage } from "./protocol.js";
 import { getHopByHopHeaderNames, getRecordHeader } from "./headers.js";
+import { closeWebSocket } from "./websocket.js";
 
 export interface TypeScriptPreviewAgentOptions {
   relayUrl: string;
   name: string;
+  /** Credential the relay requires before it will claim the preview name. */
+  token?: string;
   targetUrl: string;
   connectTimeoutMs?: number;
   localProbeIntervalMs?: number;
@@ -23,6 +26,7 @@ export interface TypeScriptPreviewAgentOptions {
 export interface TypeScriptPreviewAgent {
   sessionId: string;
   publicUrl: string;
+  expiresAt?: number;
   close(): Promise<void>;
 }
 
@@ -84,10 +88,11 @@ export async function startTypeScriptPreviewAgent(
   return {
     sessionId: ready.sessionId,
     publicUrl: ready.publicUrl,
+    ...(ready.expiresAt ? { expiresAt: ready.expiresAt } : {}),
     async close() {
       stopWatchingTarget();
       abortInFlight();
-      await closeSocket(socket);
+      await closeWebSocket(socket, 1000, "Preview agent stopped");
     },
   };
 }
@@ -139,7 +144,13 @@ function waitForReady(socket: WebSocket, options: TypeScriptPreviewAgentOptions)
     }, options.connectTimeoutMs ?? 10_000);
 
     const onOpen = () => {
-      socket.send(JSON.stringify({ type: "register", name: options.name }));
+      socket.send(
+        JSON.stringify({
+          type: "register",
+          name: options.name,
+          ...(options.token ? { token: options.token } : {}),
+        }),
+      );
     };
     const onMessage = (data: WebSocket.RawData) => {
       const message = parseRelayMessage(data);
@@ -326,14 +337,6 @@ class PreviewResponseLimitError extends Error {
     super(`The local preview response exceeded the ${maxBytes} byte limit.`);
     this.name = "PreviewResponseLimitError";
   }
-}
-
-function closeSocket(socket: WebSocket) {
-  if (socket.readyState === socket.CLOSED) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    socket.once("close", () => resolve());
-    socket.close(1000, "Preview agent stopped");
-  });
 }
 
 function terminateSocket(socket: WebSocket) {

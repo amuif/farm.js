@@ -30,7 +30,7 @@ afterEach(async () => {
   );
 });
 
-describe.sequential("writeSearchIndex", () => {
+describe("writeSearchIndex", { concurrent: false }, () => {
   it("creates a real Pagefind bundle from selected static pages", async () => {
     const { outputDir, publicDir } = await createOutput();
     await mkdir(path.join(publicDir, "docs"), { recursive: true });
@@ -288,6 +288,55 @@ describe.sequential("writeSearchIndex", () => {
 
     await expect(access(externalDir)).rejects.toThrow();
   });
+
+  it("refuses to replace an index directory holding prerendered pages", async () => {
+    const { outputDir, publicDir } = await createOutput();
+    await writeFile(path.join(publicDir, "index.html"), page("Home", "Farm home"));
+
+    // `output: "search"` on a site that also prerenders /search pointed the
+    // wipe at the app's own pages: the crawler skipped them and the wipe then
+    // deleted them from the deploy output, with a success log and exit 0.
+    const collision = path.join(publicDir, "search");
+    await mkdir(path.join(collision, "help"), { recursive: true });
+    await writeFile(path.join(collision, "index.html"), page("Search", "Search this site"));
+    await writeFile(path.join(collision, "help", "index.html"), page("Help", "How to search"));
+
+    await expect(
+      writeSearchIndex({
+        outputDir,
+        publicDir,
+        preset: "node-server",
+        basePath: "/",
+        options: resolveSearchOptions({ output: "search" }),
+      }),
+    ).rejects.toThrow(/contains a prerendered page/);
+
+    // The pages survive, which is the whole point.
+    await expect(access(path.join(collision, "index.html"))).resolves.toBeUndefined();
+    await expect(access(path.join(collision, "help", "index.html"))).resolves.toBeUndefined();
+  });
+
+  it("still clears non-page leftovers from a previous bundle", async () => {
+    const { outputDir, publicDir } = await createOutput();
+    await writeFile(path.join(publicDir, "index.html"), page("Home", "Farm home"));
+
+    // A previous bundle leaves non-HTML files behind, and clearing those is the
+    // normal job of the wipe this guard sits in front of.
+    const bundle = path.join(publicDir, "_farm", "search");
+    await mkdir(bundle, { recursive: true });
+    await writeFile(path.join(bundle, "stale.txt"), "stale");
+
+    const result = await writeSearchIndex({
+      outputDir,
+      publicDir,
+      preset: "node-server",
+      basePath: "/",
+      options: resolveSearchOptions({}),
+    });
+
+    expect(result.indexedRoutes).toContain("/");
+    await expect(access(path.join(bundle, "stale.txt"))).rejects.toThrow();
+  });
 });
 
 describe("search route matching", () => {
@@ -344,3 +393,25 @@ async function createOutput() {
 function page(title: string, content: string): string {
   return `<!doctype html><html lang="en"><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${content}</p></main></body></html>`;
 }
+
+describe("route pattern wildcard runs", () => {
+  it("compiles a run of wildcards without catastrophic backtracking", () => {
+    // Each adjacent pair used to emit its own `.*`, so the ways a failing
+    // route could be split between them multiplied and a config with a
+    // handful of consecutive stars hung `farm build` instead of matching.
+    const pattern = `/docs/${"*".repeat(12)}/edit`;
+    const route = `/docs/${"a".repeat(48)}`;
+
+    const started = Date.now();
+    expect(matchesRoutePattern(route, pattern)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("keeps wildcard semantics: a run crosses separators, a single star does not", () => {
+    expect(matchesRoutePattern("/docs/a/b/edit", "/docs/***/edit")).toBe(true);
+    expect(matchesRoutePattern("/docs/a/b/edit", "/docs/**/edit")).toBe(true);
+    expect(matchesRoutePattern("/docs/a/b/edit", "/docs/*/edit")).toBe(false);
+    expect(matchesRoutePattern("/docs/a/edit", "/docs/*/edit")).toBe(true);
+    expect(matchesRoutePattern("/docs/guide", "/docs/**")).toBe(true);
+  });
+});

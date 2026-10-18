@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { chromium } from "@playwright/test";
+import { createBenchmarkArtifacts } from "./benchmark-artifacts.mjs";
+import { readBenchmarkOptions } from "./benchmark-options.mjs";
 
-const dashboardSamples = Number(process.env.FARM_DASHBOARD_SAMPLES || 60);
-const dashboardUpdatesPerSample = Number(process.env.FARM_DASHBOARD_UPDATES || 10);
-const tableSamples = Number(process.env.FARM_TABLE_SAMPLES || 10);
-const warmupSamples = Number(process.env.FARM_BENCHMARK_WARMUP || 5);
-const scaleCycles = Number(process.env.FARM_SCALE_CYCLES || 3);
-const basePort = Number(process.env.FARM_DASHBOARD_PORT || 4380);
+const {
+  dashboardSamples,
+  dashboardUpdatesPerSample,
+  tableSamples,
+  warmupSamples,
+  scaleCycles,
+  basePort,
+} = readBenchmarkOptions();
 const reportPath = process.env.FARM_DASHBOARD_REPORT || "/tmp/farm-react-dashboard-benchmark.json";
 const browserExecutablePath = process.env.FARM_EXPERIMENT_BROWSER_PATH;
 const serverEntry = path.resolve(".farm/.output/server/index.mjs");
@@ -202,10 +205,39 @@ async function waitForServer(server, origin, readOutput) {
 }
 
 async function stopServer(server) {
-  if (server.exitCode !== null) return;
-  server.kill("SIGTERM");
-  await Promise.race([once(server, "exit"), new Promise((resolve) => setTimeout(resolve, 2_000))]);
-  if (server.exitCode === null) server.kill("SIGKILL");
+  if (server.exitCode !== null || server.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    let timeout;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      server.off("exit", onExit);
+      server.off("error", onError);
+    };
+    const onExit = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const signal = (name) => {
+      try {
+        if (!server.kill(name)) {
+          onError(new Error(`Could not send ${name} to benchmark server.`));
+        }
+      } catch (error) {
+        onError(error);
+      }
+    };
+
+    // Sending a signal is not proof of exit. Listen before signaling, including
+    // after escalation, so the next trial cannot overlap a still-running server.
+    server.once("exit", onExit);
+    server.once("error", onError);
+    timeout = setTimeout(() => signal("SIGKILL"), 2_000);
+    signal("SIGTERM");
+  });
 }
 
 async function measureTrial(browser, trial, compilerMode, port) {
@@ -237,18 +269,19 @@ async function measureTrial(browser, trial, compilerMode, port) {
   });
 
   const origin = `http://127.0.0.1:${port}`;
-  const context = await browser.newContext({
-    reducedMotion: "reduce",
-    viewport: { width: 1440, height: 1000 },
-  });
-  const page = await context.newPage();
-  const browserErrors = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") browserErrors.push(message.text());
-  });
-  page.on("pageerror", (error) => browserErrors.push(error.message));
-
+  let context;
   try {
+    context = await browser.newContext({
+      reducedMotion: "reduce",
+      viewport: { width: 1440, height: 1000 },
+    });
+    const page = await context.newPage();
+    const browserErrors = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => browserErrors.push(error.message));
+
     await waitForServer(server, origin, () => serverOutput);
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.waitForTimeout(300);
@@ -2607,8 +2640,12 @@ async function measureTrial(browser, trial, compilerMode, port) {
       trial,
     };
   } finally {
-    await context.close();
-    await stopServer(server);
+    try {
+      await context?.close();
+    } finally {
+      // Context setup or disposal failure must not leave the trial server running.
+      await stopServer(server);
+    }
   }
 }
 
@@ -2656,12 +2693,27 @@ async function measureIsolatedTrial(trial, compilerMode, port) {
   }
 }
 
-const isolatedTrials = [
-  await measureIsolatedTrial("baseline-a", "off", basePort),
-  await measureIsolatedTrial("static", "static", basePort + 1),
-  await measureIsolatedTrial("hybrid", "hybrid", basePort + 2),
-  await measureIsolatedTrial("baseline-b", "off", basePort + 3),
-];
+const artifacts = await createBenchmarkArtifacts(reportPath, {
+  startedAt: new Date().toISOString(),
+  dashboardSamples,
+  dashboardUpdatesPerSample,
+  tableSamples,
+  warmupSamples,
+  scaleCycles,
+  node: process.version,
+});
+console.log(`[dashboard] diagnostic trial artifacts: ${artifacts.directory}`);
+const isolatedTrials = [];
+for (const [trial, compilerMode, port] of [
+  ["baseline-a", "off", basePort],
+  ["static", "static", basePort + 1],
+  ["hybrid", "hybrid", basePort + 2],
+  ["baseline-b", "off", basePort + 3],
+]) {
+  const result = await measureIsolatedTrial(trial, compilerMode, port);
+  await artifacts.saveTrial(result);
+  isolatedTrials.push(result);
+}
 const browserVersion = isolatedTrials[0].browserVersion;
 assert(isolatedTrials.every((trial) => trial.browserVersion === browserVersion));
 const trials = isolatedTrials.map((trial) => trial.result);
@@ -4386,6 +4438,6 @@ const report = {
   screenshots: trials.map((trial) => trial.screenshot),
 };
 
-await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+await artifacts.complete(report);
 console.log(JSON.stringify({ ...report, reportPath }, null, 2));
 if (!passed) process.exitCode = 1;

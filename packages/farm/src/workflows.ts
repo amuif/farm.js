@@ -6,6 +6,8 @@ import {
   type ResolvedFarmServerConfig,
 } from "./server-http";
 import { searchParamsToObject } from "./search-params";
+import { farmSecretsMatch } from "./secret-compare";
+import { isFarmDeployedRuntime, readFarmEnvironmentValue } from "./utils/runtime-env";
 import { decodeRouteSegment } from "./utils/decode";
 import { toPosixPath } from "./utils";
 import { validateConfigRouteSource } from "./plugins/route-pattern";
@@ -32,6 +34,12 @@ export interface FarmWorkflowsUserConfig {
   secretEnv?: string;
   /** Inline runner secret. Prefer secretEnv for deployed apps. */
   secret?: string;
+  /**
+   * Serve the workflow route without a secret in a deployed runtime.
+   * Defaults to false: without a secret the route is public, so production
+   * requests are rejected unless this is explicitly enabled.
+   */
+  allowUnsecured?: boolean;
 }
 
 export interface FarmWorkflowsResolvedConfig {
@@ -40,6 +48,7 @@ export interface FarmWorkflowsResolvedConfig {
   route: string;
   secretEnv: string;
   secret?: string;
+  allowUnsecured?: boolean;
 }
 
 export interface FarmWorkflowLogger {
@@ -103,6 +112,8 @@ export interface FarmWorkflowHTTPHandlerOptions {
 export const DEFAULT_FARM_WORKFLOW_DIRS = ["src/jobs", "src/workflows", "src/cron"];
 export const DEFAULT_FARM_WORKFLOW_ROUTE = "/api/_farm/workflows";
 export const DEFAULT_FARM_WORKFLOW_SECRET_ENV = "CRON_SECRET";
+const MISSING_FARM_WORKFLOW_SECRET_ERROR =
+  "Workflow route requires a secret. Set the CRON_SECRET environment variable, configure workflows.secret, or set workflows.allowUnsecured to true.";
 
 export function defineWorkflow<const TPayload = unknown, TResult = unknown>(
   definition: FarmWorkflowDefinition<TPayload, TResult>,
@@ -152,6 +163,7 @@ export function resolveWorkflowsConfig(
     route: normalizeWorkflowRoute(options.route || DEFAULT_FARM_WORKFLOW_ROUTE),
     secretEnv: options.secretEnv || DEFAULT_FARM_WORKFLOW_SECRET_ENV,
     secret: options.secret,
+    allowUnsecured: options.allowUnsecured === true,
   };
 }
 
@@ -225,13 +237,17 @@ export function createFarmWorkflowRequestHandler(options: FarmWorkflowHTTPHandle
     }
 
     const id = decodeRouteSegment(url.pathname.slice(route.length + 1));
+
+    // Verify the secret before consulting the workflow id map so the
+    // existing-vs-missing distinction is not disclosed to callers without
+    // the secret (a 401 for unknown ids would otherwise become a 404 oracle).
+    const secretError = verifyWorkflowSecret(request, options.config);
+    if (secretError) return secretError;
+
     const workflow = workflowsById.get(id);
     if (!workflow) {
       return Response.json({ error: `Workflow "${id}" was not found.` }, { status: 404 });
     }
-
-    const secretError = verifyWorkflowSecret(request, options.config);
-    if (secretError) return secretError;
 
     let payload: unknown;
     try {
@@ -328,8 +344,11 @@ export async function prepareFarmWorkflowsForNitro(config: {
   const tasks: PreparedFarmWorkflows["tasks"] = {};
   const scheduledTasks = createScheduledTasks(workflows);
 
+  const wrapperNames = resolveWorkflowWrapperFileNames(workflows.map((workflow) => workflow.id));
   for (const workflow of workflows) {
-    const wrapperPath = toPosixPath(path.join(generatedDir, `${safeFileName(workflow.id)}.mjs`));
+    const wrapperPath = toPosixPath(
+      path.join(generatedDir, `${wrapperNames.get(workflow.id)}.mjs`),
+    );
     await fs.writeFile(wrapperPath, createNitroTaskWrapper(workflow), "utf8");
     tasks[workflow.id] = {
       handler: wrapperPath,
@@ -517,7 +536,6 @@ async function loadWorkflowModule(filePath: string, root: string): Promise<Recor
   const fs = await import("fs/promises");
   const path = await import("path");
   const { pathToFileURL } = await import("url");
-  const { build } = await import("esbuild");
   const outDir = path.join(root, ".farm", ".workflow-loader");
   await fs.mkdir(outDir, { recursive: true });
   const outfile = path.join(
@@ -525,19 +543,14 @@ async function loadWorkflowModule(filePath: string, root: string): Promise<Recor
     `workflow-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`,
   );
 
-  await build({
-    absWorkingDir: root,
-    entryPoints: [filePath],
+  const { bundleNodeModule } = await import("./build/node-module-bundle");
+  await bundleNodeModule({
+    root,
+    entry: filePath,
     outfile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
     target: `node${process.versions.node.split(".")[0]}`,
-    packages: "external",
-    external: ["@farm.js/core", "@farm.js/core/*", "nitro", "nitro/*"],
-    jsx: "automatic",
-    logLevel: "silent",
-    sourcemap: "inline",
+    externalPackages: true,
+    external: [/^@farm\.js\/core(?:\/|$)/, /^nitro(?:\/|$)/],
   });
 
   try {
@@ -582,7 +595,7 @@ function createScheduledTasks(
 function createNitroTaskWrapper(workflow: FarmDiscoveredWorkflow): string {
   const normalizedPath = workflow.filePath.replace(/\\/g, "/");
   return `
-import { defineTask } from "nitro/runtime";
+import { defineTask } from "nitro/task";
 import { runFarmWorkflowModule } from "@farm.js/core/workflows";
 import * as workflowModule from ${JSON.stringify(normalizedPath)};
 
@@ -614,9 +627,10 @@ function createNitroWorkflowHTTPHandler(
 ): string {
   return `
 import { H3 } from "h3";
-import { runTask } from "nitro/runtime";
+import { runTask } from "nitro/task";
 import {
   createFarmRequestBodyErrorResponse,
+  farmSecretsMatch,
   readFarmRequestBody,
   searchParamsToObject
 } from "@farm.js/core/internal/production-runtime";
@@ -624,6 +638,7 @@ import {
 const route = ${JSON.stringify(config.route)};
 const secretEnv = ${JSON.stringify(config.secretEnv)};
 const inlineSecret = ${JSON.stringify(config.secret || "")};
+const allowUnsecured = ${JSON.stringify(config.allowUnsecured === true)};
 const bodySizeLimit = ${JSON.stringify(server.bodySizeLimit)};
 const workflows = ${JSON.stringify(workflows.map(toWorkflowMetadata))};
 const workflowIds = new Set(workflows.map((workflow) => workflow.id));
@@ -648,16 +663,32 @@ function getHeader(event, name) {
 }
 
 function getSecret() {
-  return inlineSecret || process.env[secretEnv] || "";
+  // Match the dev-path verifyWorkflowSecret's resolution (readFarmEnvironmentValue):
+  // runtime bindings on globalThis.__env__ first, then process.env. Reading
+  // process.env alone misses a Cloudflare Workers secret, so a correctly
+  // configured deployment would see no secret and reject every request with 401.
+  const runtimeBindings = globalThis.__env__;
+  const runtimeSecret =
+    runtimeBindings && typeof runtimeBindings === "object" ? runtimeBindings[secretEnv] : undefined;
+  const resolved =
+    typeof runtimeSecret === "string"
+      ? runtimeSecret
+      : typeof process !== "undefined"
+        ? process.env?.[secretEnv]
+        : undefined;
+  return inlineSecret || resolved || "";
 }
 
 function verifySecret(event) {
   const secret = getSecret();
-  if (!secret) return null;
+  if (!secret) {
+    if (allowUnsecured) return null;
+    return json({ error: ${JSON.stringify(MISSING_FARM_WORKFLOW_SECRET_ERROR)} }, 401);
+  }
   const authorization = getHeader(event, "authorization") || "";
   const headerSecret = getHeader(event, "x-farm-workflow-secret") || "";
   const bearer = authorization.match(/^Bearer\\s+(.+)$/i)?.[1] || "";
-  if (headerSecret === secret || bearer === secret) return null;
+  if (farmSecretsMatch(headerSecret, secret) || farmSecretsMatch(bearer, secret)) return null;
   return json({ error: "Unauthorized workflow request." }, 401);
 }
 
@@ -686,12 +717,16 @@ export default new H3()
   })
   .all(route + "/:id", async (event) => {
     const id = decodeRouteSegment(event.context.params?.id || "");
+
+    // Verify the secret before consulting the workflow id map so the
+    // existing-vs-missing distinction is not disclosed to callers without
+    // the secret (a 401 for unknown ids would otherwise become a 404 oracle).
+    const unauthorized = verifySecret(event);
+    if (unauthorized) return unauthorized;
+
     if (!workflowIds.has(id)) {
       return json({ error: "Workflow " + id + " was not found." }, 404);
     }
-
-    const unauthorized = verifySecret(event);
-    if (unauthorized) return unauthorized;
 
     let payload;
     try {
@@ -764,13 +799,24 @@ function verifyWorkflowSecret(
   request: Request,
   config: FarmWorkflowsResolvedConfig,
 ): Response | null {
-  const secret = config.secret || process.env[config.secretEnv] || "";
-  if (!secret) return null;
+  const secret = config.secret || readFarmEnvironmentValue(config.secretEnv) || "";
+  if (!secret) {
+    // No secret configured. Local development stays convenient, but a deployed
+    // runtime must not expose a route that lists and executes workflows to
+    // anonymous callers. Opt back in explicitly with .
+    if (config.allowUnsecured === true || !isFarmDeployedRuntime()) return null;
+    return Response.json(
+      {
+        error: MISSING_FARM_WORKFLOW_SECRET_ERROR,
+      },
+      { status: 401 },
+    );
+  }
 
   const authorization = request.headers.get("authorization") || "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
   const headerSecret = request.headers.get("x-farm-workflow-secret") || "";
-  if (bearer === secret || headerSecret === secret) return null;
+  if (farmSecretsMatch(bearer, secret) || farmSecretsMatch(headerSecret, secret)) return null;
 
   return Response.json({ error: "Unauthorized workflow request." }, { status: 401 });
 }
@@ -784,6 +830,55 @@ function joinRoute(...parts: string[]): string {
 
 function trimSlashes(value: string): string {
   return value.replace(/^\/+|\/+$/g, "");
+}
+
+/**
+ * Wrapper file names for a set of workflow ids.
+ *
+ * `safeFileName` is not injective: it maps `a/b` and `a-b` onto the same string,
+ * and macOS and Windows additionally fold `Daily` onto `daily` on their default
+ * case-insensitive filesystems. Two workflows would then share one generated
+ * wrapper and both run whichever was written last. Only ids that actually
+ * collide are disambiguated, so ordinary ids keep a readable wrapper; every id
+ * in a colliding group gets a digest of the exact id appended, which keeps the
+ * result independent of discovery order.
+ */
+function resolveWorkflowWrapperFileNames(ids: readonly string[]): Map<string, string> {
+  const groups = new Map<string, number>();
+  for (const id of ids) {
+    const key = safeFileName(id).toLowerCase();
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+
+  const resolved = new Map<string, string>();
+  const claimed = new Map<string, string>();
+  for (const id of ids) {
+    const base = safeFileName(id);
+    const key = base.toLowerCase();
+    const fileName = (groups.get(key) ?? 0) > 1 ? `${key}-${workflowIdFingerprint(id)}` : base;
+    const claimedBy = claimed.get(fileName.toLowerCase());
+    if (claimedBy !== undefined) {
+      throw new Error(
+        `Farm workflows ${JSON.stringify(claimedBy)} and ${JSON.stringify(id)} generate the same wrapper file ${JSON.stringify(`${fileName}.mjs`)}. Rename one of them.`,
+      );
+    }
+    claimed.set(fileName.toLowerCase(), id);
+    resolved.set(id, fileName);
+  }
+  return resolved;
+}
+
+/**
+ * FNV-1a. This module is bundled into server runtimes that do not provide
+ * node:crypto, and the digest only needs to separate file names.
+ */
+function workflowIdFingerprint(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function safeFileName(value: string): string {

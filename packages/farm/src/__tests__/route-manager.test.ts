@@ -8,7 +8,9 @@ import {
   shouldSuggestStaticRenderingForI18n,
 } from "../routing/route-manager";
 import { defineIntegration } from "../integrations";
+import { REACT_RENDERER } from "../renderer";
 import type { FarmConfig } from "../types";
+import { splitRoutePath } from "../utils";
 
 /** "/test" is not an absolute path on Windows, so resolve it per platform. */
 const TEST_ROOT = path.resolve("/test");
@@ -16,10 +18,11 @@ const appPath = (...segments: string[]) => path.join(TEST_ROOT, "src", "app", ..
 
 // Mock the file system utilities
 vi.mock("../utils", async () => {
-  const actual = await vi.importActual("../utils");
+  const actual = await vi.importActual<typeof import("../utils")>("../utils");
   return {
     ...actual,
     globFiles: vi.fn(),
+    splitRoutePath: vi.fn(actual.splitRoutePath),
     resolveAppPath: vi.fn((root, ...paths) => `${root}/${paths.join("/")}`),
     logger: {
       info: vi.fn(),
@@ -115,9 +118,42 @@ describe("RouteManager", () => {
       expect(result.route).toBeNull();
     });
 
+    it("matches requests under the configured basePath like production routing", async () => {
+      const { globFiles } = await import("../utils");
+      vi.mocked(globFiles).mockImplementation(async (pattern: string) => {
+        if (pattern.includes("page")) return ["page.tsx", "about/page.tsx"];
+        if (pattern.includes("layout")) return ["layout.tsx"];
+        if (pattern.includes("loading")) return ["about/loading.tsx"];
+        if (pattern.includes("error")) return ["about/error.tsx"];
+        if (pattern.includes("sitemap")) return ["sitemap.ts"];
+        return [];
+      });
+      const basePathManager = new RouteManager({ ...mockConfig, basePath: "/app" });
+      await basePathManager.discoverRoutes();
+
+      expect(basePathManager.matchRoute("/app").route?.pattern).toBe("/");
+      expect(basePathManager.matchRoute("/app/").route?.pattern).toBe("/");
+      expect(basePathManager.matchRoute("/app/about").route?.pattern).toBe("/about");
+      expect(basePathManager.matchRoute("/app/about").layouts.map((l) => l.pattern)).toEqual(["/"]);
+      expect(basePathManager.matchRoute("/application").route).toBeNull();
+      expect(basePathManager.getMatchingLoading("/app/about")?.pattern).toBe("/about");
+      expect(basePathManager.getMatchingError("/app/about")?.pattern).toBe("/about");
+      expect(basePathManager.matchMetadataRoute("/app/sitemap.xml")?.metadata.kind).toBe("sitemap");
+    });
+
     it("should find matching layouts", () => {
       const result = routeManager.matchRoute("/users/123");
       expect(result.layouts.length).toBeGreaterThan(0);
+    });
+
+    it("decodes the request pathname once while scanning pages and layouts", () => {
+      vi.mocked(splitRoutePath).mockClear();
+
+      const result = routeManager.matchRoute("/users/hello%20farm");
+
+      expect(result.params).toEqual({ id: "hello farm" });
+      expect(result.layouts.length).toBeGreaterThan(0);
+      expect(splitRoutePath).toHaveBeenCalledTimes(1);
     });
 
     it("includes optional catch-all layouts, boundaries, and slot owners at the parent path", async () => {
@@ -287,6 +323,88 @@ describe("RouteManager", () => {
       expect(new Set(refreshed.routes.map((route) => route.pattern))).toEqual(
         new Set(["/", "/about"]),
       );
+    });
+
+    it("keeps the previous client manifest when an HMR rebuild cannot inspect edited source", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "farm-route-manifest-refresh-"));
+      temporaryDirectories.push(root);
+      await mkdir(path.join(root, "src", "app", "demo"), { recursive: true });
+      const pageFile = path.join(root, "src", "app", "demo", "page.tsx");
+      const clientFile = path.join(root, "src", "app", "demo", "button.tsx");
+      await writeFile(
+        clientFile,
+        `"use client";
+export default function Button() { return <button>count</button>; }`,
+      );
+      await writeFile(
+        pageFile,
+        `import Button from "./button";
+export default async function Page() { return <Button />; }`,
+      );
+      const { globFiles } = await import("../utils");
+      vi.mocked(globFiles).mockImplementation(async (pattern: string) => {
+        if (pattern.includes("page")) return ["demo/page.tsx"];
+        return [];
+      });
+      mockConfig.root = root;
+      mockConfig.renderer = REACT_RENDERER;
+      routeManager = new RouteManager(mockConfig);
+      await routeManager.discoverRoutes();
+
+      const initial = routeManager.generateClientManifest(root);
+      expect(initial.routes[0]).toMatchObject({ hasIsolatedClientBoundaries: true });
+
+      await writeFile(
+        clientFile,
+        `"use client";
+export const island = chooseStrategy();
+export default function Button() { return <button>count</button>; }`,
+      );
+      expect(() => routeManager.regenerateClientManifest(root)).toThrow(/must be a static/);
+      expect(routeManager.generateClientManifest(root)).toBe(initial);
+      expect(routeManager.getIsolatedClientBoundaryModules(root)).toEqual(new Set([clientFile]));
+    });
+
+    it("preserves suppression details for async layouts that cannot become islands", async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "farm-route-async-layout-"));
+      temporaryDirectories.push(root);
+      await mkdir(path.join(root, "src", "app"), { recursive: true });
+      const layoutFile = path.join(root, "src", "app", "layout.tsx");
+      await writeFile(
+        path.join(root, "src", "app", "widget.tsx"),
+        `"use client";
+function Widget() { return <button>count</button>; }
+export { Widget };`,
+      );
+      await writeFile(
+        layoutFile,
+        `import { Widget } from "./widget";
+export default async function Layout({ children }) {
+  return <><Widget />{children}</>;
+}`,
+      );
+      await writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        "export default function Page() { return <main>home</main>; }",
+      );
+      const { globFiles } = await import("../utils");
+      vi.mocked(globFiles).mockImplementation(async (pattern: string) => {
+        if (pattern.includes("page")) return ["page.tsx"];
+        if (pattern.includes("layout")) return ["layout.tsx"];
+        return [];
+      });
+      mockConfig.root = root;
+      mockConfig.renderer = REACT_RENDERER;
+      routeManager = new RouteManager(mockConfig);
+      await routeManager.discoverRoutes();
+
+      expect(routeManager.generateClientManifest(root).layouts[0]).toMatchObject({
+        shouldHydrate: false,
+        suppressedAsyncHydration: true,
+        suppressedAsyncHydrationReason: expect.stringMatching(
+          /widget\.tsx uses an unsupported export shape$/,
+        ),
+      });
     });
 
     it("keeps an isolated layout when a sibling page needs route-wide hydration", async () => {
@@ -861,19 +979,26 @@ export default function Layout({ children }) { return <><One /><Two /><Three />{
   });
 
   describe("application metadata routes", () => {
-    it("discovers sitemap, robots, and manifest conventions in route segments", async () => {
+    it("discovers sitemap, robots, manifest, llms, and llms-full conventions", async () => {
       const { globFiles } = await import("../utils");
       vi.mocked(globFiles).mockImplementation(async (pattern: string) => {
         if (pattern.includes("page")) return ["page.tsx", "shops/[shop]/page.tsx"];
         if (pattern.includes("sitemap")) {
-          return ["sitemap.ts", "robots.js", "manifest.ts", "shops/[shop]/sitemap.ts"];
+          return [
+            "sitemap.ts",
+            "robots.js",
+            "manifest.ts",
+            "llms.ts",
+            "llms-full.ts",
+            "shops/[shop]/sitemap.ts",
+          ];
         }
         return [];
       });
 
       await routeManager.discoverRoutes();
 
-      expect(routeManager.getMetadataRoutes().size).toBe(4);
+      expect(routeManager.getMetadataRoutes().size).toBe(6);
       expect(routeManager.matchMetadataRoute("/sitemap.xml")).toMatchObject({
         metadata: { kind: "sitemap", pattern: "/" },
         params: {},
@@ -883,6 +1008,14 @@ export default function Layout({ children }) { return <><One /><Two /><Three />{
       expect(routeManager.matchMetadataRoute("/manifest.webmanifest")?.metadata.kind).toBe(
         "manifest",
       );
+      expect(routeManager.matchMetadataRoute("/llms.txt")?.metadata).toMatchObject({
+        kind: "llms",
+        outputName: "llms.txt",
+      });
+      expect(routeManager.matchMetadataRoute("/llms-full.txt")?.metadata).toMatchObject({
+        kind: "llms-full",
+        outputName: "llms-full.txt",
+      });
 
       const shopSitemap = routeManager.matchMetadataRoute("/shops/acme/sitemap.xml");
       expect(shopSitemap).toMatchObject({

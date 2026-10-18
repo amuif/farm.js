@@ -5,19 +5,22 @@
   "scripts": {
     "dev": "farm dev",
     "build": "farm build",
-    "deploy": "farm deploy",
+    "start": "node .farm/.output/server/index.mjs",
+    "deploy": "farm deploy --vercel",
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@farm.js/core": "0.1.0-beta.95",
-    "@farm.js/vue": "0.1.0-beta.27",
+    "@farm.js/core": "0.1.26",
+    "@farm.js/vue": "0.1.0-beta.31",
     "@fontsource-variable/geist": "5.3.0",
     "@fontsource-variable/geist-mono": "5.3.0",
     "vue": "3.5.41",
     "zod": "4.1.12"
   },
   "devDependencies": {
-    "@farm.js/cli": "0.1.0-beta.95",
+    "@farm.js/cli": "0.1.26",
+    "@farm.js/devtools": "0.1.26",
+    "@tailwindcss/vite": "^4.3.3",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.3.3",
     "vue-tsc": "3.3.9"

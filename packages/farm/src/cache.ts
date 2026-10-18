@@ -3,6 +3,8 @@ import { notifyFarmCacheInvalidation, notifyFarmCacheTask } from "./cache-invali
 import { getActiveFarmI18nSnapshot } from "./i18n/bridge";
 
 export { applyFarmCacheInvalidations } from "./cache-invalidation";
+export { createFarmCacheInvalidationStream } from "./cache-invalidation-stream";
+export type { FarmCacheInvalidationStreamOptions } from "./cache-invalidation-stream";
 
 export type RevalidateTagProfile =
   | "max"
@@ -41,17 +43,17 @@ export type FarmCacheInvalidationTarget =
   | { path: string }
   | { tag: string };
 
-declare const FARM_DEFINED_CACHE_KEY_DATA: unique symbol;
-
 /**
  * A regular Farm cache key carrying the data shape stored under that key.
  *
  * The brand exists only in TypeScript. At runtime the value remains the
  * original string or structured array, so all existing cache APIs continue to
- * accept untyped keys.
+ * accept untyped keys. `__farmDefinedCacheKeyData` is reserved for Farm's type
+ * system and must not be declared by application types.
  */
 export type DefinedCacheKey<TData, TKey extends RouteDataCacheKey = RouteDataCacheKey> = TKey & {
-  readonly [FARM_DEFINED_CACHE_KEY_DATA]: TData;
+  /** @internal Reserved type-only brand shared by the ESM and CommonJS declarations. */
+  readonly __farmDefinedCacheKeyData: TData;
 };
 
 export type CacheKeyFactory<
@@ -133,11 +135,28 @@ export interface FarmCacheAdapter {
   releaseLease?(key: string, token: string): Promise<void>;
 }
 
+export interface FarmClientCacheUserConfig {
+  /**
+   * Module path, relative to the project root, whose default export is a
+   * client cache adapter (`defineClientCacheAdapter`). The module is bundled
+   * into the browser entry; the server never imports it.
+   */
+  adapter?: string;
+  /** Extra version salt, typically a build or deploy id; entries persisted under another salt are dropped. */
+  version?: string;
+  /** Debounce for persisted write-behind flushes, in milliseconds. */
+  flushDelayMs?: number;
+}
+
 export interface FarmCacheUserConfig {
   /** Shared cache implementation, for example a Redis-backed adapter. */
   adapter?: FarmCacheAdapter;
   /** Prefix isolating applications and deployments sharing one adapter. */
   namespace?: string;
+  /** Maximum process-local entries retained in memory. @default 1024 */
+  maxEntries?: number;
+  /** Browser cache persistence; see the client cache adapter documentation. */
+  client?: FarmClientCacheUserConfig;
   /**
    * Coordinate cache fills across processes when the adapter implements
    * acquireLease/releaseLease. Set false to disable.
@@ -230,13 +249,20 @@ interface FarmCacheStaleEntry {
 
 export class FarmDataCache {
   private entries = new Map<string, InternalFarmCacheEntry>();
-  private inflight = new Map<string, Promise<unknown>>();
+  private inflight = new Map<
+    string,
+    { promise: Promise<unknown>; tags: readonly string[]; startVersion: number }
+  >();
+  /** Local entries by tag, so tag counts and pruning never scan unrelated entries. */
+  private entriesByTag = new Map<string, Set<InternalFarmCacheEntry>>();
   private invalidatedTagVersions = new Map<string, number>();
+  private activeGenerations = new Set<{ tags: ReadonlySet<string>; createdVersion: number }>();
   private version = 0;
   private generation = 0;
   private adapter?: FarmCacheAdapter;
   private namespace = "farm";
   private local = true;
+  private maxEntries = 1_024;
   private lease = {
     enabled: true,
     ttlMs: 10_000,
@@ -251,12 +277,15 @@ export class FarmDataCache {
   configure(config: FarmCacheUserConfig = {}): void {
     this.generation++;
     this.entries.clear();
+    this.entriesByTag.clear();
     this.inflight.clear();
     this.invalidatedTagVersions.clear();
+    this.activeGenerations.clear();
     this.version = 0;
     this.adapter = config.adapter;
     this.namespace = normalizeCacheNamespace(config.namespace || "farm");
     this.local = !config.adapter;
+    this.maxEntries = normalizePositiveInteger(config.maxEntries, 1_024, "cache.maxEntries");
     this.lease =
       config.lease === false
         ? { ...this.lease, enabled: false }
@@ -316,6 +345,8 @@ export class FarmDataCache {
       emitFarmEvent({ type: "cache.miss", key, reason: "stale" });
       return undefined;
     }
+
+    this.touchEntry(key, entry);
 
     emitFarmEvent({
       type: "cache.hit",
@@ -382,6 +413,7 @@ export class FarmDataCache {
   }
 
   set<T>(key: string, value: T, options: FarmCacheSetOptions = {}): FarmCacheEntry<T> {
+    const revalidate = normalizeRevalidate(options.revalidate);
     const tags = new Set<string>();
     for (const tag of options.tags ?? []) {
       tags.add(normalizeCacheTag(tag));
@@ -397,10 +429,10 @@ export class FarmDataCache {
       tagVersions: undefined,
       createdAt: options.createdAt ?? Date.now(),
       createdVersion: ++this.version,
-      revalidate: normalizeRevalidate(options.revalidate),
+      revalidate,
     };
 
-    this.entries.set(key, entry);
+    this.storeLocalEntry(entry);
     emitFarmEvent({
       type: "cache.set",
       key,
@@ -426,6 +458,7 @@ export class FarmDataCache {
     tagVersions?: Readonly<Record<string, number>>,
     createdVersion?: number,
   ): Promise<FarmCacheEntry<T>> {
+    const revalidate = normalizeRevalidate(options.revalidate);
     const tags = normalizeCacheOptionsTags(options);
     const capturedVersions =
       tagVersions ?? (await this.getAdapterTagVersions(Array.from(tags.values())));
@@ -436,7 +469,7 @@ export class FarmDataCache {
       tagVersions: capturedVersions,
       createdAt: options.createdAt ?? Date.now(),
       createdVersion: createdVersion ?? ++this.version,
-      revalidate: normalizeRevalidate(options.revalidate),
+      revalidate,
     };
 
     if (this.local) {
@@ -456,13 +489,13 @@ export class FarmDataCache {
   }
 
   delete(key: string): boolean {
-    const deleted = this.entries.delete(key);
+    const deleted = this.deleteLocalEntry(key);
     emitFarmEvent({ type: "cache.delete", key, deleted });
     return deleted;
   }
 
   async deleteAsync(key: string): Promise<boolean> {
-    const deleted = this.entries.delete(key);
+    const deleted = this.deleteLocalEntry(key);
     if (this.adapter) {
       await this.adapter.delete(this.createAdapterKey(key));
     }
@@ -474,8 +507,10 @@ export class FarmDataCache {
     const count = this.entries.size;
     this.generation++;
     this.entries.clear();
+    this.entriesByTag.clear();
     this.inflight.clear();
     this.invalidatedTagVersions.clear();
+    this.activeGenerations.clear();
     this.version = 0;
     emitFarmEvent({ type: "cache.clear", count });
   }
@@ -588,32 +623,43 @@ export class FarmDataCache {
     producer: () => Promise<T> | T,
     options: FarmCacheOptions = {},
   ): Promise<T> {
+    normalizeRevalidate(options.revalidate);
     const cached = await this.getEntryAsync<T>(key);
     if (cached) {
       return cached.value;
     }
 
-    const inflight = this.inflight.get(key) as Promise<T> | undefined;
-    if (inflight) {
+    const inflight = this.inflight.get(key);
+    if (inflight && !this.wasInvalidatedSince(inflight.tags, inflight.startVersion)) {
       emitFarmEvent({ type: "cache.dedupe", key });
-      return inflight;
+      return inflight.promise as Promise<T>;
     }
 
     const tags = Array.from(normalizeCacheOptionsTags(options));
     const generation = this.generation;
+    const startVersion = this.version;
     const promise = this.fillCacheEntry(key, producer, options, tags, generation)
       .catch((error) => {
         emitFarmEvent({ type: "cache.error", key, operation: "set", error });
         throw error;
       })
       .finally(() => {
-        if (this.inflight.get(key) === promise) {
+        if (this.inflight.get(key)?.promise === promise) {
           this.inflight.delete(key);
         }
       });
 
-    this.inflight.set(key, promise);
+    this.inflight.set(key, { promise, tags, startVersion });
     return promise;
+  }
+
+  /** A fill that started before one of its tags was invalidated cannot satisfy later readers. */
+  private wasInvalidatedSince(tags: readonly string[], version: number): boolean {
+    for (const tag of tags) {
+      const invalidatedVersion = this.invalidatedTagVersions.get(tag);
+      if (invalidatedVersion !== undefined && invalidatedVersion > version) return true;
+    }
+    return false;
   }
 
   private async fillCacheEntry<T>(
@@ -649,8 +695,14 @@ export class FarmDataCache {
       }
     }
 
+    const initialCreatedVersion = this.version;
+    const activeGeneration = {
+      tags: new Set(tags),
+      createdVersion: initialCreatedVersion,
+    };
+    this.activeGenerations.add(activeGeneration);
+
     try {
-      const initialCreatedVersion = this.version;
       const initialTagVersions = await this.getAdapterTagVersions(tags, adapter, namespace);
       const value = await producer();
       if (generation === this.generation) {
@@ -658,8 +710,14 @@ export class FarmDataCache {
       }
       return value;
     } finally {
+      this.activeGenerations.delete(activeGeneration);
+      this.pruneInvalidatedTagVersions(activeGeneration.tags);
       if (leaseToken && adapter?.releaseLease) {
-        await adapter.releaseLease(leaseKey, leaseToken);
+        try {
+          await adapter.releaseLease(leaseKey, leaseToken);
+        } catch (error) {
+          emitFarmEvent({ type: "cache.error", key, operation: "set", error });
+        }
       }
     }
   }
@@ -706,19 +764,9 @@ export class FarmDataCache {
     return undefined;
   }
 
-  private countEntriesForTag(tag: string): number {
+  private countEntriesForTags(tags: readonly [string, ...string[]]): number {
     let count = 0;
-    for (const entry of this.entries.values()) {
-      if (entry.tags.has(tag)) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  private countEntriesForTags(tags: readonly string[]): number {
-    let count = 0;
-    for (const entry of this.entries.values()) {
+    for (const entry of this.entriesByTag.get(tags[0]) ?? []) {
       if (tags.every((tag) => entry.tags.has(tag))) {
         count++;
       }
@@ -727,8 +775,11 @@ export class FarmDataCache {
   }
 
   private invalidateTag(normalizedTag: string): number {
+    const count = this.entriesByTag.get(normalizedTag)?.size ?? 0;
+    this.invalidatedTagVersions.delete(normalizedTag);
     this.invalidatedTagVersions.set(normalizedTag, ++this.version);
-    return this.countEntriesForTag(normalizedTag);
+    this.pruneInvalidatedTagVersions([normalizedTag]);
+    return count;
   }
 
   private toPublicEntry<T>(entry: InternalFarmCacheEntry<T>): FarmCacheEntry<T> {
@@ -744,7 +795,7 @@ export class FarmDataCache {
   }
 
   private hydrateLocalEntry<T>(entry: FarmCacheEntry<T>): void {
-    this.entries.set(entry.key, {
+    this.storeLocalEntry({
       key: entry.key,
       value: entry.value,
       tags: new Set(entry.tags.map(normalizeCacheTag)),
@@ -753,6 +804,71 @@ export class FarmDataCache {
       createdVersion: entry.createdVersion ?? ++this.version,
       revalidate: normalizeRevalidate(entry.revalidate),
     });
+  }
+
+  private touchEntry(key: string, entry: InternalFarmCacheEntry): void {
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+  }
+
+  private storeLocalEntry(entry: InternalFarmCacheEntry): void {
+    const removed: InternalFarmCacheEntry[] = [];
+    const replaced = this.detachLocalEntry(entry.key);
+    if (replaced) removed.push(replaced);
+    this.entries.set(entry.key, entry);
+    for (const tag of entry.tags) {
+      let tagged = this.entriesByTag.get(tag);
+      if (!tagged) this.entriesByTag.set(tag, (tagged = new Set()));
+      tagged.add(entry);
+    }
+
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      removed.push(this.detachLocalEntry(oldestKey)!);
+    }
+    // Only tags of entries that left the cache can lose their last stale dependent.
+    for (const removedEntry of removed) this.pruneInvalidatedTagVersions(removedEntry.tags);
+  }
+
+  private deleteLocalEntry(key: string): boolean {
+    const entry = this.detachLocalEntry(key);
+    if (!entry) return false;
+    this.pruneInvalidatedTagVersions(entry.tags);
+    return true;
+  }
+
+  private detachLocalEntry(key: string): InternalFarmCacheEntry | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    this.entries.delete(key);
+    for (const tag of entry.tags) {
+      const tagged = this.entriesByTag.get(tag);
+      if (!tagged) continue;
+      tagged.delete(entry);
+      if (tagged.size === 0) this.entriesByTag.delete(tag);
+    }
+    return entry;
+  }
+
+  /**
+   * Drop invalidation versions that no local entry or active fill can be stale against.
+   * Callers pass only the tags whose dependents just changed, so the cost is bounded by
+   * the entries sharing those tags rather than by the whole cache.
+   */
+  private pruneInvalidatedTagVersions(tags: Iterable<string>): void {
+    tags: for (const tag of tags) {
+      const invalidatedVersion = this.invalidatedTagVersions.get(tag);
+      if (invalidatedVersion === undefined) continue;
+      for (const entry of this.entriesByTag.get(tag) ?? []) {
+        if (entry.createdVersion < invalidatedVersion) continue tags;
+      }
+      for (const generation of this.activeGenerations) {
+        if (generation.tags.has(tag) && generation.createdVersion < invalidatedVersion)
+          continue tags;
+      }
+      this.invalidatedTagVersions.delete(tag);
+    }
   }
 
   private createAdapterKey(key: string): string {
@@ -822,6 +938,40 @@ export function configureFarmCache(config: FarmCacheUserConfig | undefined): voi
   sharedFarmDataCache.configure(config);
 }
 
+/**
+ * Wrap an async function so its results are cached and shared across requests,
+ * processes, and restarts.
+ *
+ * The cache key is built from the wrapped function's identity (its name and a
+ * hash of its source), the active locale, `keyParts`, and the call arguments.
+ * Deriving identity from the source — rather than the closure instance — is
+ * deliberate: it keeps the key stable across processes and restarts so a
+ * distributed cache adapter can share entries between server instances.
+ *
+ * The consequence is that two closures with **identical source text but
+ * different captured variables** produce the same identity. Pass those captured
+ * values in `keyParts` so they take part in the key; otherwise the closures
+ * share a cache entry and return each other's data:
+ *
+ * ```ts
+ * // Collides: both closures have identical source, and `table` is captured,
+ * // not an argument, so it never reaches the key.
+ * const makeLoader = (table: string) =>
+ *   unstable_cache(async (id: number) => db.get(table, id));
+ *
+ * // Correct: the captured value disambiguates the two closures.
+ * const makeLoader = (table: string) =>
+ *   unstable_cache(async (id: number) => db.get(table, id), [table]);
+ * ```
+ *
+ * Values passed as call arguments already participate in the key and do not
+ * need to be repeated in `keyParts`.
+ *
+ * @param fn The async function to memoize.
+ * @param keyParts Extra values that identify this call site. Include every
+ *   variable the function closes over that is not one of its arguments.
+ * @param options Tags, paths, and revalidation settings for the cached entry.
+ */
 export function unstable_cache<Args extends unknown[], Result>(
   fn: (...args: Args) => Result | Promise<Result>,
   keyParts: readonly unknown[] = [],
@@ -840,6 +990,15 @@ export function unstable_cache<Args extends unknown[], Result>(
   };
 }
 
+/**
+ * Invalidate every cache entry carrying `tag`.
+ *
+ * Observability note: the `count` on the emitted `cache.revalidateTag` event is
+ * derived from Farm's process-local entry tracking. With a shared `cache.adapter`
+ * configured, entries live in the adapter rather than in local memory, so the
+ * count can read as `0` even though the invalidation is still propagated to the
+ * adapter and applied. Treat it as a best-effort signal, not a distributed count.
+ */
 export function revalidateTag(_tag: string, _profile?: RevalidateTagProfile): void | Promise<void> {
   const cache = getFarmDataCache();
   if (cache.hasAdapter) {
@@ -868,6 +1027,16 @@ export function updateTag(tag: string): void | Promise<void> {
   cache.revalidateTag(tag, { source: "updateTag" });
 }
 
+/**
+ * Invalidate cached data for a route path (and its PPR shell, if any).
+ *
+ * Observability note: the `count` on the emitted `cache.revalidatePath` event and
+ * the `ppr.shell.invalidated` event are derived from process-local entry tracking.
+ * With a shared `cache.adapter`, PPR shells live in the adapter rather than in
+ * local memory, so the count can read as `0` and `ppr.shell.invalidated` may not
+ * be emitted even though the invalidation is still propagated to the adapter and
+ * applied.
+ */
 export function revalidatePath(routePath: string): void | Promise<void> {
   const cache = getFarmDataCache();
   if (cache.hasAdapter) {
@@ -948,6 +1117,7 @@ export function normalizeRevalidatePath(routePath: string): string {
   normalized = normalized.split(/[?#]/, 1)[0] ?? normalized;
   normalized = normalized.startsWith("/") ? normalized : `/${normalized}`;
   normalized = normalized.replace(/\/{2,}/g, "/");
+  normalized = new URL(normalized, "http://farm.invalid").pathname;
   if (normalized.length > 1) {
     normalized = normalized.replace(/\/+$/, "");
   }
@@ -963,7 +1133,7 @@ function normalizeRevalidate(revalidate: number | false | undefined): number | f
     return revalidate;
   }
   if (!Number.isFinite(revalidate) || revalidate < 0) {
-    return undefined;
+    throw new TypeError("Cache revalidate must be false or a finite, non-negative number.");
   }
   // 0 is meaningful: the entry is stale immediately, i.e. always re-produced.
   return revalidate;
@@ -1005,6 +1175,18 @@ function normalizePositiveDuration(
     throw new TypeError(`${name} must be a positive number of milliseconds.`);
   }
   return Math.floor(value);
+}
+
+function normalizePositiveInteger(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive integer.`);
+  }
+  return value;
 }
 
 function delay(ms: number): Promise<void> {
@@ -1085,6 +1267,51 @@ function serializeBinaryBytes(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function serializeCanonicalStringEntries(
+  entries: Iterable<readonly [string, string]>,
+  seen: WeakSet<object>,
+): string {
+  const valuesByKey = new Map<string, string[]>();
+  for (const [key, item] of entries) {
+    const values = valuesByKey.get(key);
+    if (values) values.push(item);
+    else valuesByKey.set(key, [item]);
+  }
+
+  return Array.from(valuesByKey.keys())
+    .sort(compareCodepoint)
+    .flatMap((key) =>
+      valuesByKey
+        .get(key)!
+        .map((item) => `[${stableSerialize(key, seen)},${stableSerialize(item, seen)}]`),
+    )
+    .join(",");
+}
+
+function isPlainCacheKeyObject(value: object): value is Record<string, unknown> {
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === null) return true;
+
+  const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor")?.value;
+  return (
+    Object.getPrototypeOf(prototype) === null &&
+    typeof constructor === "function" &&
+    constructor.name === "Object"
+  );
+}
+
+function getCacheKeyValueType(value: object): string {
+  const prototype = Object.getPrototypeOf(value);
+  const constructor = prototype
+    ? Object.getOwnPropertyDescriptor(prototype, "constructor")?.value
+    : undefined;
+  if (typeof constructor === "function" && constructor.name) {
+    return constructor.name;
+  }
+
+  return Object.prototype.toString.call(value).slice(8, -1) || "object";
+}
+
 function stableSerialize(value: unknown, seen = new WeakSet<object>()): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
@@ -1159,6 +1386,27 @@ function stableSerialize(value: unknown, seen = new WeakSet<object>()): string {
       ).sort(compareCodepoint);
       seen.delete(value);
       return `map:[${items.join(",")}]`;
+    }
+    // URLSearchParams and Headers keep their contents internally, so
+    // Object.entries is empty for both (same rationale as Set/Map above).
+    // Canonicalize key order while preserving the order of repeated values for
+    // each key. URLSearchParams treats `a=1&a=2` and `a=2&a=1` as observably
+    // different inputs, while `b=2&a=1` and `a=1&b=2` should still share a key.
+    if (value instanceof URLSearchParams) {
+      const serialized = serializeCanonicalStringEntries(value, seen);
+      seen.delete(value);
+      return `urlsearchparams:[${serialized}]`;
+    }
+    if (value instanceof Headers) {
+      const serialized = serializeCanonicalStringEntries(value, seen);
+      seen.delete(value);
+      return `headers:[${serialized}]`;
+    }
+
+    if (!isPlainCacheKeyObject(value)) {
+      throw new TypeError(
+        `Cache keys do not support ${getCacheKeyValueType(value)} values. Convert the value to an explicit stable string or structured key before caching.`,
+      );
     }
 
     // Codepoint comparison, not localeCompare: the host locale must not

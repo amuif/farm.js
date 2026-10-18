@@ -16,6 +16,7 @@ import { getFarmAppDirectories, getFarmSourceRoots, type ResolvedFarmLayer } fro
 import { writeFileIfChanged } from "./write-file-if-changed";
 import type { FarmPlugin } from "./plugin";
 import { resolvePluginRoutes } from "./api/route";
+import { createSyncModelTypeDeclarations } from "./schema-model-types";
 
 export { generateFarmI18nTypes };
 
@@ -141,15 +142,19 @@ export async function generateFarmTypeArtifacts(
         "Cannot generate plugin API types without a Farm config file. Pass configPath.",
       );
     }
-    const content = generator.generateAPIRouter(apiRoutes, {
-      outFile: apiTypesPath,
-      pluginConfigs: pluginRoutes.length ? [...new Set(configFiles)] : [],
-      pluginRoutes,
-    });
+    // An app without API routes gets no API client file. Once one exists, keep it
+    // current even when the routes go away, so imports of it never go stale.
+    if (apiRoutes.length > 0 || pluginRoutes.length > 0 || existsSync(apiTypesPath)) {
+      const content = generator.generateAPIRouter(apiRoutes, {
+        outFile: apiTypesPath,
+        pluginConfigs: pluginRoutes.length ? [...new Set(configFiles)] : [],
+        pluginRoutes,
+      });
 
-    writeOrCheckGeneratedFile(apiTypesPath, content, options.check, result.stalePaths);
+      writeOrCheckGeneratedFile(apiTypesPath, content, options.check, result.stalePaths);
 
-    result.apiTypesPath = apiTypesPath;
+      result.apiTypesPath = apiTypesPath;
+    }
     result.apiRoutes = apiRoutes;
   }
 
@@ -229,6 +234,11 @@ export async function generateFarmTypeArtifacts(
         outFile: options.i18nTypesOutFile,
       });
     }
+  }
+
+  if (shouldRefreshUnifiedTypes) {
+    const syncModelTypes = createSyncModelTypeDeclarations(options.plugins);
+    if (syncModelTypes) unifiedSections.push(syncModelTypes);
   }
 
   if (shouldRefreshUnifiedTypes) {

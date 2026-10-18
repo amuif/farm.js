@@ -74,10 +74,12 @@ export default defineConfig({
 ```
 
 Vercel preview, development, and custom-environment deployments are skipped automatically from
-`VERCEL_ENV` and `VERCEL_TARGET_ENV`. Farm does not classify deployments from the hostname suffix,
-so a production website whose public domain ends in `.vercel.app` remains eligible. On another
-provider, set `FARM_TELEMETRY=0` or `FARM_TELEMETRY_DISABLED=1` in preview environments while
-leaving production enabled.
+`VERCEL_ENV` and `VERCEL_TARGET_ENV`, as are Netlify preview, branch, and dev deployments (when
+`NETLIFY=true`) and Render pull-request previews (when `IS_PULL_REQUEST=true`). Farm does not
+classify deployments from the hostname suffix, so a production website whose public domain ends
+in `.vercel.app` remains eligible. On a provider Farm does not auto-detect, set
+`FARM_TELEMETRY=0` or `FARM_TELEMETRY_DISABLED=1` in preview environments while leaving
+production enabled.
 
 The Farm-owned endpoint removes the Vercel-confirmed legacy preview aliases that were stored before
 this runtime guard existed. It does not guess whether a deployment is a preview from its hostname.
@@ -114,7 +116,10 @@ or `list-templates`, and a completed scaffold also records `project_created`. He
 Every CLI event also has a random event ID for deduplication and the random local installation ID.
 The server immediately converts the installation ID into an HMAC hash using a server-only salt;
 the raw ID is not stored. Production-site check-ins have neither identifier and are upserted by the
-detected origin. Receipt time is assigned by the server instead of trusting a client timestamp.
+detected origin. A telemetry-enabled production server also answers
+`/.well-known/farm-telemetry` with the same framework metadata so the ingestion service can attest
+the claimed origin before storage. Receipt time is assigned by the server instead of trusting a
+client timestamp.
 
 Farm does **not** collect or store:
 
@@ -133,9 +138,11 @@ remains alive. Telemetry can never make a Farm command fail, and there is no per
 CLI events are posted to `https://farmjs.dev/api/telemetry/v1/events`; production-site check-ins are
 posted to `https://farmjs.dev/api/telemetry/v1/sites`. Both endpoints accept a strict, versioned JSON
 schema, reject unknown fields and bodies larger than 8 KiB, and rate-limit traffic. CLI events are
-deduplicated by event ID, while production sites are upserted by their normalized origin.
-Because the public clients contain no ingestion secret, dashboard origins are usage signals rather
-than verified domain-ownership records.
+deduplicated by event ID. Before a production site is upserted, the service fetches its fixed
+well-known endpoint through a private-address-blocking connection, rejects redirects and oversized
+responses, and stores the metadata returned by that origin instead of client-claimed metadata.
+Rows created before origin attestation was introduced remain conservatively labeled as unverified
+and disappear through the normal retention window unless a current deployment attests them.
 
 Raw telemetry events and inactive production-site records are retained for 90 days by default and
 are pruned by the ingestion service. The verified legacy Vercel preview records are also removed
@@ -161,8 +168,8 @@ The Farm-owned docs deployment uses four server-only environment variables:
 
 These values must be encrypted deployment variables and must never use a `PUBLIC_` prefix or be
 committed to the repository. Public telemetry clients do not contain an ingestion secret; the
-endpoints use strict validation, body limits, rate limits, event deduplication, and site upserts
-instead.
+endpoints use strict validation, body limits, rate limits, event deduplication, and origin
+attestation instead.
 
 After connecting Postgres, generate the Prisma client and apply the schema from the repository:
 

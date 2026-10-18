@@ -1,7 +1,9 @@
+// @vitest-environment node
+
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { format } from "oxfmt";
 import { APITypeGenerator } from "../type-generator";
 
@@ -43,6 +45,24 @@ describe("APITypeGenerator", () => {
     expect(content).toContain('"storage-demo": {');
     expect(content).toContain("get: typeof GET_storage_demo;");
     expect(content).toContain("post: typeof POST_storage_demo;");
+  });
+
+  it("treats Object prototype names as ordinary static route segments", () => {
+    const generator = new APITypeGenerator("/tmp/app");
+    const names = ["constructor", "prototype", "toString", "__proto__"];
+    const content = generator.generateAPIRouter(
+      names.map((name) => ({
+        path: `/api/${name}/details`,
+        methods: ["GET"],
+        filePath: `/tmp/app/api/${name}/details/route.ts`,
+        relativePath: `api/${name}/details/route.ts`,
+      })),
+    );
+
+    for (const name of names) {
+      expect(content).toContain(`${name}: {`);
+      expect(content).toContain(`get: typeof GET_${name}_details;`);
+    }
   });
 
   it("keeps import aliases unique for routes that normalize alike", () => {
@@ -164,6 +184,46 @@ describe("APITypeGenerator", () => {
     expect(content).toContain("status: {");
     expect(content).toContain("profile: {");
     expect(content).toContain("query: typeof QUERY_profile;");
+  });
+
+  it("detects handlers in route files that contain JSX", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "farm-api-types-jsx-"));
+    const appDir = path.join(root, "src", "app");
+    const cardRouteDir = path.join(appDir, "api", "card");
+    const badgeRouteDir = path.join(appDir, "api", "badge");
+    mkdirSync(cardRouteDir, { recursive: true });
+    mkdirSync(badgeRouteDir, { recursive: true });
+
+    writeFileSync(
+      path.join(cardRouteDir, "route.tsx"),
+      [
+        'import { ImageResponse } from "@farm.js/core/og";',
+        "type HEAD = () => Response;",
+        "export type { HEAD };",
+        "export const GET = () =>",
+        '  new ImageResponse(<div style={{ display: "flex" }}>Hello</div>, { width: 1200, height: 630 });',
+      ].join("\n"),
+    );
+    writeFileSync(
+      path.join(badgeRouteDir, "route.jsx"),
+      [
+        'import { ImageResponse } from "@farm.js/core/og";',
+        "export function POST() {",
+        "  return new ImageResponse(<span>ok</span>, { width: 120, height: 20 });",
+        "}",
+      ].join("\n"),
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const routes = new APITypeGenerator(appDir).scanAPIRoutes();
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(routes.find((route) => route.path === "/api/card")?.methods).toEqual(["GET"]);
+      expect(routes.find((route) => route.path === "/api/badge")?.methods).toEqual(["POST"]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("detects typed variable handlers", () => {

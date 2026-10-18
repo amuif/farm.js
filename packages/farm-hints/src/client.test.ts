@@ -68,6 +68,30 @@ describe("Farm Hints browser runtime", () => {
     runtime.close();
   });
 
+  it("still scans while the page mutates faster than the debounce interval", async () => {
+    vi.useFakeTimers();
+    const runtime = startHintsRuntime(
+      resolveHintsOptions({
+        accessibility: false,
+        html: true,
+        thirdParty: false,
+        report: "console",
+      }),
+      window,
+    );
+    try {
+      const main = document.querySelector("main")!;
+      for (let tick = 0; tick < 20; tick += 1) {
+        main.setAttribute("id", `tick-${tick}`);
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      expect(mocks.collectDocumentHints).toHaveBeenCalled();
+    } finally {
+      runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("connects the three browser vitals only when performance hints are enabled", () => {
     const runtime = startHintsRuntime(
       resolveHintsOptions({
@@ -81,6 +105,51 @@ describe("Farm Hints browser runtime", () => {
     expect(mocks.onLCP).toHaveBeenCalledOnce();
     expect(mocks.onCLS).toHaveBeenCalledOnce();
     expect(mocks.onINP).toHaveBeenCalledOnce();
+    runtime.close();
+  });
+
+  it("preserves every scan finding whose id is unique across the frame chain (iframe fix)", async () => {
+    mocks.collectDocumentHints.mockResolvedValue([
+      {
+        id: "accessibility:button-name:#frame#0",
+        category: "accessibility",
+        severity: "critical",
+        title: "First button",
+        detail: "Add text.",
+        selector: "#frame",
+      },
+      {
+        id: "accessibility:button-name:#frame#1",
+        category: "accessibility",
+        severity: "critical",
+        title: "Second button",
+        detail: "Add text.",
+        selector: "#frame",
+      },
+    ]);
+
+    const runtime = startHintsRuntime(
+      resolveHintsOptions({
+        accessibility: false,
+        html: false,
+        thirdParty: false,
+        report: "console",
+      }),
+      window,
+    );
+    await runtime.scan("test", "/iframe");
+
+    expect(console.warn).toHaveBeenCalledTimes(2);
+    expect(console.warn).toHaveBeenCalledWith(
+      "[accessibility] First button",
+      "#frame",
+      "Add text.",
+    );
+    expect(console.warn).toHaveBeenCalledWith(
+      "[accessibility] Second button",
+      "#frame",
+      "Add text.",
+    );
     runtime.close();
   });
 });

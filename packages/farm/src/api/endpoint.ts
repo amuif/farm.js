@@ -1,10 +1,17 @@
 import { createEndpoint as betterCallEndpoint } from "better-call";
 import { applyFarmCacheInvalidationTargets, type FarmCacheInvalidationTarget } from "../cache";
 import { isMultipartSchema, type MultipartSchema, type TypedFormData } from "./transport";
+import type { RouteSchema, RouteSchemaInput, RouteSchemaOutput } from "./route-schema";
+import type { EndpointOpenAPIMetadata } from "../openapi/types";
 
-// Generic schema type that works with both Zod v3 and v4
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnySchema = { _output?: any; _input?: any; parse?: (data: unknown) => any };
+// Part of every endpoint's public shape (`openapi` and `__openapi` below). An
+// interface cannot be inlined into a consumer's declarations, so it has to be
+// nameable from the entry a consumer imports. `export *` in api/index.ts exposes
+// it as @farm.js/core/api; plugin.ts re-exports it for plugin authors.
+export type { EndpointOpenAPIMetadata };
+
+// Share the route factory's Zod and Standard Schema contract.
+type AnySchema = RouteSchema;
 
 type MaybePromise<T> = T | Promise<T>;
 type Simplify<T> = { [TKey in keyof T]: T[TKey] } & {};
@@ -14,27 +21,27 @@ type UnionToIntersection<T> = (T extends unknown ? (value: T) => void : never) e
   ? TIntersection
   : never;
 
-// Infer output type from schema (works with Zod v3 and v4)
-type InferOutput<T> = T extends { _output: infer O }
-  ? O
-  : T extends { parse: (data: unknown) => infer R }
-    ? R
-    : unknown;
+// Handlers receive parsed output; callers supply the schema input.
+type InferOutput<T> = RouteSchemaOutput<T>;
 
 type InferInput<T> = T extends { _input: infer I }
   ? I
-  : T extends { parse: (data: infer I) => unknown }
-    ? I
-    : unknown;
+  : T extends { "~standard": unknown }
+    ? RouteSchemaInput<T>
+    : T extends { parse: (data: infer I) => unknown }
+      ? I
+      : unknown;
 
 type InferBodyInput<T> =
-  T extends MultipartSchema<AnySchema> ? TypedFormData<InferOutput<T>> : InferOutput<T>;
+  T extends MultipartSchema<AnySchema> ? TypedFormData<InferInput<T>> : InferInput<T>;
 
 type InferHeadersOutput<T> = [T] extends [never]
   ? Record<string, string>
   : T extends AnySchema
     ? InferOutput<T>
     : Record<string, string>;
+
+type InferHeadersInput<T> = [T] extends [never] ? never : InferInput<T>;
 
 export type EndpointErrorSchema = AnySchema & { parse: (data: unknown) => unknown };
 
@@ -176,6 +183,21 @@ export type EndpointInvalidations<
       context: EndpointInvalidationContext<TContext, TBody, TQuery, THeaders>,
     ) => readonly EndpointInvalidationTarget[] | Promise<readonly EndpointInvalidationTarget[]>);
 
+/** Metadata used when an installed MCP transport exposes this endpoint as a tool. */
+export interface EndpointMCPMetadata {
+  /** Optional MCP tool name. Farm derives one from the method and path when omitted. */
+  name?: string;
+  title?: string;
+  description?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** Opt an endpoint into MCP discovery with derived or explicit tool metadata. */
+export type EndpointMCPOptions = true | EndpointMCPMetadata;
+
 type ValidateEndpointMiddlewares<TMiddlewares extends readonly AnyEndpointMiddleware[]> = {
   readonly [TIndex in keyof TMiddlewares]: TMiddlewares[TIndex] extends AnyEndpointMiddleware
     ? [Awaited<ReturnType<TMiddlewares[TIndex]>>] extends [EndpointMiddlewareResult<object>]
@@ -236,6 +258,13 @@ export type EndpointOptions<
     InferHeadersOutput<THeaders>
   >;
   errors?: TErrors;
+  /** OpenAPI-only operation metadata. This does not enforce authentication at runtime. */
+  openapi?: EndpointOpenAPIMetadata;
+  /**
+   * Opt this endpoint into an installed MCP transport. This is discovery metadata only;
+   * transport and endpoint authorization remain required separately.
+   */
+  mcp?: EndpointMCPOptions;
   /** @deprecated Use plain functions in `middleware` for Farm endpoint middleware. */
   use?: any[];
 };
@@ -267,18 +296,28 @@ export type TypedEndpoint<
   THeaders = Record<string, string>,
   TErrors = never,
   TBodyInput = TBody,
+  TQueryInput = TQuery,
+  THeadersInput = THeaders,
 > = {
   __types: {
     body: TBody;
     inputBody: TBodyInput;
     query: TQuery;
+    inputQuery: TQueryInput;
     headers: THeaders;
+    inputHeaders: THeadersInput;
     response: TResponse;
     errors: TErrors;
   };
   __path?: string;
   __method?: string;
-} & ((options?: { body?: TBody; query?: TQuery }) => Promise<TResponse>);
+  __openapi?: EndpointOpenAPIMetadata;
+  __mcp?: EndpointMCPOptions;
+} & ((options?: {
+  body?: TBodyInput;
+  query?: TQueryInput;
+  headers?: THeadersInput;
+}) => Promise<TResponse>);
 
 type CreatedEndpoint<
   TBody extends AnySchema,
@@ -292,7 +331,9 @@ type CreatedEndpoint<
   Awaited<TResponse>,
   InferHeadersOutput<THeaders>,
   EndpointErrorContracts<TErrors>,
-  InferBodyInput<TBody>
+  InferBodyInput<TBody>,
+  InferInput<TQuery>,
+  InferHeadersInput<THeaders>
 >;
 
 type AnyEndpointOptions = EndpointOptions<
@@ -357,13 +398,18 @@ type CreatedEndpointFromOptions<TOptions, TResponse> = CreatedEndpoint<
  * Create a Farm.js API endpoint
  *
  * Supports two patterns:
- * 1. File-based routing (path auto-inferred from file location):
- *    `export const POST = createEndpoint({ method: 'POST', body: schema }, handler)`
- *    `createEndpoint({ method: 'GET', query: z.object({...}) }, handler)`
+ * 1. File-based routing (path auto-inferred from file location). The export name
+ *    (`GET`, `POST`, ...) is the HTTP method, so `method` can be omitted:
+ *    `export const GET = createEndpoint(handler)`
+ *    `export const POST = createEndpoint({ body: schema }, handler)`
  *
- * 2. Explicit path (for routes.ts at project root):
- *    `createEndpoint('/api/hello', { method: 'GET', query: z.object({...}) }, handler)`
+ * 2. Explicit path (for routes.ts at project root), where `method` selects the
+ *    HTTP method and defaults to GET:
+ *    `createEndpoint('/api/hello', { method: 'POST', body: schema }, handler)`
  */
+export function createEndpoint<TResponse = any>(
+  handler: EndpointHandler<never, never, never, TResponse>,
+): CreatedEndpoint<never, never, never, TResponse>;
 export function createEndpoint<const TOptions extends AnyEndpointOptions, TResponse = any>(
   options: TOptions,
   handler: ValidatedEndpointHandlerFromOptions<TOptions, TResponse>,
@@ -395,12 +441,13 @@ export function createEndpoint<
 export function createEndpoint(
   pathOrOptions:
     | string
-    | EndpointOptions<any, any, any, readonly AnyEndpointMiddleware[], EndpointErrorDefinitions>,
-  optionsOrHandler:
+    | EndpointOptions<any, any, any, readonly AnyEndpointMiddleware[], EndpointErrorDefinitions>
+    | EndpointHandler<any, any, any, any, any, any>,
+  optionsOrHandler?:
     | EndpointOptions<any, any, any, readonly AnyEndpointMiddleware[], EndpointErrorDefinitions>
     | EndpointHandler<any, any, any, any, any, EndpointErrorDefinitions>,
   maybeHandler?: EndpointHandler<any, any, any, any, any, EndpointErrorDefinitions>,
-): TypedEndpoint<any, any, any, any> {
+): any {
   // Determine if first arg is path or options
   let path: string;
   let options: EndpointOptions<
@@ -412,7 +459,12 @@ export function createEndpoint(
   >;
   let handler: EndpointHandler<any, any, any, any, any, EndpointErrorDefinitions>;
 
-  if (typeof pathOrOptions === "string") {
+  if (typeof pathOrOptions === "function") {
+    // createEndpoint(handler) - no options; the route file's export name picks the method
+    path = "";
+    options = {};
+    handler = pathOrOptions as typeof handler;
+  } else if (typeof pathOrOptions === "string") {
     // createEndpoint('/path', options, handler)
     path = pathOrOptions;
     options = optionsOrHandler as typeof options;
@@ -445,6 +497,8 @@ export function createEndpoint(
     middleware: _middleware,
     errors: _errors,
     invalidates: _invalidates,
+    openapi: _openapi,
+    mcp: _mcp,
     ...betterCallOptions
   } = options;
 
@@ -459,7 +513,9 @@ export function createEndpoint(
   // Store the path and type information on the endpoint for later access
   // Empty/undefined path means it will be inferred from file location by the API plugin
   endpoint.__path = path || undefined;
-  endpoint.__method = options.method || "GET";
+  // An explicit path is mounted as GET when no method is given. A path-inferred endpoint
+  // takes its method from the route file's export name, which the endpoint can't know.
+  endpoint.__method = options.method || (path ? "GET" : undefined);
   endpoint.__autoPath = !path; // Flag to indicate path should be auto-inferred
   endpoint.__handler = wrappedHandler; // Used by Farm's route runtime.
   endpoint.__farmInvoke = (ctx: EndpointMiddlewareContext<any, any, any, any>) =>
@@ -468,12 +524,15 @@ export function createEndpoint(
   endpoint.__sourceHandler = handler;
   endpoint.__invalidates = options.invalidates;
   endpoint.__errors = errors;
+  endpoint.__openapi = options.openapi;
+  endpoint.__mcp = options.mcp;
 
   // Store type information for inference
   endpoint.__types = {
     body: options.body,
     inputBody: isMultipartSchema(options.body) ? "form-data" : options.body,
     query: options.query,
+    inputQuery: options.query,
     headers: options.headers,
     response: null as any,
     errors,

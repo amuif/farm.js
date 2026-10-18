@@ -1,7 +1,7 @@
 {
   "name": "@farm.js/react",
-  "version": "0.1.0-beta.9",
-  "description": "React renderer and experimental AOT compiler for FARMJS applications",
+  "version": "0.1.0-beta.29",
+  "description": "React renderer and opt-in AOT compiler for FARMJS applications",
   "keywords": [
     "aot",
     "compiler",
@@ -64,7 +64,7 @@
     "test:stress": "vitest run --config vitest.stress.config.ts",
     "benchmark:reactivity": "node scripts/benchmark-reactivity.mjs",
     "benchmark:runtime-size": "pnpm build && node scripts/benchmark-runtime-size.mjs",
-    "test:runtime-size": "pnpm build && node scripts/benchmark-runtime-size.mjs --check",
+    "test:runtime-size": "pnpm build && node --test scripts/runtime-size-budget.test.mjs && node scripts/benchmark-runtime-size.mjs --check && node scripts/benchmark-keyed-targets.mjs",
     "test:compat": "pnpm build && node scripts/test-react-version.mjs 18.3.1 && node scripts/test-react-version.mjs 19.2.8",
     "clean": "rm -rf dist"
   },
@@ -81,11 +81,11 @@
     "react-dom": "^19.0.0",
     "tsup": "^8.3.5",
     "typescript": "^5.3.3",
-    "vite": "^5.0.10",
-    "vitest": "^3.2.7"
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
   },
   "peerDependencies": {
-    "@farm.js/core": ">=0.1.0-beta.70 <0.2.0",
+    "@farm.js/core": ">=0.1.0 <0.2.0",
     "react": "^18.3.0 || ^19.0.0",
     "react-dom": "^18.3.0 || ^19.0.0"
   },

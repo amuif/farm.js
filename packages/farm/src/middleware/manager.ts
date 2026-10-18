@@ -1,3 +1,4 @@
+import { loadFarmDevModule } from "../dev-module";
 /**
  * Middleware Manager
  *
@@ -7,12 +8,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { ViteDevServer } from "vite";
-import { decodeRouteSegment } from "../utils/decode";
+import { toFileModuleUrl } from "../utils/file-module";
 import type { IncomingMessage, ServerResponse } from "http";
 import type {
   FarmMiddlewareConfig,
   MiddlewareFunction,
-  MiddlewareMatcher,
   MiddlewareConfig,
   MiddlewareContext,
   MiddlewareResult,
@@ -22,12 +22,24 @@ import { normalizeMiddlewareModule } from "./module";
 import { logger } from "../utils";
 import { sendWebResponse } from "../server/response";
 import { emitFarmEvent } from "../observability";
+import {
+  getFarmRedirectError,
+  isFarmNotFoundError,
+  isFarmRedirectError,
+} from "../navigation-errors";
 import { stripFarmLocaleFromPathname } from "../i18n/routing";
+import { stripFarmBasePath } from "../base-path";
 import type { ResolvedFarmI18nConfig } from "../i18n/types";
 import { createCliColors } from "../cli-colors";
 import { appendMiddlewareRoutePath } from "./path";
 import type { FarmServerConfig, ResolvedFarmServerConfig } from "../server-http";
 import { resolveFarmRequestURL } from "../server/request";
+import {
+  compileMiddlewareConfig,
+  matchesMiddlewareConfig,
+  compileMiddlewareRoute,
+  matchesMiddlewareRoute,
+} from "./matcher";
 
 export interface DiscoveredMiddleware {
   path: string;
@@ -78,6 +90,7 @@ export class MiddlewareManager {
     for (const [index, entry] of entries.entries()) {
       const handlers = this.getConfigHandlers(entry);
       const middlewareConfig = this.toMiddlewareConfig(entry);
+      compileMiddlewareConfig(middlewareConfig);
 
       if (handlers.length === 0) {
         this.globalConfig = middlewareConfig;
@@ -103,6 +116,7 @@ export class MiddlewareManager {
       const discovered: DiscoveredMiddleware[] = [];
       await this.discoverInDirectory(appDir, "/", discovered);
       for (const middleware of discovered) {
+        compileMiddlewareRoute(middleware);
         middlewareByPath.set(middleware.path, middleware);
       }
     }
@@ -110,8 +124,8 @@ export class MiddlewareManager {
 
     // Sort by path depth (root first, then nested)
     this.middleware.sort((a, b) => {
-      const depthA = a.path.split("/").length;
-      const depthB = b.path.split("/").length;
+      const depthA = a.path.split("/").filter(Boolean).length;
+      const depthB = b.path.split("/").filter(Boolean).length;
       return depthA - depthB;
     });
 
@@ -177,15 +191,17 @@ export class MiddlewareManager {
       // Load the module
       let module: any;
       if (this.viteServer) {
-        module = await this.viteServer.ssrLoadModule(filePath);
+        module = await loadFarmDevModule(this.viteServer, filePath);
       } else {
-        const fileUrl = `file://${filePath}`;
-        module = await import(/* @vite-ignore */ fileUrl);
+        module = await import(/* @vite-ignore */ toFileModuleUrl(filePath));
       }
 
       const normalized = normalizeMiddlewareModule(module, routePath);
       if (!normalized) {
         throw new Error("must export a default handler or a named middleware handler");
+      }
+      if (normalized.config) {
+        compileMiddlewareConfig(normalized.config);
       }
 
       return {
@@ -206,9 +222,11 @@ export class MiddlewareManager {
   async execute(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const url = resolveFarmRequestURL(req, { trustProxy: this.server?.trustProxy });
     const pathname = url.pathname;
+    // Match the app path page routing sees: without basePath (the locale step
+    // strips it too), as the production runner does.
     const routePathname = this.i18n?.enabled
       ? stripFarmLocaleFromPathname(pathname, this.i18n)
-      : pathname;
+      : stripFarmBasePath(pathname, this.i18n?.basePath ?? "/");
     const method = req.method || "GET";
     const startTime = Date.now();
 
@@ -232,7 +250,7 @@ export class MiddlewareManager {
     }> = [
       ...this.configMiddleware.map((mw) => ({ mw, routeMatch: { matched: true } })),
       ...this.middleware
-        .map((mw) => ({ mw, routeMatch: this.matchRoutePath(routePathname, mw.path) }))
+        .map((mw) => ({ mw, routeMatch: matchesMiddlewareRoute(routePathname, mw) }))
         .filter((entry) => entry.routeMatch.matched),
     ];
 
@@ -337,11 +355,16 @@ export class MiddlewareManager {
           durationMs: Date.now() - middlewareStartTime,
         });
       } catch (error) {
-        emitFarmEvent({
-          type: "middleware.error",
-          ...middlewareEvent,
-          error,
-        });
+        // redirect() and notFound() are control flow: the caller answers them.
+        emitFarmEvent(
+          isFarmRedirectError(error) || isFarmNotFoundError(error)
+            ? {
+                type: "middleware.shortCircuit",
+                ...middlewareEvent,
+                status: isFarmRedirectError(error) ? getFarmRedirectError(error)!.status : 404,
+              }
+            : { type: "middleware.error", ...middlewareEvent, error },
+        );
         throw error;
       }
 
@@ -374,73 +397,7 @@ export class MiddlewareManager {
     config: MiddlewareConfig,
     ctx: MiddlewareContext,
   ): { matched: boolean; params?: Record<string, string> } {
-    // Check exclusions
-    if (config.exclude) {
-      for (const pattern of config.exclude) {
-        if (this.matchPattern(pattern, pathname).matched) {
-          return { matched: false };
-        }
-      }
-    }
-
-    // Check matchers
-    if (config.matcher) {
-      for (const matcher of this.toMatcherList(config.matcher)) {
-        if (typeof matcher === "string" || matcher instanceof RegExp) {
-          const result = this.matchPattern(matcher, pathname);
-          if (result.matched) {
-            return result;
-          }
-        } else if (typeof matcher === "function" && matcher(ctx)) {
-          return { matched: true };
-        }
-      }
-      return { matched: false };
-    }
-
-    return { matched: true };
-  }
-
-  /**
-   * Match a pattern against pathname
-   */
-  private matchPattern(
-    pattern: string | RegExp,
-    pathname: string,
-  ): { matched: boolean; params?: Record<string, string> } {
-    if (pattern instanceof RegExp) {
-      pattern.lastIndex = 0;
-      const match = pattern.exec(pathname);
-      return {
-        matched: !!match,
-        params: match?.groups ? { ...match.groups } : undefined,
-      };
-    }
-
-    if (pattern === "*" || pattern === "/(.*)") {
-      return { matched: true };
-    }
-
-    if (pattern.endsWith("(.*)")) {
-      const prefix = pattern.slice(0, -4);
-      return { matched: pathname === prefix || pathname.startsWith(`${prefix}/`) };
-    }
-
-    const { regex, params } = this.compilePathPattern(pattern);
-    const match = regex.exec(pathname);
-    if (!match) {
-      return { matched: false };
-    }
-
-    const values: Record<string, string> = {};
-    params.forEach((param, index) => {
-      values[param] = decodeRouteSegment(match[index + 1] || "");
-    });
-
-    return {
-      matched: true,
-      params: Object.keys(values).length > 0 ? values : undefined,
-    };
+    return matchesMiddlewareConfig(pathname, config, ctx);
   }
 
   /**
@@ -456,35 +413,6 @@ export class MiddlewareManager {
 
   hasMiddleware(): boolean {
     return this.configMiddleware.length > 0 || this.middleware.length > 0;
-  }
-
-  private matchRoutePath(
-    pathname: string,
-    middlewarePath: string,
-  ): { matched: boolean; params?: Record<string, string> } {
-    if (middlewarePath === "/") return { matched: true };
-
-    const exactMatch = this.matchPattern(middlewarePath, pathname);
-    if (exactMatch.matched) {
-      return exactMatch;
-    }
-
-    const nestedMatch = this.matchPattern(`${middlewarePath}/:__farmRest*`, pathname);
-    if (!nestedMatch.matched) {
-      return { matched: false };
-    }
-
-    const params = { ...nestedMatch.params };
-    delete params.__farmRest;
-    return {
-      matched: true,
-      params: Object.keys(params).length > 0 ? params : undefined,
-    };
-  }
-
-  private toMatcherList(matcher: MiddlewareConfig["matcher"]): MiddlewareMatcher[] {
-    if (!matcher) return [];
-    return Array.isArray(matcher) ? matcher : [matcher];
   }
 
   private getConfigHandlers(
@@ -513,68 +441,5 @@ export class MiddlewareManager {
   ): MiddlewareConfig {
     const { matcher, exclude, runtime } = entry;
     return { matcher, exclude, runtime };
-  }
-
-  private compilePathPattern(pattern: string): { regex: RegExp; params: string[] } {
-    const params: string[] = [];
-    const segments = pattern.split("/").filter(Boolean);
-
-    if (segments.length === 0) {
-      return { regex: /^\/$/, params };
-    }
-
-    const parts = segments.map((segment) => {
-      if (segment === "**") {
-        return "(?:/.*)?";
-      }
-
-      if (segment === "*") {
-        return "/[^/]+";
-      }
-
-      if (segment.startsWith(":")) {
-        const { name, modifier } = this.parseColonParam(segment);
-        params.push(name);
-
-        if (modifier === "*") {
-          return "(?:/(.*))?";
-        }
-        if (modifier === "+") {
-          return "/(.+)";
-        }
-        return "/([^/]+)";
-      }
-
-      if (segment.startsWith("[...") && segment.endsWith("]")) {
-        params.push(segment.slice(4, -1));
-        return "(?:/(.*))?";
-      }
-
-      if (segment.startsWith("[") && segment.endsWith("]")) {
-        params.push(segment.slice(1, -1));
-        return "/([^/]+)";
-      }
-
-      return `/${this.escapeRegex(segment).replace(/\\\*/g, "[^/]*")}`;
-    });
-
-    return {
-      regex: new RegExp(`^${parts.join("")}$`),
-      params,
-    };
-  }
-
-  private parseColonParam(segment: string): { name: string; modifier?: string } {
-    const raw = segment.slice(1);
-    const last = raw[raw.length - 1];
-    const modifier = last === "*" || last === "+" || last === "?" ? last : undefined;
-    return {
-      name: modifier ? raw.slice(0, -1) : raw,
-      modifier,
-    };
-  }
-
-  private escapeRegex(value: string): string {
-    return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
   }
 }

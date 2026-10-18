@@ -1,9 +1,11 @@
 import { betterAuth } from "@farm.js/better-auth";
 import { defineConfig } from "@farm.js/core/config";
+import { devtools } from "@farm.js/devtools";
 import { vue } from "@farm.js/vue";
 import { auth } from "./src/lib/auth.ts";
 
 export default defineConfig({
+  plugins: [devtools()],
   renderer: vue(),
   theme: {
     default: "dark",
@@ -13,8 +15,5 @@ export default defineConfig({
   },
   migrations: {
     commands: [{ name: "Better Auth schema", command: "pnpm auth:migrate" }],
-  },
-  deploy: {
-    target: "vercel",
   },
 });

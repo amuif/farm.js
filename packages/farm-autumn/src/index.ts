@@ -316,6 +316,11 @@ function getReportedUsageEvent(key: string): AutumnBillingReportUsageResult | nu
   return entry.result;
 }
 
+// Reports still being applied, keyed like the replay cache. The replay cache
+// is only written once a report finishes, so without this a retry that
+// arrives while the first attempt is in flight would apply the usage again.
+const inFlightUsageReports = new Map<string, Promise<Response>>();
+
 function setReportedUsageEvent(key: string, result: AutumnBillingReportUsageResult): void {
   reportedUsageEvents.set(key, { at: Date.now(), result });
   if (reportedUsageEvents.size > REPORTED_USAGE_EVENT_LIMIT) {
@@ -950,15 +955,20 @@ function resolveActiveProduct(
     };
   }
 
-  const matchedPurchase = [...(customer?.purchases ?? [])]
+  const matchingPurchases = [...(customer?.purchases ?? [])]
     .filter((entry) => byPlanId.has(entry.planId))
-    .sort((left, right) => right.startedAt - left.startedAt)[0];
+    .sort((left, right) => right.startedAt - left.startedAt);
+  const now = Date.now();
+  const activePurchase = matchingPurchases.find(
+    (entry) => entry.expiresAt == null || entry.expiresAt > now,
+  );
+  const matchedPurchase = activePurchase ?? matchingPurchases[0];
   if (matchedPurchase) {
     return {
       product: byPlanId.get(matchedPurchase.planId) ?? null,
       subscription: null,
       purchase: matchedPurchase,
-      status: "active",
+      status: activePurchase ? "active" : "canceled",
     };
   }
 
@@ -1200,7 +1210,24 @@ function webhookHeadersToStandardHeaders(headers: Headers): Record<string, strin
   return result;
 }
 
+/**
+ * Build the verifier for an Autumn webhook secret.
+ *
+ * Autumn delivers webhooks through Svix, which issues Standard Webhooks secrets
+ * of the form `whsec_<base64 key>`. The library strips that prefix and decodes
+ * the key itself, so such a secret has to reach it unchanged. Base64-encoding
+ * it first turns the literal string into the HMAC key, and every genuine event
+ * then fails verification.
+ *
+ * A secret without the prefix is treated as raw key material and base64-encoded
+ * so the library decodes it back to the original bytes. That is how Polar's SDK
+ * handles Polar's raw secrets, and it keeps any existing raw-secret setup
+ * working.
+ */
 function createStandardWebhook(secret: string) {
+  if (secret.startsWith("whsec_")) {
+    return new StandardWebhook(secret);
+  }
   return new StandardWebhook(Buffer.from(secret, "utf-8").toString("base64"));
 }
 
@@ -1830,8 +1857,18 @@ export function autumn<TInput extends AutumnIntegrationInput>(
           if (!body.key) {
             return new Response("An Autumn meter key is required.", { status: 400 });
           }
-          if (typeof body.quantity !== "number" || !Number.isFinite(body.quantity)) {
-            return new Response("A numeric quantity is required.", { status: 400 });
+          if (
+            typeof body.quantity !== "number" ||
+            !Number.isFinite(body.quantity) ||
+            body.quantity <= 0
+          ) {
+            // Usage is reported as an increment, and the projection is written
+            // back as the customer's absolute balance, so a negative quantity
+            // lets a caller lower their own metered usage. The hard-limit check
+            // compares `projected > hardLimit`, which a negative always passes.
+            return new Response("Autumn reported quantity must be a positive number.", {
+              status: 400,
+            });
           }
           if (!body.idempotencyKey) {
             return new Response("An idempotencyKey is required for Autumn usage reporting.", {
@@ -1860,30 +1897,115 @@ export function autumn<TInput extends AutumnIntegrationInput>(
             return Response.json(replayed);
           }
 
-          const active = resolveActiveProduct(resolved.customer, products);
-          const planId = active.product?.planId ?? "free";
-          const plan = plans[planId] ?? {};
-          const livePlan = active.product?.autumnPlanId
-            ? await sdk.plans.get({ planId: active.product.autumnPlanId })
-            : null;
-          const currentUsed = getProjectedUsage({
-            externalCustomerId: resolved.externalCustomerId,
-            featureId,
-            currentPeriodEnd: currentPeriodEnd(active.subscription),
-            currentPeriodUsed: resolved.customer.balances?.[featureId]?.usage ?? 0,
-          });
-          const includedLimit =
-            plan.limits?.[body.key] ?? resolved.customer.balances?.[featureId]?.granted ?? null;
-          const softLimit = resolveSoftLimit(plans, planId, body.key, includedLimit, meter.guard);
-          const hardLimit = resolveHardLimit(planId, includedLimit, meter.guard);
-          const projectedCurrentPeriodUsed = projectMeterUsage({
-            aggregation: meter.aggregation,
-            currentUsed,
-            quantity: body.quantity,
-          });
+          // A concurrent retry with the same key waits for the report already
+          // in flight instead of applying the usage a second time.
+          const inFlight = inFlightUsageReports.get(idempotencyCacheKey);
+          if (inFlight) {
+            return (await inFlight).clone();
+          }
 
-          if (typeof hardLimit === "number" && projectedCurrentPeriodUsed > hardLimit) {
-            return Response.json({
+          const report = (async (): Promise<Response> => {
+            const active = resolveActiveProduct(resolved.customer, products);
+            const planId = active.product?.planId ?? "free";
+            const plan = plans[planId] ?? {};
+            const livePlan = active.product?.autumnPlanId
+              ? await sdk.plans.get({ planId: active.product.autumnPlanId })
+              : null;
+            const currentUsed = getProjectedUsage({
+              externalCustomerId: resolved.externalCustomerId,
+              featureId,
+              currentPeriodEnd: currentPeriodEnd(active.subscription),
+              currentPeriodUsed: resolved.customer.balances?.[featureId]?.usage ?? 0,
+            });
+            const includedLimit =
+              plan.limits?.[body.key] ?? resolved.customer.balances?.[featureId]?.granted ?? null;
+            const softLimit = resolveSoftLimit(plans, planId, body.key, includedLimit, meter.guard);
+            const hardLimit = resolveHardLimit(planId, includedLimit, meter.guard);
+            const projectedCurrentPeriodUsed = projectMeterUsage({
+              aggregation: meter.aggregation,
+              currentUsed,
+              quantity: body.quantity,
+            });
+
+            if (typeof hardLimit === "number" && projectedCurrentPeriodUsed > hardLimit) {
+              return Response.json({
+                key: body.key,
+                quantity: body.quantity,
+                customerId: resolved.customer.id,
+                eventName: meter.eventName ?? featureId,
+                eventIdentifier: body.idempotencyKey,
+                occurredAt: body.occurredAt ?? new Date().toISOString(),
+                currentPeriodUsed: currentUsed,
+                projectedCurrentPeriodUsed,
+                softLimit,
+                hardLimit,
+                state: "hard_limit_reached",
+                warning:
+                  "The configured metered hard cap has been reached for the current billing period. Reported usage is blocked until the next cycle or a plan change.",
+              } satisfies AutumnBillingReportUsageResult);
+            }
+
+            if (isPrepaidFeatureQuantity({ livePlan, product: active.product, featureId })) {
+              if (!active.product?.autumnPlanId) {
+                return new Response(
+                  "Autumn prepaid quantity updates require an active subscription product.",
+                  { status: 409 },
+                );
+              }
+
+              const customizedItems = mergeAutumnProductItems(livePlan, active.product);
+              await sdk.billing.update({
+                customerId: resolved.customer.id ?? resolved.externalCustomerId,
+                planId: active.product.autumnPlanId,
+                featureQuantities: [
+                  {
+                    featureId,
+                    quantity: body.quantity,
+                  },
+                ],
+                customize:
+                  customizedItems.length > 0
+                    ? {
+                        items: customizedItems as AutumnUpdateCustomizeItems,
+                      }
+                    : undefined,
+                prorationBehavior: "prorate_immediately",
+                redirectMode: "never",
+              });
+            } else {
+              // Autumn's current SDK/runtime track path is inconsistent across the published
+              // types/docs and the actual endpoint behavior. Update the balance usage directly so
+              // the example remains functional and type-safe for metered demos.
+              await sdk.balances.update({
+                customerId: resolved.customer.id ?? resolved.externalCustomerId,
+                featureId,
+                usage: projectedCurrentPeriodUsed,
+              });
+            }
+            const nextUsed = projectedCurrentPeriodUsed;
+
+            setProjectedUsage({
+              externalCustomerId: resolved.externalCustomerId,
+              featureId,
+              currentPeriodEnd: currentPeriodEnd(active.subscription),
+              projectedUsage: nextUsed,
+            });
+
+            await billing.hooks?.onUsageReported?.(
+              {
+                owner: resolved.owner,
+                key: body.key,
+                quantity: body.quantity,
+                idempotencyKey: body.idempotencyKey,
+                occurredAt: body.occurredAt ?? new Date().toISOString(),
+                eventName: meter.eventName ?? featureId,
+                customerId: resolved.customer.id,
+                projectedCurrentPeriodUsed: nextUsed,
+              },
+              resolved.tools,
+            );
+
+            const result = {
               key: body.key,
               quantity: body.quantity,
               customerId: resolved.customer.id,
@@ -1891,102 +2013,34 @@ export function autumn<TInput extends AutumnIntegrationInput>(
               eventIdentifier: body.idempotencyKey,
               occurredAt: body.occurredAt ?? new Date().toISOString(),
               currentPeriodUsed: currentUsed,
-              projectedCurrentPeriodUsed,
+              projectedCurrentPeriodUsed: nextUsed,
               softLimit,
               hardLimit,
-              state: "hard_limit_reached",
+              state:
+                typeof hardLimit === "number" && nextUsed >= hardLimit
+                  ? "hard_limit_reached"
+                  : typeof softLimit === "number" && nextUsed >= softLimit
+                    ? "soft_limit_reached"
+                    : "ok",
               warning:
-                "The configured metered hard cap has been reached for the current billing period. Reported usage is blocked until the next cycle or a plan change.",
-            } satisfies AutumnBillingReportUsageResult);
-          }
+                typeof hardLimit === "number" && nextUsed >= hardLimit
+                  ? "The configured metered hard cap has been reached for the current billing period."
+                  : typeof softLimit === "number" && nextUsed >= softLimit
+                    ? "Included usage has been exhausted. Additional usage is billable."
+                    : null,
+            } satisfies AutumnBillingReportUsageResult;
 
-          if (isPrepaidFeatureQuantity({ livePlan, product: active.product, featureId })) {
-            if (!active.product?.autumnPlanId) {
-              return new Response(
-                "Autumn prepaid quantity updates require an active subscription product.",
-                { status: 409 },
-              );
+            setReportedUsageEvent(idempotencyCacheKey, result);
+            return Response.json(result);
+          })();
+          inFlightUsageReports.set(idempotencyCacheKey, report);
+          try {
+            return (await report).clone();
+          } finally {
+            if (inFlightUsageReports.get(idempotencyCacheKey) === report) {
+              inFlightUsageReports.delete(idempotencyCacheKey);
             }
-
-            const customizedItems = mergeAutumnProductItems(livePlan, active.product);
-            await sdk.billing.update({
-              customerId: resolved.customer.id ?? resolved.externalCustomerId,
-              planId: active.product.autumnPlanId,
-              featureQuantities: [
-                {
-                  featureId,
-                  quantity: body.quantity,
-                },
-              ],
-              customize:
-                customizedItems.length > 0
-                  ? {
-                      items: customizedItems as AutumnUpdateCustomizeItems,
-                    }
-                  : undefined,
-              prorationBehavior: "prorate_immediately",
-              redirectMode: "never",
-            });
-          } else {
-            // Autumn's current SDK/runtime track path is inconsistent across the published
-            // types/docs and the actual endpoint behavior. Update the balance usage directly so
-            // the example remains functional and type-safe for metered demos.
-            await sdk.balances.update({
-              customerId: resolved.customer.id ?? resolved.externalCustomerId,
-              featureId,
-              usage: projectedCurrentPeriodUsed,
-            });
           }
-          const nextUsed = projectedCurrentPeriodUsed;
-
-          setProjectedUsage({
-            externalCustomerId: resolved.externalCustomerId,
-            featureId,
-            currentPeriodEnd: currentPeriodEnd(active.subscription),
-            projectedUsage: nextUsed,
-          });
-
-          await billing.hooks?.onUsageReported?.(
-            {
-              owner: resolved.owner,
-              key: body.key,
-              quantity: body.quantity,
-              idempotencyKey: body.idempotencyKey,
-              occurredAt: body.occurredAt ?? new Date().toISOString(),
-              eventName: meter.eventName ?? featureId,
-              customerId: resolved.customer.id,
-              projectedCurrentPeriodUsed: nextUsed,
-            },
-            resolved.tools,
-          );
-
-          const result = {
-            key: body.key,
-            quantity: body.quantity,
-            customerId: resolved.customer.id,
-            eventName: meter.eventName ?? featureId,
-            eventIdentifier: body.idempotencyKey,
-            occurredAt: body.occurredAt ?? new Date().toISOString(),
-            currentPeriodUsed: currentUsed,
-            projectedCurrentPeriodUsed: nextUsed,
-            softLimit,
-            hardLimit,
-            state:
-              typeof hardLimit === "number" && nextUsed >= hardLimit
-                ? "hard_limit_reached"
-                : typeof softLimit === "number" && nextUsed >= softLimit
-                  ? "soft_limit_reached"
-                  : "ok",
-            warning:
-              typeof hardLimit === "number" && nextUsed >= hardLimit
-                ? "The configured metered hard cap has been reached for the current billing period."
-                : typeof softLimit === "number" && nextUsed >= softLimit
-                  ? "Included usage has been exhausted. Additional usage is billable."
-                  : null,
-          } satisfies AutumnBillingReportUsageResult;
-
-          setReportedUsageEvent(idempotencyCacheKey, result);
-          return Response.json(result);
         },
       }),
       integrationRoute.post(checkPath, {

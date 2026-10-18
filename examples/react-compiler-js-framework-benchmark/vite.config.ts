@@ -11,16 +11,14 @@ export default defineConfig({
   },
   plugins: createFarmRendererPlugin({
     rendererOptions: {
-      experimental: {
-        compiler: compilerEnabled
-          ? {
-              mode: "infer",
-              onUnsupported: "error",
-              reactivity,
-              report: true,
-            }
-          : false,
-      },
+      compiler: compilerEnabled
+        ? {
+            mode: "infer",
+            onUnsupported: "error",
+            reactivity,
+            report: true,
+          }
+        : false,
     },
   }),
   build: {

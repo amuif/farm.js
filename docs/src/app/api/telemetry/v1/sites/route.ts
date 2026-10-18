@@ -6,17 +6,18 @@ import {
   normalizeFarmProductionSiteOrigin,
 } from "../../../../../../../packages/farm/src/product-telemetry";
 import { getPrisma } from "../../../../../lib/prisma";
+import { createRateLimiter } from "../../../../../lib/rate-limit";
 import {
   farmLegacyVercelPreviewSiteWhere,
   isFarmLegacyVercelPreviewSite,
 } from "../../../../../lib/telemetry-sites";
+import { verifyFarmProductionSiteAttestation } from "../../../../../lib/telemetry-site-attestation";
 import { z } from "zod";
 
 const MAX_BODY_BYTES = 8 * 1024;
-const RATE_LIMIT_WINDOW_MS = 60_000;
 const GLOBAL_RATE_LIMIT = 1_000;
 const SITE_RATE_LIMIT = 30;
-const MAX_RATE_LIMIT_ENTRIES = 2_048;
+const takeRateLimit = createRateLimiter({ maxEntries: 2_048 });
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_RETENTION_DAYS = 90;
 const SAFE_DETAIL_PATTERN = /^[0-9A-Za-z._-]{1,64}$/;
@@ -37,9 +38,6 @@ const productionSiteSchema = z
   })
   .strict();
 
-type RateLimitBucket = { count: number; startedAt: number };
-
-const rateLimitBuckets = new Map<string, RateLimitBucket>();
 let lastPruneAt = 0;
 
 function json(body: Record<string, unknown>, status: number): Response {
@@ -50,22 +48,6 @@ function json(body: Record<string, unknown>, status: number): Response {
       "x-content-type-options": "nosniff",
     },
   });
-}
-
-function takeRateLimit(key: string, limit: number, now = Date.now()): boolean {
-  const current = rateLimitBuckets.get(key);
-  if (!current || now - current.startedAt >= RATE_LIMIT_WINDOW_MS) {
-    rateLimitBuckets.set(key, { count: 1, startedAt: now });
-    if (rateLimitBuckets.size > MAX_RATE_LIMIT_ENTRIES) {
-      for (const [bucketKey, bucket] of rateLimitBuckets) {
-        if (now - bucket.startedAt >= RATE_LIMIT_WINDOW_MS) rateLimitBuckets.delete(bucketKey);
-      }
-    }
-    return true;
-  }
-  if (current.count >= limit) return false;
-  current.count += 1;
-  return true;
 }
 
 function retentionDays(): number {
@@ -94,6 +76,8 @@ async function pruneProductionSites(
   }
 }
 
+import { readTextWithLimit } from "../../../../../lib/request-body";
+
 export async function POST(request: Request): Promise<Response> {
   if (!takeRateLimit("global", GLOBAL_RATE_LIMIT)) {
     return json({ ok: false, error: "rate_limited" }, 429);
@@ -102,18 +86,14 @@ export async function POST(request: Request): Promise<Response> {
   if (!contentType.startsWith("application/json")) {
     return json({ ok: false, error: "content_type" }, 415);
   }
-  const contentLength = Number.parseInt(request.headers.get("content-length") || "0", 10);
-  if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+  const read = await readTextWithLimit(request, MAX_BODY_BYTES);
+  if (!read.ok) {
     return json({ ok: false, error: "payload_too_large" }, 413);
   }
 
   let body: unknown;
   try {
-    const text = await request.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
-      return json({ ok: false, error: "payload_too_large" }, 413);
-    }
-    body = JSON.parse(text);
+    body = JSON.parse(read.text);
   } catch {
     return json({ ok: false, error: "invalid_json" }, 400);
   }
@@ -147,21 +127,25 @@ export async function POST(request: Request): Promise<Response> {
       await pruneProductionSites(prisma, now.getTime());
       return json({ ok: true, stored: false, warning: "preview_deployment" }, 202);
     }
+    const attestation = await verifyFarmProductionSiteAttestation(parsed.data.siteUrl);
+    if (!attestation) {
+      return json({ ok: true, stored: false, warning: "site_unverified" }, 202);
+    }
     await prisma.farmProductionSite.upsert({
       where: { url: parsed.data.siteUrl },
       update: {
-        packageName: parsed.data.packageName,
-        packageVersion: parsed.data.packageVersion,
-        renderer: parsed.data.renderer,
-        deployTarget: parsed.data.deployTarget,
+        packageName: attestation.packageName,
+        packageVersion: attestation.packageVersion,
+        renderer: attestation.renderer,
+        deployTarget: attestation.deployTarget,
         lastSeenAt: now,
       },
       create: {
         url: parsed.data.siteUrl,
-        packageName: parsed.data.packageName,
-        packageVersion: parsed.data.packageVersion,
-        renderer: parsed.data.renderer,
-        deployTarget: parsed.data.deployTarget,
+        packageName: attestation.packageName,
+        packageVersion: attestation.packageVersion,
+        renderer: attestation.renderer,
+        deployTarget: attestation.deployTarget,
         firstSeenAt: now,
         lastSeenAt: now,
       },

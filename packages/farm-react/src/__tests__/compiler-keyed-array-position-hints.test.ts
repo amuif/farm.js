@@ -204,7 +204,8 @@ describe("React AOT keyed-array position hints", () => {
     expect(result.compiled).toEqual(["Table"]);
     expect(result.optimizations.keyedArrayPositionHints).toBe(7);
     expect(result.code).toContain("createCompilerKeyedArrayPositionUpdate");
-    expect(result.code).toMatch(/\.get\(\)\.remove/);
+    // The updater runs later, so the prop is read when the handler starts.
+    expect(result.code).toMatch(/_positions = _farmState\[\d+\]\.get\(\)[\s\S]*_positions\.remove/);
     expect(result.code).toContain("current.length - 1");
   });
 

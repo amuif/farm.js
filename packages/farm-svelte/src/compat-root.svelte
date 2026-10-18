@@ -5,11 +5,19 @@
     Suspense,
     createElement,
     getFarmSvelteChildren,
+    getFarmSvelteInnerHtml,
+    isFarmFunctionComponent,
     isFarmSvelteElement,
     normalizeFarmSvelteProps,
+    renderFarmFunctionComponent,
   } from "../runtime";
 
-  let { element } = $props();
+  let { element: initialElement } = $props();
+  let element = $state(initialElement);
+
+  export function render(nextElement) {
+    element = nextElement;
+  }
 </script>
 
 {#snippet renderNode(value)}
@@ -40,11 +48,18 @@
       </svelte:boundary>
     {:else if typeof type === "string"}
       {@const props = normalizeFarmSvelteProps(value)}
-      <svelte:element this={type} {...props}>
-        {#each childNodes as child}
-          {@render renderNode(child)}
-        {/each}
-      </svelte:element>
+      {@const innerHtml = getFarmSvelteInnerHtml(value)}
+      {#if innerHtml !== undefined}
+        <svelte:element this={type} {...props}>{@html innerHtml}</svelte:element>
+      {:else}
+        <svelte:element this={type} {...props}>
+          {#each childNodes as child}
+            {@render renderNode(child)}
+          {/each}
+        </svelte:element>
+      {/if}
+    {:else if isFarmFunctionComponent(type)}
+      {@render renderNode(renderFarmFunctionComponent(type, value))}
     {:else}
       {@const Component = type}
       {@const props = normalizeFarmSvelteProps(value)}

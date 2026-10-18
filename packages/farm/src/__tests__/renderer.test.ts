@@ -9,8 +9,10 @@ import {
 } from "@farm.js/renderer-tests";
 import { describe, expect, it } from "vitest";
 import {
+  assertFarmRendererStreamingRuntime,
   getFarmRendererCapabilities,
   getFarmRendererComponentExtensions,
+  getFarmRendererStreamingCapabilitiesForRuntime,
   loadFarmRendererVitePlugins,
   readFarmRendererWebStream,
   REACT_RENDERER,
@@ -26,7 +28,13 @@ defineRendererDescriptorConformance({
     server: "@farm.js/core/renderer/react/server",
     client: "@farm.js/core/renderer/react/client",
     jsxImportSource: "react",
-    capabilities: { streaming: { node: true, web: false } },
+    capabilities: {
+      streaming: {
+        node: true,
+        web: false,
+        runtimes: { edge: { node: false, web: true } },
+      },
+    },
   },
 });
 
@@ -42,14 +50,24 @@ describe("renderer configuration", () => {
       client: "@farm.js/core/renderer/react/client",
       jsxImportSource: "react",
       buildConcurrency: "parallel",
-      capabilities: { streaming: { node: true, web: false } },
+      capabilities: {
+        streaming: {
+          node: true,
+          web: false,
+          runtimes: { edge: { node: false, web: true } },
+        },
+      },
     });
     expect(renderer).not.toBe(REACT_RENDERER);
   });
 
   it("normalizes missing and partial capability declarations", () => {
+    // An undeclared renderer is assumed not to reconcile, so callers cannot
+    // silently depend on state surviving a re-render that will rebuild.
     expect(getFarmRendererCapabilities()).toEqual({
       streaming: { node: false, web: false },
+      reconcilesRerenders: false,
+      functionComponents: false,
     });
     expect(
       getFarmRendererCapabilities({
@@ -57,7 +75,114 @@ describe("renderer configuration", () => {
       }),
     ).toEqual({
       streaming: { node: false, web: true },
+      reconcilesRerenders: false,
+      functionComponents: false,
     });
+    expect(
+      getFarmRendererCapabilities({
+        capabilities: { reconcilesRerenders: true },
+      }),
+    ).toEqual({
+      streaming: { node: false, web: false },
+      reconcilesRerenders: true,
+      functionComponents: false,
+    });
+  });
+
+  it("resolves target-dependent streaming without changing legacy booleans", () => {
+    expect(getFarmRendererStreamingCapabilitiesForRuntime(REACT_RENDERER, "node")).toEqual({
+      node: true,
+      web: false,
+    });
+    expect(getFarmRendererStreamingCapabilitiesForRuntime(REACT_RENDERER, "edge")).toEqual({
+      node: false,
+      web: true,
+    });
+    expect(getFarmRendererStreamingCapabilitiesForRuntime(REACT_RENDERER, "unknown")).toEqual({
+      node: true,
+      web: false,
+    });
+    expect(
+      getFarmRendererStreamingCapabilitiesForRuntime(
+        { capabilities: { streaming: { node: true, web: true } } },
+        "edge",
+      ),
+    ).toEqual({ node: true, web: true });
+    expect(
+      getFarmRendererStreamingCapabilitiesForRuntime(
+        {
+          capabilities: {
+            streaming: {
+              node: true,
+              web: false,
+              runtimes: { edge: { web: true } },
+            },
+          },
+        },
+        "edge",
+      ),
+    ).toEqual({ node: true, web: true });
+  });
+
+  it("rejects drift between a descriptor and its loaded server binding", () => {
+    expect(() =>
+      assertFarmRendererStreamingRuntime(
+        "test",
+        { capabilities: { streaming: { node: true, web: false } } },
+        {
+          capabilities: { streaming: { node: false, web: true } },
+          renderToPipeableStream: (() => ({ pipe() {} })) as any,
+          renderToReadableStream: (() => new ReadableStream()) as any,
+        },
+        "node",
+      ),
+    ).toThrow(/server module advertises.*does not satisfy its descriptor/);
+  });
+
+  it("allows a descriptor to disable an available streaming primitive", () => {
+    expect(() =>
+      assertFarmRendererStreamingRuntime(
+        "test",
+        { capabilities: { streaming: { node: false, web: false } } },
+        {
+          capabilities: { streaming: { node: true, web: true } },
+          renderToPipeableStream: (() => ({ pipe() {} })) as any,
+          renderToReadableStream: (() => new ReadableStream()) as any,
+        },
+        "node",
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects a target capability when the loaded binding lacks its primitive", () => {
+    expect(() =>
+      assertFarmRendererStreamingRuntime(
+        "test",
+        {
+          capabilities: {
+            streaming: {
+              node: true,
+              web: false,
+              runtimes: { edge: { node: false, web: true } },
+            },
+          },
+        },
+        {},
+        "edge",
+      ),
+    ).toThrow(/Web streaming for the edge runtime.*renderToReadableStream/);
+  });
+
+  it("defaults functionComponents off until a renderer opts in", () => {
+    // Integration provider components are gated on this, so a renderer that
+    // has not taught its adapter to call a plain function component must not
+    // be assumed capable.
+    expect(getFarmRendererCapabilities().functionComponents).toBe(false);
+    expect(
+      getFarmRendererCapabilities({ capabilities: { functionComponents: true } })
+        .functionComponents,
+    ).toBe(true);
+    expect(getFarmRendererCapabilities(REACT_RENDERER).functionComponents).toBe(true);
   });
 
   it("consumes renderer Web streams without assuming one chunk type", async () => {
@@ -115,10 +240,11 @@ describe("renderer configuration", () => {
       await writeFile(
         path.join(packageRoot, "vite.mjs"),
         `export function createFarmRendererPlugin(options) {
-          return { name: "test:" + options.rendererOptions.compiler };
+          return { name: "test:" + options.rendererOptions.compiler, lifetime: options.buildLifetime };
         }`,
       );
 
+      const owner = new AbortController();
       const plugins = await loadFarmRendererVitePlugins(
         resolveFarmRenderer({
           name: "test",
@@ -128,10 +254,10 @@ describe("renderer configuration", () => {
           options: { compiler: "enabled" },
         }),
         root,
-        { ssr: true },
+        { ssr: true, buildLifetime: owner.signal },
       );
 
-      expect(plugins).toEqual([{ name: "test:enabled" }]);
+      expect(plugins).toEqual([{ name: "test:enabled", lifetime: owner.signal }]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

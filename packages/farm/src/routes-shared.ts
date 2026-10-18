@@ -4,6 +4,7 @@ import {
   assertTerminalCatchAll,
   assertUniqueRouteParameters,
 } from "./routing/specificity";
+import { extractProgrammaticPageCallPathLiterals } from "./route-call-scanner";
 
 export const PROGRAMMATIC_ROUTE_FILE_NAMES = [
   "farm.route.ts",
@@ -58,7 +59,10 @@ export function createProgrammaticRouteModuleId(
   kind: "page" | "layout" | "api",
   routePath: string,
 ): string {
-  return `${filePath}?farm-route=${kind}:${encodeURIComponent(normalizeProgrammaticRoutePath(routePath))}`;
+  // The id ends in the route path, so a path like /feed.xml would make the
+  // production transform read the module as XML. The generated module is
+  // plain JavaScript; a trailing `lang.js` marker says so whatever the path.
+  return `${filePath}?farm-route=${kind}:${encodeURIComponent(normalizeProgrammaticRoutePath(routePath))}&lang.js`;
 }
 
 export function parseProgrammaticRouteModuleId(moduleId: string): {
@@ -111,10 +115,9 @@ export function parseProgrammaticRoutePath(
 
 export function scanProgrammaticPagePaths(source: string): string[] {
   const paths = new Set<string>();
-  const callRe = /\b(?:page|createRoute)\s*\(\s*(["'`])([^"'`]+)\1/g;
 
-  for (const match of source.matchAll(callRe)) {
-    if (match[2]) paths.add(normalizeProgrammaticRoutePath(match[2]));
+  for (const routePath of extractProgrammaticPageCallPathLiterals(source)) {
+    paths.add(normalizeProgrammaticRoutePath(routePath));
   }
 
   return Array.from(paths);

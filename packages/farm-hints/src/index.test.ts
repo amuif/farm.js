@@ -25,6 +25,21 @@ describe("hints Farm plugin", () => {
     });
   });
 
+  it("pre-bundles its lazily imported browser runtime in development", async () => {
+    const plugin = hints();
+    const configured = (await plugin.configure?.(
+      {
+        plugins: [plugin],
+        vite: { optimizeDeps: { include: ["react"], exclude: ["x"] } },
+      } as never,
+      context(true),
+    )) as { plugins: unknown[]; vite: { optimizeDeps: { include: string[]; exclude: string[] } } };
+
+    expect(configured.plugins).toEqual([plugin]);
+    expect(configured.vite.optimizeDeps.include).toEqual(["react", "@farm.js/hints/client"]);
+    expect(configured.vite.optimizeDeps.exclude).toEqual(["x"]);
+  });
+
   it("removes itself before production bundles are generated", async () => {
     const plugin = hints();
     const other = { name: "other" };
@@ -57,5 +72,31 @@ describe("hints Farm plugin", () => {
     expect(state.recordTiming).toHaveBeenNthCalledWith(2, "navigation", 73, "/settings");
     expect(state.scan).toHaveBeenNthCalledWith(1, "hydration", "/account");
     expect(state.scan).toHaveBeenNthCalledWith(2, "navigation", "/settings");
+  });
+  it("removes itself in production even when an integration re-created the plugin", async () => {
+    const plugin = hints();
+
+    // withIntegrationPluginOwner rebuilds a contributed plugin as a new object
+    // with the same prototype and own descriptors, so an identity filter used to
+    // match nothing and leave farm:hints in the production config.
+    const owned = Object.create(
+      Object.getPrototypeOf(plugin),
+      Object.getOwnPropertyDescriptors(plugin),
+    );
+    expect(owned).not.toBe(plugin);
+
+    const configured = await plugin.configure?.(
+      { root: "/app", plugins: [owned], vite: {} } as never,
+      context(false),
+    );
+
+    expect((configured as any).plugins).toEqual([]);
+  });
+
+  it("refuses to continue in production when it cannot remove itself", () => {
+    const plugin = hints();
+    expect(() =>
+      plugin.configure?.({ root: "/app", plugins: [], vite: {} } as never, context(false)),
+    ).toThrow(/could not remove itself/);
   });
 });

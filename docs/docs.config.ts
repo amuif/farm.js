@@ -13,6 +13,7 @@ import {
   siSolid,
   siSvelte,
   siTanstack,
+  siV0,
   siVuedotjs,
 } from "simple-icons";
 
@@ -42,6 +43,11 @@ const resolveGeistFontsDirectory = () => {
     throw new Error("Could not resolve Geist fonts for the Farm.js docs social image.");
   return directory;
 };
+
+// T3 Chat has no published mark, so its menu entry uses a neutral chat glyph (Lucide).
+const chatIcon = brandSvg(
+  '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>',
+);
 
 const geistFontsDirectory = resolveGeistFontsDirectory();
 const embeddedWoff2 = (...segments: string[]) =>
@@ -166,6 +172,8 @@ const sidebar = [
     children: [
       { label: "Why?", slug: "", icon: "sparkles" },
       { label: "Getting Started", slug: "getting-started", icon: "rocket" },
+      { label: "Stability and Support", slug: "stability", icon: "shield" },
+      { label: "Upgrading to 0.1", slug: "upgrading", icon: "rocket" },
       { label: "Project Structure", slug: "project-structure", icon: "folder" },
       { label: "Configuration", slug: "configuration", icon: "settings" },
       { label: "Layers", slug: "layers", icon: "box" },
@@ -207,6 +215,7 @@ const sidebar = [
       { label: "API Routes", slug: "api-routes", icon: "server" },
       { label: "API Client", slug: "api-client", icon: "terminal" },
       { label: "Server Queries", slug: "server-queries", icon: "database" },
+      { label: "Local-First Patterns", slug: "local-first", icon: "zap" },
       { label: "KV Storage", slug: "storage", icon: "database" },
     ],
   },
@@ -270,12 +279,21 @@ const sidebar = [
         label: "Agents",
         icon: "sparkles",
         children: [
+          { label: "Agent frameworks", slug: "integrations/agent-frameworks", icon: "sparkles" },
           { label: "Eve", slug: "integrations/eve", icon: "brand-eve" },
           {
             label: "Cloudflare Agents",
             slug: "integrations/cf-agent",
             icon: "brand-cloudflare",
           },
+        ],
+      },
+      {
+        label: "CMS",
+        icon: "file",
+        children: [
+          { label: "Sanity", slug: "integrations/sanity", icon: "file" },
+          { label: "Strapi", slug: "integrations/strapi", icon: "file" },
         ],
       },
       {
@@ -311,7 +329,9 @@ const sidebar = [
       { label: "Route Runtime", slug: "route-runtime", icon: "server" },
       { label: "After Responses", slug: "after", icon: "timer" },
       { label: "Observability", slug: "observability", icon: "activity" },
-      { label: "DevTools", slug: "devtools", icon: "monitor" },
+      { label: "Farm Infra Analytics", slug: "infra-analytics", icon: "activity" },
+      { label: "Built-in DevTools", slug: "devtools", icon: "monitor" },
+      { label: "Doctor", slug: "doctor", icon: "wrench" },
       { label: "Cron", slug: "cron", icon: "timer" },
       { label: "Instant Preview", slug: "preview", icon: "terminal" },
       { label: "Deployment", slug: "deployment", icon: "cloud" },
@@ -336,9 +356,11 @@ const sidebar = [
         icon: "plug",
         children: [
           { label: "Analyzer", slug: "plugins/analyzer", icon: "gauge" },
+          { label: "API MCP", slug: "plugins/mcp", icon: "sparkles" },
           { label: "Content", slug: "plugins/content", icon: "file" },
           { label: "DevTools", slug: "plugins/devtools", icon: "monitor" },
           { label: "Federation", slug: "plugins/federation", icon: "network" },
+          { label: "Health", slug: "plugins/health", icon: "activity" },
           { label: "Hints", slug: "plugins/hints", icon: "lightbulb" },
           { label: "MSW", slug: "plugins/msw", icon: "shield" },
           { label: "Partytown", slug: "plugins/partytown", icon: "zap" },
@@ -346,10 +368,16 @@ const sidebar = [
           { label: "Search", slug: "plugins/search", icon: "search" },
           { label: "Scripts", slug: "plugins/scripts", icon: "code" },
           { label: "Sentry", slug: "plugins/sentry", icon: "brand-sentry" },
+          { label: "Sync", slug: "plugins/sync", icon: "network" },
           { label: "StyleX", slug: "plugins/stylex", icon: "braces" },
           { label: "WebAssembly", slug: "plugins/wasm", icon: "box" },
           { label: "WebMCP", slug: "plugins/webmcp", icon: "sparkles" },
         ],
+      },
+      {
+        label: "Community Plugins",
+        icon: "plug",
+        children: [{ label: "Blyp", slug: "plugins/blyp", icon: "activity" }],
       },
       {
         label: "Plugin Authoring",
@@ -357,6 +385,7 @@ const sidebar = [
         children: [
           { label: "Create a Plugin", slug: "plugins/create-plugin", icon: "wrench" },
           { label: "Client Plugin API", slug: "plugins/client", icon: "monitor" },
+          { label: "Plugin Tables", slug: "plugins/schema-tables", icon: "database" },
         ],
       },
     ],
@@ -438,8 +467,27 @@ const config = {
     openDocs: {
       enabled: true,
       target: "markdown",
+      prompt: "Read {url} so I can ask questions about this Farm.js documentation page.",
+      providers: [
+        "chatgpt",
+        "claude",
+        {
+          name: "T3 Chat",
+          urlTemplate: "https://t3.chat/new?q={prompt}",
+          icon: chatIcon,
+        },
+        "cursor",
+        {
+          name: "v0",
+          urlTemplate: "https://v0.app/chat?q={prompt}",
+          icon: brandPath(siV0.path),
+        },
+        "perplexity",
+        "gemini",
+        "copilot",
+      ],
     },
-    alignment: "right",
+    alignment: "left",
   },
   icons,
   navigation: {

@@ -58,6 +58,11 @@ export const GET = createEndpoint(
 
 The route appears in the generated reference with a typed `limit` query parameter.
 
+Dynamic API segments use OpenAPI path parameters. Optional catch-all routes such as
+`/api/files/[[...slug]]` produce both `/files` and `/files/{slug}` operations because OpenAPI path
+parameters themselves must always be required. Required catch-all routes produce only the
+parameterized operation.
+
 `QUERY` routes include their request-body schema too. Farm currently emits OpenAPI 3.0.3, whose
 Path Item Object does not have a native `query` field. To keep the document valid, Farm places each
 `QUERY` Operation Object under the registered `x-oai-additionalOperations.QUERY` extension. This
@@ -92,6 +97,76 @@ export default defineConfig({
 
 The configured route serves a Scalar-powered reference page with the generated spec embedded in the page. The route can be visited during development and included in production docs.
 
+Farm pins the Scalar browser assets to the reviewed version shipped with the framework and verifies CDN responses with subresource integrity. Scalar upgrades therefore arrive with Farm releases instead of floating independently in production.
+
+## Choose the API server URL
+
+Set `openapi.servers` when the document must advertise an explicit public server. Otherwise Farm
+uses an absolute `api.baseURL` when configured. During development, a root-relative API base is
+joined to the current request origin (or `http://localhost:3000` when generating without a
+request). Production documents keep a root-relative API base relative, so deployed clients and the
+interactive reference stay on the deployment's current origin instead of pointing at localhost.
+
+The precedence is `openapi.servers`, an absolute Farm `api.baseURL`, the current development
+request origin plus Farm's API path, then the mode-specific default.
+
+## Describe authentication
+
+OpenAPI operations are public by default because Farm cannot infer authorization from arbitrary
+middleware. Set a document-wide default with `openapi.security`, then override individual typed
+endpoints when public and protected routes share one document:
+
+```ts
+export default defineConfig({
+  openapi: { enabled: true, security: "cookie" },
+});
+
+export const GET = createEndpoint({ method: "GET", openapi: { security: "public" } }, async () => ({
+  status: "ok",
+}));
+
+export const POST = createEndpoint(
+  { method: "POST", openapi: { security: "bearer" } },
+  async () => ({ created: true }),
+);
+```
+
+Supported modes are `public`, `bearer`, `cookie`, and `either`. This metadata documents the
+contract; authentication middleware must still enforce it at runtime.
+
+## Describe responses
+
+Farm does not guess status codes or body formats from arbitrary handler code. Add response metadata
+to a typed endpoint when clients need an exact contract:
+
+```ts
+export const GET = createEndpoint(
+  {
+    method: "GET",
+    openapi: {
+      responses: {
+        200: {
+          body: "json",
+          description: "Current account",
+          schema: {
+            type: "object",
+            properties: { id: { type: "string" } },
+            required: ["id"],
+          },
+        },
+        404: { body: "empty", description: "Account not found" },
+      },
+    },
+  },
+  async () => Response.json(await getAccount()),
+);
+```
+
+Use `body: "empty"` for responses without content, `body: "stream"` with an explicit
+`contentType` for streams, and `body: "binary"` for files. JSON and binary responses default to
+`application/json` and `application/octet-stream`. When response metadata is absent, Farm emits an
+unspecified default response instead of claiming an unknown status code or JSON schema.
+
 **Terminal**
 
 ```bash
@@ -106,4 +181,8 @@ farm build
 - Enable OpenAPI for APIs you want to document publicly or internally.
 - Keep private admin routes out of public docs unless the site is protected.
 - Use Zod schemas on API routes for better generated parameter and body details.
+- Farm recognizes Zod schemas structurally, including Zod 3/4 schemas loaded from another package
+  copy. Standard Schema validators without portable schema metadata remain valid at runtime, but
+  the generated document uses an explicit metadata-unavailable fallback instead of inventing a
+  shape.
 - Pair OpenAPI with typed callers so server/client code and published docs describe the same route surface.

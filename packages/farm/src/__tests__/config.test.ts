@@ -91,6 +91,7 @@ describe("config helpers", () => {
         cache: {
           adapter,
           namespace: "catalog",
+          maxEntries: 2_048,
         },
       },
       "production",
@@ -99,6 +100,7 @@ describe("config helpers", () => {
     expect(config.cache).toEqual({
       adapter,
       namespace: "catalog",
+      maxEntries: 2_048,
     });
   });
 
@@ -255,6 +257,36 @@ describe("loadConfig", () => {
     );
   });
 
+  it("preserves messages from structured config loader errors", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-config-error-"));
+
+    await fs.writeFile(
+      path.join(root, "farm.config.mjs"),
+      'throw { name: "Error", message: "structured config failure" };',
+    );
+
+    const error = await loadConfig(root, undefined, "development").catch((error) => error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: "Failed to load config from farm.config.mjs: structured config failure",
+      cause: { name: "Error", message: "structured config failure" },
+    });
+  });
+
+  it("uses a structured config loader stack when its message is empty", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-config-error-"));
+
+    await fs.writeFile(
+      path.join(root, "farm.config.mjs"),
+      'throw { name: "Error", message: "", stack: "serialized config stack" };',
+    );
+
+    await expect(loadConfig(root, undefined, "development")).rejects.toThrow(
+      "Failed to load config from farm.config.mjs: serialized config stack",
+    );
+  });
+
   it("loads farm.config.ts when it transitively imports local tsx modules", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-config-tsx-"));
 
@@ -328,6 +360,105 @@ describe("resolveConfig", () => {
       serverComponents: true,
       optimizedBoundary: true,
     });
+  });
+
+  it("keeps experimental PPR disabled by default and preserves explicit opt-in", async () => {
+    const defaults = await resolveConfig({}, "production");
+    const configured = await resolveConfig({ experimental: { ppr: true } }, "production");
+
+    expect(defaults.experimental.ppr).toBe(false);
+    expect(configured.experimental.ppr).toBe(true);
+  });
+
+  it("defaults the OpenAPI spec route to /openapi.json and allows overrides", async () => {
+    const defaults = await resolveConfig({}, "production");
+    expect((defaults.openapi as any).specRoute).toBe("/openapi.json");
+
+    const custom = await resolveConfig(
+      { openapi: { enabled: true, specRoute: "/api/openapi.json" } },
+      "production",
+    );
+    expect((custom.openapi as any).specRoute).toBe("/api/openapi.json");
+
+    const disabled = await resolveConfig(
+      { openapi: { enabled: true, specRoute: false } },
+      "production",
+    );
+    expect((disabled.openapi as any).specRoute).toBe(false);
+  });
+
+  it("keeps preview noindex off by default", async () => {
+    const defaults = await resolveConfig({}, "production");
+    expect(defaults.agent.noindexPreviews).toBe(false);
+
+    const configured = await resolveConfig({ agent: { noindexPreviews: true } }, "production");
+    expect(configured.agent.noindexPreviews).toBe(true);
+
+    await expect(
+      resolveConfig({ agent: { noindexPreviews: "yes" as never } }, "production"),
+    ).rejects.toThrow("agent.noindexPreviews must be a boolean.");
+  });
+
+  it("keeps the API catalog off by default", async () => {
+    expect((await resolveConfig({}, "production")).agent.apiCatalog).toBe(false);
+    expect(
+      (await resolveConfig({ agent: { apiCatalog: true } }, "production")).agent.apiCatalog,
+    ).toBe(true);
+    await expect(
+      resolveConfig({ agent: { apiCatalog: "yes" as never } }, "production"),
+    ).rejects.toThrow("agent.apiCatalog must be a boolean.");
+  });
+
+  it("resolves the agent config with JSON-LD and llms.txt off by default", async () => {
+    const defaults = await resolveConfig({}, "production");
+    expect(defaults.agent.jsonLd).toBe(false);
+    expect(defaults.agent.llmsTxt).toEqual({
+      enabled: false,
+      include: [],
+      exclude: [],
+      full: false,
+    });
+
+    const llms = await resolveConfig(
+      { agent: { llmsTxt: { title: "Acme", exclude: ["/admin/[...path]"] } } },
+      "production",
+    );
+    expect(llms.agent.llmsTxt).toEqual({
+      enabled: true,
+      title: "Acme",
+      include: [],
+      exclude: ["/admin/[...path]"],
+      full: true,
+    });
+
+    const enabled = await resolveConfig({ agent: { jsonLd: true } }, "production");
+    expect(enabled.agent.jsonLd).toEqual({});
+
+    const customized = await resolveConfig(
+      { agent: { jsonLd: { type: "SoftwareApplication", name: "Farm.js" } } },
+      "production",
+    );
+    expect(customized.agent.jsonLd).toEqual({ type: "SoftwareApplication", name: "Farm.js" });
+  });
+
+  it("keeps the crawler policy off by default", async () => {
+    const defaults = await resolveConfig({}, "production");
+    expect(defaults.agent.crawlers).toEqual({ enabled: false, rules: [] });
+
+    const configured = await resolveConfig(
+      { agent: { crawlers: { search: "allow", training: "block" } } },
+      "production",
+    );
+    expect(configured.agent.crawlers).toEqual({
+      enabled: true,
+      search: "allow",
+      training: "block",
+      rules: [],
+    });
+
+    await expect(
+      resolveConfig({ agent: { crawlers: { training: "deny" as never } } }, "production"),
+    ).rejects.toThrow('agent.crawlers.training must be "allow" or "block".');
   });
 
   it("keeps isolated client hydration off by default and preserves its rollout mode", async () => {
@@ -575,6 +706,7 @@ describe("resolveConfig", () => {
       route: "/api/internal/workflows",
       secretEnv: "WORKFLOW_SECRET",
       secret: undefined,
+      allowUnsecured: false,
     });
   });
 
@@ -857,6 +989,7 @@ describe("resolveConfig", () => {
     expect(config.security.csp).toEqual({
       value: "default-src 'self'; object-src 'none'",
       reportOnly: false,
+      nonce: false,
     });
     expect((await config.headers()).at(-1)).toEqual({
       source: "/*",
@@ -867,6 +1000,32 @@ describe("resolveConfig", () => {
         },
       ],
     });
+  });
+
+  it("defers nonce-enabled CSP headers to the dynamic HTML response", async () => {
+    const config = await resolveConfig(
+      {
+        root: process.cwd(),
+        security: {
+          csp: {
+            nonce: true,
+            directives: { scriptSrc: ["'self'"], objectSrc: ["'none'"] },
+          },
+        },
+      },
+      "production",
+    );
+
+    expect(config.security.csp).toEqual({
+      value: "script-src 'self'; object-src 'none'",
+      reportOnly: false,
+      nonce: true,
+    });
+    expect(
+      (await config.headers()).some((entry) =>
+        entry.headers.some((header) => header.key.toLowerCase() === "content-security-policy"),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -900,9 +1059,13 @@ describe("detectPlatformDeployTarget", () => {
   it("maps platform build env vars to deploy targets", () => {
     expect(detectPlatformDeployTarget({ VERCEL: "1" })).toBe("vercel");
     expect(detectPlatformDeployTarget({ NETLIFY: "true" })).toBe("netlify");
+    expect(detectPlatformDeployTarget({ NETLIFY: " TRUE " })).toBe("netlify");
     expect(detectPlatformDeployTarget({ CF_PAGES: "1" })).toBe("cloudflare");
     expect(detectPlatformDeployTarget({})).toBeUndefined();
     expect(detectPlatformDeployTarget({ VERCEL: "" })).toBeUndefined();
+    expect(detectPlatformDeployTarget({ VERCEL: "0" })).toBeUndefined();
+    expect(detectPlatformDeployTarget({ VERCEL: "false" })).toBeUndefined();
+    expect(detectPlatformDeployTarget({ VERCEL: "yes" })).toBeUndefined();
   });
 });
 
@@ -988,6 +1151,23 @@ describe("resolveDeployConfig", () => {
     expect(deploy.outputDir).toBe(".farm/.output");
   });
 
+  it("lets a CLI target override displace a configured cross-platform preset", () => {
+    // Symmetric to the preset-override case: with deploy.preset vercel in
+    // config, `farm build --target netlify` must not ship Vercel-shaped output
+    // labeled as a Netlify deploy.
+    const deploy = resolveDeployConfig({ deploy: { preset: "vercel" } }, { target: "netlify" });
+
+    expect(deploy.target).toBe("netlify");
+    expect(deploy.preset).toBe("netlify");
+  });
+
+  it("keeps a same-platform configured preset under a CLI target override", () => {
+    const deploy = resolveDeployConfig({ deploy: { preset: "vercel-edge" } }, { target: "vercel" });
+
+    expect(deploy.target).toBe("vercel");
+    expect(deploy.preset).toBe("vercel-edge");
+  });
+
   it("respects an explicitly configured output directory under a preset override", () => {
     const deploy = resolveDeployConfig(
       { deploy: { target: "vercel", outputDir: "custom-out" } },
@@ -1020,6 +1200,21 @@ describe("resolveDeployConfig", () => {
       outputDir: "custom-output",
     });
   });
+
+  it("writes Netlify output to Netlify's internal functions directory by default", () => {
+    expect(resolveDeployConfig({ deploy: { target: "netlify" } }).outputDir).toBe(
+      ".netlify/functions-internal",
+    );
+    expect(resolveDeployConfig({}, { env: { NETLIFY: "true" } }).outputDir).toBe(
+      ".netlify/functions-internal",
+    );
+  });
+
+  it("keeps Farm's output directory for Netlify Edge, which sets its own server directory", () => {
+    expect(resolveDeployConfig({ deploy: { preset: "netlify-edge" } }).outputDir).toBe(
+      ".farm/.output",
+    );
+  });
 });
 
 describe("resolveDocsConfig", () => {
@@ -1035,6 +1230,41 @@ describe("resolveDocsConfig", () => {
 
     expect(docs.adapter).toEqual(adapter);
     expect(docs.config).not.toHaveProperty("adapter");
+  });
+
+  it("keeps React elements and callbacks for the adapter while config stays serializable", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-docs-runtime-config-"));
+    try {
+      await fs.writeFile(
+        path.join(root, "docs.config.ts"),
+        `export default {
+  entry: "docs",
+  icons: { book: { $$typeof: Symbol.for("react.transitional.element"), type: "svg", props: {} } },
+  feedback: { onFeedback: () => "sent" },
+};
+`,
+      );
+      const docs = await resolveDocsConfig(
+        { config: { metadata: { description: "Docs" } } },
+        { root },
+      );
+
+      // What Farm serializes has neither the element's identity nor the callback.
+      expect(docs.config.icons?.book).not.toHaveProperty("$$typeof");
+      expect((docs.config as any).feedback).toEqual({});
+      // The adapter, which runs in process, gets them as written, with the same overrides.
+      const runtime = docs.runtimeConfig as any;
+      expect(runtime.icons.book.$$typeof).toBe(Symbol.for("react.transitional.element"));
+      expect(runtime.feedback.onFeedback()).toBe("sent");
+      expect(runtime).toMatchObject({
+        entry: "docs",
+        docsPath: "/docs",
+        metadata: { description: "Docs" },
+      });
+      expect(docs.configOverrides).toEqual({ metadata: { description: "Docs" } });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("normalizes a Farm docs entry route into docs config shape", async () => {

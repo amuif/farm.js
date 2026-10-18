@@ -33,6 +33,8 @@ export type DeferredSettlements = Record<string, DeferredSettlement>;
 
 export interface DeferredDataResponseOptions {
   onError?: (error: unknown, id: string) => void;
+  /** Called only after a deferred response reaches the end of its stream. */
+  onComplete?: () => void;
 }
 
 export class DeferredDataError extends Error {
@@ -198,10 +200,15 @@ export function createDeferredDataResponse(
   return new Response(stream, { ...init, headers });
 }
 
-export async function readDeferredDataResponse<T>(response: Response): Promise<T> {
+export async function readDeferredDataResponse<T>(
+  response: Response,
+  options: DeferredDataResponseOptions = {},
+): Promise<T> {
   const contentType = response.headers.get("Content-Type") || "";
   if (!contentType.toLowerCase().startsWith(FARM_DEFERRED_CONTENT_TYPE)) {
-    return (await response.json()) as T;
+    const data = (await response.json()) as T;
+    notifyDeferredComplete(options);
+    return data;
   }
   if (!response.body) {
     throw new DeferredDataError("Deferred route data response has no body");
@@ -262,7 +269,17 @@ export async function readDeferredDataResponse<T>(response: Response): Promise<T
           );
         }
       }
-      rejectPendingDeferred(controllers, "Deferred route data stream ended before completion");
+      // The loop ends the same way whether every deferred arrived or the
+      // connection was cut mid-stream, so completion is judged by what is
+      // still outstanding. Reporting completion for a truncated stream let
+      // the caller cache page data whose deferred fields are already
+      // rejected, and a later visit replayed those errors instead of
+      // refetching.
+      const outstanding = rejectPendingDeferred(
+        controllers,
+        "Deferred route data stream ended before completion",
+      );
+      if (outstanding === 0) notifyDeferredComplete(options);
     } catch {
       rejectPendingDeferred(controllers, "Deferred route data stream could not be read");
     } finally {
@@ -271,6 +288,14 @@ export async function readDeferredDataResponse<T>(response: Response): Promise<T
   })();
 
   return data;
+}
+
+function notifyDeferredComplete(options: DeferredDataResponseOptions): void {
+  try {
+    options.onComplete?.();
+  } catch {
+    // Completion observers must not break deferred stream consumption.
+  }
 }
 
 interface EncodingContext {
@@ -328,7 +353,7 @@ function encodeDeferredValue(
   assertNotCircular(value, ancestors);
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    output[key] = encodeDeferredValue(item, context, ancestors);
+    defineDataProperty(output, key, encodeDeferredValue(item, context, ancestors));
   }
   ancestors.delete(value);
   // User data that happens to have the marker shape must not be revived as a
@@ -381,9 +406,31 @@ function reviveDeferredValue(
   if (prototype !== Object.prototype && prototype !== null) return value;
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    output[key] = reviveDeferredValue(item, controllers, settlements, applyingSettlements);
+    defineDataProperty(
+      output,
+      key,
+      reviveDeferredValue(item, controllers, settlements, applyingSettlements),
+    );
   }
   return output;
+}
+
+// Assign an own key preserving its data. A plain `output[key] = value` runs the
+// `Object.prototype.__proto__` setter when `key` is the string "__proto__" (the
+// shape JSON.parse of external input produces), which silently drops the entry
+// and mutates the object's prototype instead of storing the value. Defining the
+// property sidesteps the accessor for that one key; other keys keep the fast path.
+function defineDataProperty(output: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === "__proto__") {
+    Object.defineProperty(output, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  } else {
+    output[key] = value;
+  }
 }
 
 function getControlledDeferred(
@@ -490,13 +537,17 @@ function parseDeferredMessage(line: string): any {
   }
 }
 
+/** Rejects every deferred still outstanding, and reports how many there were. */
 function rejectPendingDeferred(
   controllers: Map<string, ControlledDeferred>,
   message: string,
-): void {
+): number {
+  let rejected = 0;
   for (const controller of controllers.values()) {
     if (controller.promise.status === "pending") {
       controller.reject(new DeferredDataError(message));
+      rejected += 1;
     }
   }
+  return rejected;
 }

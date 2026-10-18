@@ -7,13 +7,18 @@ import SvelteCompat, {
   ErrorBoundary,
   createElement,
   isValidElement,
+  markFunctionComponent,
 } from "./runtime";
 
-export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement };
+export { Fragment, Suspense, ErrorBoundary, createElement, isValidElement, markFunctionComponent };
 
 export interface FarmSvelteRoot {
   render(element: unknown): void;
   unmount(): void;
+}
+
+interface FarmSvelteRootInstance extends Record<string, unknown> {
+  render?(element: unknown): void;
 }
 
 function createManagedRoot(
@@ -21,7 +26,7 @@ function createManagedRoot(
   initialElement?: unknown,
   hydration = false,
 ): FarmSvelteRoot {
-  let instance: Record<string, unknown> | undefined;
+  let instance: FarmSvelteRootInstance | undefined;
   const Root = CompatRoot as Component<{ element: unknown }>;
 
   const renderElement = (element: unknown, hydrate: boolean) => {
@@ -39,7 +44,11 @@ function createManagedRoot(
 
   return {
     render(element) {
-      renderElement(element, false);
+      if (instance?.render) {
+        instance.render(element);
+      } else {
+        renderElement(element, false);
+      }
     },
     unmount() {
       if (instance) void unmount(instance);

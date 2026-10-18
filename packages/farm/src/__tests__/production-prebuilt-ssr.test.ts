@@ -1,13 +1,16 @@
 // @vitest-environment node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { chromium } from "@playwright/test";
+import { imageSize } from "image-size";
 import { describe, expect, it, vi } from "vitest";
 import { build } from "../build";
 import { loadFarmProductionVite, type FarmProductionViteRuntime } from "../build/production-vite";
@@ -287,6 +290,7 @@ async function runProductionRequest(
   assertion: (response: Response) => Promise<void>,
   pathname = "/",
   requestInit?: RequestInit,
+  env: Record<string, string | undefined> = {},
 ): Promise<void> {
   const port = await getAvailablePort();
   const output: string[] = [];
@@ -295,6 +299,7 @@ async function runProductionRequest(
     cwd: serverDir,
     env: {
       ...process.env,
+      ...env,
       HOST: "127.0.0.1",
       PORT: String(port),
     },
@@ -335,13 +340,15 @@ async function runProductionRequest(
   }
 }
 
-async function readJavaScriptOutput(dir: string): Promise<string> {
+async function readJavaScriptOutput(dir: string, extensions = [".mjs"]): Promise<string> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const contents = await Promise.all(
     entries.map(async (entry) => {
       const entryPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) return readJavaScriptOutput(entryPath);
-      return entry.name.endsWith(".mjs") ? fs.readFile(entryPath, "utf8") : "";
+      if (entry.isDirectory()) return readJavaScriptOutput(entryPath, extensions);
+      return extensions.some((extension) => entry.name.endsWith(extension))
+        ? fs.readFile(entryPath, "utf8")
+        : "";
     }),
   );
   return contents.join("\n");
@@ -362,7 +369,13 @@ async function containsFileWithContent(dir: string, expected: string): Promise<b
 
 async function expectNitroFallback(root: string): Promise<void> {
   const serverDir = path.join(root, ".farm", ".output", "server");
-  const serverPackage = JSON.parse(await fs.readFile(path.join(serverDir, "package.json"), "utf8"));
+  const serverPackage = await fs
+    .readFile(path.join(serverDir, "package.json"), "utf8")
+    .then((contents) => JSON.parse(contents))
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return {};
+      throw error;
+    });
   expect(serverPackage.imports?.["#farm-ssr-entry"]).toBeUndefined();
   await expect(fs.access(path.join(serverDir, "farm-ssr"))).rejects.toThrow();
   await expect(fs.readFile(path.join(serverDir, "index.mjs"), "utf8")).resolves.not.toContain(
@@ -371,6 +384,539 @@ async function expectNitroFallback(root: string): Promise<void> {
 }
 
 describe("production prebuilt SSR output", () => {
+  it("preserves root-to-leaf layout order in a built nested dynamic route", async () => {
+    const root = await createProductionFixture();
+    try {
+      for (const [relative, name] of [
+        ["", "root"],
+        ["reports", "reports"],
+        ["reports/[id]", "item"],
+        ["docs/[[...slug]]", "docs"],
+      ]) {
+        const directory = path.join(root, "src", "app", relative);
+        await fs.mkdir(directory, { recursive: true });
+        await fs.writeFile(
+          path.join(directory, "layout.tsx"),
+          `export default function Layout({ children }) { return <section data-layout-order="${name}">{children}</section>; }`,
+        );
+      }
+      const leaf = path.join(root, "src", "app", "reports", "[id]", "activity");
+      await fs.mkdir(leaf, { recursive: true });
+      await fs.writeFile(
+        path.join(leaf, "page.tsx"),
+        `export default function Page({ params }) { return <main data-layout-order="page">{params.id}</main>; }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "docs", "[[...slug]]", "page.tsx"),
+        `export default function Page({ params }) { return <main data-layout-order="page">{params.slug}</main>; }`,
+      );
+      const config = await resolveConfig(
+        { root, srcDir: "src", images: { provider: "none" }, telemetry: false },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      await runProductionRequest(serverDir, async (initial) => {
+        await initial.arrayBuffer();
+        // Several requests to the same live server exercise reuse without leaking
+        // the previous request's URL, params or selected layout array.
+        for (const [pathname, order, text] of [
+          ["/reports/one/activity", ["root", "reports", "item", "page"], "one"],
+          ["/docs", ["root", "docs", "page"], ""],
+          [
+            "/reports/two%20items/activity?source=docs",
+            ["root", "reports", "item", "page"],
+            "two items",
+          ],
+          ["/docs/a%2Fb/guide", ["root", "docs", "page"], "a/b/guide"],
+          ["/reports/a%252Fb/activity", ["root", "reports", "item", "page"], "a%2Fb"],
+          ["/", ["root"], undefined],
+        ] as const) {
+          const response = await fetch(new URL(pathname, initial.url));
+          expect(response.status, pathname).toBe(200);
+          const html = await response.text();
+          expect(
+            [...html.matchAll(/data-layout-order="([^"]+)"/g)].map((match) => match[1]),
+          ).toEqual(order);
+          if (text !== undefined) expect(html).toContain(`>${text}</main>`);
+        }
+        // The Node adapter rejects malformed escapes before layout selection.
+        const malformed = await fetch(new URL("/docs/%ZZ", initial.url));
+        expect(malformed.status).toBe(400);
+        await malformed.arrayBuffer();
+        const missing = await fetch(new URL("/unknown/route", initial.url));
+        expect(missing.status).toBe(404);
+        await missing.arrayBuffer();
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.each([false, true])(
+    "enforces final preload budgets after HTML transforms (plugin: %s)",
+    async (withPlugin) => {
+      const root = await createProductionFixture();
+      const plugin = definePlugin({
+        name: "production-preload-transform",
+        transformHTML(html) {
+          return html.replace(
+            "</head>",
+            `<meta name="unicode-preload" content="İstanbul"><script>globalThis.__preloadLiteral = '<link rel="preload" as="image" href="/inert.webp">';</script><link rel="preload" as="image" href="/plugin.webp" fetchpriority="high"></head>`,
+          );
+        },
+      });
+      try {
+        if (withPlugin)
+          await fs.writeFile(
+            path.join(root, "farm.config.mjs"),
+            `export default { plugins: [{ name: "production-preload-transform", ${plugin.transformHTML!.toString()} }] };`,
+          );
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            images: { provider: "none" },
+            telemetry: false,
+            plugins: withPlugin ? [plugin] : [],
+            headers: () => [
+              {
+                source: "/",
+                headers: [
+                  {
+                    key: "Link",
+                    value:
+                      "</first.webp>; rel=preload; as=image, </second.webp>; rel=preload; as=image",
+                  },
+                  { key: "Set-Cookie", value: "a=1; Path=/" },
+                  { key: "Set-Cookie", value: "b=2; Path=/" },
+                ],
+              },
+            ],
+            generateBuildId: () => "preload-buffered-response-test",
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(200);
+            expect(response.headers.has("x-farm-preload-buffered")).toBe(false);
+            expect(response.headers.has("x-farm-preload-streaming")).toBe(false);
+            expect(response.headers.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+            const html = await response.text();
+            expect(html).toContain("prebuilt SSR output");
+            if (withPlugin) {
+              expect(html).toContain('href="/plugin.webp"');
+              expect(html).toContain(
+                `globalThis.__preloadLiteral = '<link rel="preload" as="image" href="/inert.webp">';`,
+              );
+              expect(response.headers.get("link") || "").not.toContain(".webp");
+            } else {
+              expect(response.headers.get("link")).toContain("/first.webp");
+              expect(response.headers.get("link")).not.toContain("/second.webp");
+            }
+          },
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it.each([true, false])(
+    "keeps the MDX compiler out of TSX-only output (Markdown mirrors: %s)",
+    async (markdownMirrors) => {
+      const root = await createProductionFixture();
+      const emittedModules = new Set<string>();
+
+      try {
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            md: markdownMirrors,
+            images: { provider: "none" },
+            telemetry: false,
+            generateBuildId: () => "markdown-response-boundary-test",
+            vite: {
+              plugins: [
+                {
+                  name: "record-emitted-markdown-dependencies",
+                  generateBundle(_options, bundle) {
+                    for (const output of Object.values(bundle)) {
+                      if (output.type !== "chunk") continue;
+                      for (const id of Object.keys(output.modules)) {
+                        emittedModules.add(id.replace(/\\/g, "/"));
+                      }
+                    }
+                  },
+                },
+              ],
+            },
+          },
+          "production",
+        );
+
+        await build(config, { root, preset: "node-server" });
+        const serverDir = path.join(root, ".farm", ".output", "server");
+        await fs.access(path.join(serverDir, "farm-ssr"));
+        expect([...emittedModules].some((id) => id.includes("virtual:farm-ssr-entry"))).toBe(true);
+        // Inspect module provenance in every emitted chunk, including dynamic chunks.
+        // A renamed output file must not conceal an accidentally bundled compiler.
+        expect(
+          [...emittedModules].filter((id) =>
+            /\/(?:@mdx-js\/|remark-[^/]+\/|micromark(?:-[^/]+)?\/)/.test(id),
+          ),
+        ).toEqual([]);
+
+        await runProductionRequest(serverDir, async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toContain("prebuilt SSR output");
+          // The head advertises the mirror exactly when the Link header does.
+          const markdownLink = '<link rel="alternate" href="/index.md" type="text/markdown">';
+          if (markdownMirrors) {
+            expect(response.headers.get("link")).toContain(
+              '</index.md>; rel="alternate"; type="text/markdown"',
+            );
+            expect(html).toContain(markdownLink);
+          } else {
+            expect(response.headers.get("link") ?? "").not.toContain("text/markdown");
+            expect(html).not.toContain('type="text/markdown"');
+          }
+
+          for (const [pathname, accept] of [
+            ["/missing.md", "text/html"],
+            ["/missing", "text/markdown"],
+          ]) {
+            const missing = await fetch(new URL(pathname, response.url), {
+              headers: { accept },
+            });
+            expect(missing.status).toBe(404);
+            expect(missing.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+            const body = await missing.text();
+            expect(body).toContain("# Page not found");
+            expect(body).toContain(pathname);
+            expect(body).toContain("](/)");
+
+            const head = await fetch(new URL(pathname, response.url), {
+              method: "HEAD",
+              headers: { accept },
+            });
+            expect(head.status).toBe(404);
+            expect(head.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+            expect(await head.text()).toBe("");
+          }
+
+          const html404 = await fetch(new URL("/missing", response.url), {
+            headers: { accept: "text/html, text/markdown;q=0" },
+          });
+          expect(html404.status).toBe(404);
+          expect(html404.headers.get("content-type")).toContain("text/html");
+          expect(await html404.text()).toContain("404");
+
+          if (markdownMirrors) {
+            const mirror = await fetch(response.url, { headers: { accept: "text/markdown" } });
+            expect(mirror.status).toBe(200);
+            expect(mirror.headers.get("content-type")).toContain("text/markdown");
+            expect(await mirror.text()).toContain("prebuilt SSR output");
+          }
+        });
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it("renders layout and page JSON-LD next to the site-level script", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "layout.tsx"),
+        `
+export const metadata = {
+  openGraph: { siteName: "Farm Shop" },
+  jsonLd: { "@context": "https://schema.org", "@type": "WebSite", name: "Farm Shop" },
+};
+
+export default function RootLayout({ children }) {
+  return <html><body>{children}</body></html>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+export const metadata = {
+  jsonLd: [
+    { "@context": "https://schema.org", "@type": "Article", headline: "</script><script>alert(1)</script>" },
+  ],
+};
+
+export default function Page() {
+  return <main>json-ld page</main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          agent: { jsonLd: true },
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "json-ld-production-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          const head = html.slice(0, html.indexOf("</head>"));
+          const scripts = [
+            ...head.matchAll(/<script type="application\/ld\+json"([^>]*)>(.*?)<\/script>/g),
+          ];
+
+          // Site identity first and unmarked, then layout and page entries, marked.
+          expect(scripts.map(([, attributes]) => attributes.trim())).toEqual([
+            "",
+            "data-farm-metadata",
+            "data-farm-metadata",
+          ]);
+          expect(scripts.map(([, , json]) => JSON.parse(json!)["@type"])).toEqual([
+            "Organization",
+            "WebSite",
+            "Article",
+          ]);
+          expect(JSON.parse(scripts[2]![2]!).headline).toBe("</script><script>alert(1)</script>");
+          expect(head).not.toContain("<script>alert(1)");
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("adds a fresh CSP nonce to production HTML and every script tag", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+export default function Page() {
+  return (
+    <main data-csp-nonce-page>
+      Nonce-protected production output
+      <script nonce="stale-build-nonce" dangerouslySetInnerHTML={{ __html: "window.city='İİİİİİİİ 🌱';" }} />
+      <script>window.appReady=true</script>
+    </main>
+  );
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-csp-nonce-test",
+          security: {
+            csp: {
+              nonce: true,
+              policy: "default-src 'self'; script-src 'self'",
+            },
+          },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const firstPolicy = response.headers.get("content-security-policy") ?? "";
+          const firstNonce = firstPolicy.match(/'nonce-([^']+)'/)?.[1];
+          const firstHtml = await response.text();
+          const firstScripts = Array.from(firstHtml.matchAll(/<script\b[^>]*>/gi), ([tag]) => tag);
+
+          expect(firstNonce).toBeTruthy();
+          expect(firstPolicy).not.toContain("'unsafe-inline'");
+          expect(firstHtml).toContain("window.city='İİİİİİİİ 🌱';");
+          expect(firstScripts.length).toBeGreaterThan(0);
+          expect(firstScripts.every((tag) => tag.includes(`nonce="${firstNonce}"`))).toBe(true);
+
+          const secondResponse = await fetch(response.url);
+          const secondPolicy = secondResponse.headers.get("content-security-policy") ?? "";
+          const secondNonce = secondPolicy.match(/'nonce-([^']+)'/)?.[1];
+          const secondHtml = await secondResponse.text();
+          const secondScripts = Array.from(
+            secondHtml.matchAll(/<script\b[^>]*>/gi),
+            ([tag]) => tag,
+          );
+
+          expect(secondNonce).toBeTruthy();
+          expect(secondNonce).not.toBe(firstNonce);
+          expect(secondScripts.length).toBeGreaterThan(0);
+          expect(secondScripts.every((tag) => tag.includes(`nonce="${secondNonce}"`))).toBe(true);
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.each([
+    { label: "React 18", useReact18: true },
+    { label: "React 19", useReact18: false },
+  ])(
+    "preserves Unicode full-document Suspense output with $label",
+    async ({ useReact18 }) => {
+      const root = await createProductionFixture();
+      try {
+        if (useReact18) await linkReact18(root);
+        await fs.writeFile(
+          path.join(root, "src", "app", "content.tsx"),
+          `
+export default function Content() { return <p id="unicode-reveal">stream complete</p>; }
+`,
+        );
+        await fs.writeFile(
+          path.join(root, "src", "app", "page.tsx"),
+          `
+import React, { lazy, Suspense } from "react";
+export const dynamic = "force-dynamic";
+const Content = lazy(() => import("./content"));
+export default function Page() {
+  return <main><p>İstanbul 🌱</p><Suspense fallback={<p id="unicode-loading">loading</p>}><Content /></Suspense></main>;
+}`,
+        );
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            images: { provider: "none" },
+            telemetry: false,
+            generateBuildId: () => "production-unicode-document-test",
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(200);
+            const html = await response.text();
+            expect(html).toContain("İstanbul 🌱");
+            expect(html).toContain('id="unicode-loading"');
+            expect(html).toContain('id="unicode-reveal"');
+            expect(html).toContain("$RC");
+            expect(html.match(/<html\b/gi)).toHaveLength(1);
+            expect(html.slice(html.lastIndexOf("</html>") + 7).trim()).toBe("");
+            expect(html.indexOf('id="unicode-reveal"')).toBeLessThan(html.lastIndexOf("</body>"));
+            const executablePath = await resolveInstalledChromiumExecutable();
+            if (executablePath) {
+              const browser = await chromium.launch({ headless: true, executablePath });
+              try {
+                const page = await browser.newPage();
+                const errors: string[] = [];
+                page.on("pageerror", (error) => errors.push(error.message));
+                const headers = Object.fromEntries(response.headers);
+                delete headers["content-encoding"];
+                delete headers["content-length"];
+                // Inspect this first, suspended response, not a second render with
+                // an already-resolved lazy import. Assets still use the real server.
+                await page.route(
+                  response.url,
+                  (route) =>
+                    route.fulfill({
+                      status: response.status,
+                      headers,
+                      body: html,
+                    }),
+                  { times: 1 },
+                );
+                await page.goto(response.url);
+                await page.locator("#unicode-reveal").waitFor({ state: "visible" });
+                expect(await page.locator("#unicode-loading").count()).toBe(0);
+                expect(await page.locator("#unicode-reveal").textContent()).toBe("stream complete");
+                expect(errors).toEqual([]);
+              } finally {
+                await browser.close();
+              }
+            }
+          },
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it("hashes Unicode inline scripts exactly in prerendered production HTML", async () => {
+    const root = await createProductionFixture();
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+export const ssg = true;
+export default function Page() {
+  return <main>İstanbul
+    <script nonce="old" dangerouslySetInnerHTML={{ __html: "window.city='İİİİİİİİ 🌱';" }} />
+    <script>window.appReady=true</script>
+  </main>;
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-csp-unicode-hash-test",
+          security: { csp: { nonce: true, policy: "script-src 'self'" } },
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          const policy = response.headers.get("content-security-policy");
+          expect(html).toContain("window.city='İİİİİİİİ 🌱';");
+          expect(html).not.toMatch(/<script\b[^>]*\bnonce\s*=/i);
+          expect(policy).not.toContain("'nonce-");
+          const contents = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+            .filter(([, attributes]) => !/(?:^|\s)src\s*=/i.test(attributes!))
+            .map(([, , content]) => content!);
+          expect(contents.length).toBeGreaterThanOrEqual(2);
+          for (const content of contents) {
+            expect(policy).toContain(
+              `'sha256-${createHash("sha256").update(content).digest("base64")}'`,
+            );
+          }
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("matches application routes beneath the configured basePath", async () => {
     const root = await createProductionFixture();
 
@@ -393,9 +939,740 @@ describe("production prebuilt SSR output", () => {
         path.join(root, ".farm", ".output", "server"),
         async (response) => {
           expect(response.status).toBe(200);
-          await expect(response.text()).resolves.toContain("prebuilt SSR output");
+          const html = await response.text();
+          expect(html).toContain("prebuilt SSR output");
+          expect(html.match(/<html[\s>]/gi)).toHaveLength(1);
+          expect(html.match(/<body[\s>]/gi)).toHaveLength(1);
+          expect(html).not.toContain('data-farm-layout-boundary="true"');
         },
         "/workspace",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("applies the app's vite config to the client and server builds", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "vendor"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "vendor", "user-alias-target.ts"),
+        `export const aliasedLabel = "user alias resolved";`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "marker.module.css"),
+        `.title { color: rgb(1, 2, 3); }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "user-vite-marker.tsx"),
+        `
+"use client";
+
+import { aliasedLabel } from "user-vite-alias";
+import styles from "./marker.module.css";
+
+declare const __USER_VITE_FLAG__: string;
+
+export default function UserViteMarker() {
+  return <p className={styles.title} data-user-vite={__USER_VITE_FLAG__}>{aliasedLabel}</p>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import UserViteMarker from "./user-vite-marker";
+
+export default function Page() {
+  return <main>prebuilt SSR output <UserViteMarker /></main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-user-vite-config-test",
+          vite: {
+            define: { __USER_VITE_FLAG__: JSON.stringify("user-define-applied") },
+            resolve: {
+              alias: { "user-vite-alias": path.join(root, "vendor", "user-alias-target.ts") },
+            },
+            css: { modules: { generateScopedName: "user-vite-[local]" } },
+            // Options Farm owns for the production output stay under Farm's control.
+            root: path.join(root, "elsewhere"),
+            base: "/elsewhere/",
+            mode: "development",
+            build: {
+              outDir: "elsewhere",
+              emptyOutDir: false,
+              ssr: true,
+              write: false,
+              rollupOptions: {
+                input: "missing-entry.js",
+                output: { format: "cjs", entryFileNames: "elsewhere.js" },
+              },
+            },
+          },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      const clientJavaScript = await readAllClientJavaScript(root);
+      expect(clientJavaScript).toContain("user-define-applied");
+      expect(clientJavaScript).toContain("user alias resolved");
+      expect(clientJavaScript).not.toContain("__USER_VITE_FLAG__");
+      expect(
+        await fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
+      ).toContain(".user-vite-title");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toContain('data-user-vite="user-define-applied"');
+          expect(html).toContain("user alias resolved");
+          expect(html).toContain('class="user-vite-title"');
+        },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("serves OpenAPI routes and Markdown alternates beneath the configured basePath", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "api", "health"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "health", "route.ts"),
+        `export function GET() { return Response.json({ ok: true }); }`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "admin"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "admin", "page.tsx"),
+        `export default function Admin() { return <main>admin page</main>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          basePath: "/workspace",
+          images: { provider: "none" },
+          telemetry: false,
+          openapi: { enabled: true, title: "Base Path API" },
+          agent: { apiCatalog: true },
+          generateBuildId: () => "production-base-path-openapi-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("<title>Base Path API</title>");
+
+          const spec = await fetch(new URL("/workspace/openapi.json", response.url));
+          expect(spec.status).toBe(200);
+          expect((await spec.json()).paths["/health"].get.operationId).toBe("get_health");
+
+          const catalog = await fetch(new URL("/workspace/.well-known/api-catalog", response.url));
+          expect(catalog.status).toBe(200);
+          expect(catalog.headers.get("content-type")).toContain("application/linkset+json");
+          expect(catalog.headers.get("link")).toBe(
+            '</workspace/.well-known/api-catalog>; rel="api-catalog"',
+          );
+          const [, catalogApi] = (await catalog.json()).linkset;
+          // The links resolve on the production server, as in development.
+          expect((await fetch(new URL(`${catalogApi.anchor}/health`, response.url))).status).toBe(
+            200,
+          );
+          expect(
+            (await fetch(new URL(catalogApi["service-desc"][0].href, response.url))).status,
+          ).toBe(200);
+
+          const page = await fetch(new URL("/workspace/admin", response.url), {
+            headers: { accept: "text/html" },
+          });
+          expect(page.status).toBe(200);
+          expect(page.headers.get("link")).toContain("</workspace/admin.md>");
+          expect(await page.text()).toContain('href="/workspace/admin.md"');
+
+          const markdown = await fetch(new URL("/workspace/admin.md", response.url));
+          expect(markdown.status).toBe(200);
+          expect(await markdown.text()).toContain("admin page");
+        },
+        "/workspace/docs/reference",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("reads server env where the server runs instead of storing it in the build output", async () => {
+    const root = await createProductionFixture();
+    const previous = process.env.FARM_TEST_DATABASE_URL;
+    process.env.FARM_TEST_DATABASE_URL = "postgres://build-time-secret";
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import { getEnv } from "@farm.js/core/env";
+
+export default function Page() {
+  return <main data-env={String(getEnv("FARM_TEST_DATABASE_URL"))}>env</main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          env: { server: { FARM_TEST_DATABASE_URL: (value: string | undefined) => value } },
+          generateBuildId: () => "production-runtime-env-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      delete process.env.FARM_TEST_DATABASE_URL;
+
+      expect(
+        await readJavaScriptOutput(path.join(root, ".farm"), [".mjs", ".js", ".cjs", ".json"]),
+      ).not.toContain("build-time-secret");
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain('data-env="postgres://rotated-secret"');
+        },
+        "/",
+        undefined,
+        { FARM_TEST_DATABASE_URL: "postgres://rotated-secret" },
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FARM_TEST_DATABASE_URL;
+      else process.env.FARM_TEST_DATABASE_URL = previous;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("answers the Markdown mirror of a sign-in-protected page with its redirect", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "account"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "account", "page.tsx"),
+        `
+import { redirect } from "@farm.js/core/navigation";
+
+export default function Account() {
+  redirect("/login?next=%2Faccount");
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-markdown-redirect-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          // Before, the mirror gave up on the bodiless redirect and the request fell
+          // through to a 404 saying the page had not been published.
+          expect(response.status).toBe(307);
+          expect(response.headers.get("location")).toBe("/login?next=%2Faccount");
+          expect(await response.text()).toContain("redirects to");
+        },
+        "/account.md",
+        { redirect: "manual" },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("describes a page's forms at its Markdown mirror's ?actions view", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "contact"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "contact", "page.tsx"),
+        `export default function Contact() {
+  return (
+    <main>
+      <h1>Contact</h1>
+      <form method="post" action="/api/contact">
+        <label htmlFor="email">Email</label>
+        <input id="email" name="email" type="email" required />
+        <button>Send</button>
+      </form>
+    </main>
+  );
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-markdown-actions-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("Actions: /contact.md?actions");
+
+          const actions = await fetch(new URL("/contact.md?actions", response.url));
+          expect(actions.status).toBe(200);
+          expect(actions.headers.get("content-type")).toBe("application/json; charset=utf-8");
+          expect((await actions.json()).actions).toEqual([
+            {
+              type: "form",
+              method: "POST",
+              action: "/api/contact",
+              enctype: "application/x-www-form-urlencoded",
+              fields: [{ name: "email", type: "email", label: "Email", required: true }],
+              submit: [{ label: "Send" }],
+            },
+          ]);
+
+          // The other views reach the production mirror too: a page that fits a
+          // budget comes back whole, and a bad cursor is reported, not ignored.
+          const outline = await fetch(new URL("/contact.md?outline", response.url));
+          expect(await outline.text()).toContain("- [Contact](/contact.md?section=contact)");
+          const budgeted = await fetch(new URL("/contact.md?max_tokens=100", response.url));
+          expect(budgeted.status).toBe(200);
+          expect(budgeted.headers.get("link") ?? "").not.toContain('rel="next"');
+          expect(await budgeted.text()).toContain("# Contact");
+          const stale = await fetch(
+            new URL("/contact.md?max_tokens=100&cursor=1.stale", response.url),
+          );
+          expect(stale.status).toBe(409);
+        },
+        "/contact.md",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("advertises the Markdown mirror of a prerendered page", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "pricing"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "pricing", "page.tsx"),
+        `export const dynamic = "force-static";\nexport default function Pricing() { return <main><h1>Pricing</h1><p>Plans.</p></main>; }`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "about"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "about", "page.tsx"),
+        `export const dynamic = "force-static";\nexport default function About() { return <main><h1>About</h1></main>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          // A lowercase Link of the app's own sits next to the mirror's Link.
+          routeRules: {
+            "/about": { headers: { link: '</about.css>; rel="preload"; as="style"' } },
+          },
+          generateBuildId: () => "production-prerender-markdown-link-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      // The page is served as a static file, so it cannot negotiate Accept; the
+      // Link header is how agents find its mirror.
+      expect(
+        await fs
+          .stat(path.join(root, ".farm", ".output", "public", "pricing", "index.html"))
+          .then(() => true),
+      ).toBe(true);
+
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toContain("text/html");
+          expect(response.headers.get("link")).toBe(
+            '</pricing.md>; rel="alternate"; type="text/markdown"',
+          );
+        },
+        "/pricing",
+      );
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toContain("text/html");
+          expect(response.headers.get("link")).toBe(
+            '</about.css>; rel="preload"; as="style", </about.md>; rel="alternate"; type="text/markdown"',
+          );
+        },
+        "/about",
+      );
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+          expect(await response.text()).toContain("# Pricing");
+        },
+        "/pricing.md",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("keeps production slot params request-local beneath a basePath", async () => {
+    const root = await createProductionFixture();
+    const writeRoute = async (name: string, source: string) => {
+      const target = path.join(root, "src", "app", name);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, source);
+    };
+
+    try {
+      await writeRoute(
+        "layout.tsx",
+        `export default function Layout({ children, panel, trail }) {
+          return <html><body>{children}<aside>{panel}</aside><nav>{trail}</nav></body></html>;
+        }`,
+      );
+      await writeRoute(
+        "items/[id]/page.tsx",
+        `export default function Page({ params }) { return <main data-page-id={params.id}>Item</main>; }`,
+      );
+      await writeRoute(
+        "items/layout.tsx",
+        `export default function Layout({ children, detail }) { return <section>{children}{detail}</section>; }`,
+      );
+      // Both entries share a non-root owner. Include and exclude that owner in
+      // concurrent requests to exercise the emitted request-local owner cache.
+      await writeRoute(
+        "items/@detail/[id]/page.tsx",
+        `export default async function Detail({ params }) {
+          await Promise.resolve();
+          return <p data-detail-id={params.id}>Detail</p>;
+        }`,
+      );
+      await writeRoute(
+        "items/@detail/default.tsx",
+        `export default function Default() { return null; }`,
+      );
+      await writeRoute(
+        "docs/[[...slug]]/page.tsx",
+        `export default function Page() { return <main data-docs-page>Docs</main>; }`,
+      );
+      await writeRoute(
+        "@panel/items/[id]/page.tsx",
+        `export default async function Panel({ params }) {
+          await Promise.resolve();
+          return <p data-slot-id={params.id}>Panel</p>;
+        }`,
+      );
+      await writeRoute(
+        "@panel/default.tsx",
+        `export default function Fallback() { return <p data-slot-fallback>Fallback</p>; }`,
+      );
+      await writeRoute(
+        "@trail/[[...segments]]/page.tsx",
+        `export default function Trail({ params }) { return <p data-slot-path={params.segments}>Trail</p>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          basePath: "/workspace",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-slot-request-isolation-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const initial = await response.text();
+          expect(initial).toContain("data-slot-fallback");
+          expect(initial).toContain('data-slot-path=""');
+          const origin = new URL(response.url).origin;
+          const cases = [
+            { pathname: "/items/first", id: "first", trail: "items/first" },
+            { pathname: "/items/second", id: "second", trail: "items/second" },
+            { pathname: "/items/a%2Fb", id: "a/b", trail: "items/a/b" },
+            { pathname: "/items/a%252Fb", id: "a%2Fb", trail: "items/a%2Fb" },
+            { pathname: "/items/%ZZ", id: null, trail: null },
+            { pathname: "/items/%E0%A4", id: null, trail: null },
+            { pathname: "/docs", id: null, trail: "docs" },
+            { pathname: "/docs/a%2Fb/c", id: null, trail: "docs/a/b/c" },
+          ];
+          // Interleave different fixed/catch-all matches, including repeated
+          // requests, so immutable preparation cannot leak mutable params.
+          await Promise.all(
+            [...cases, ...cases.slice().reverse()].map(async ({ pathname, id, trail }) => {
+              const result = await fetch(`${origin}/workspace${pathname}`);
+              if (trail === null) {
+                // H3 rejects malformed URL encodings before Farm's selector.
+                // Preserve that HTTP boundary as well as matcher-level parity.
+                expect(result.status, pathname).toBe(400);
+                expect(await result.text(), pathname).not.toContain("data-slot-id=");
+                return;
+              }
+              expect(result.status, pathname).toBe(200);
+              const html = await result.text();
+              expect(html, pathname).toContain(`data-slot-path="${trail}"`);
+              if (id === null) {
+                expect(html, pathname).toContain("data-docs-page");
+                expect(html, pathname).toContain("data-slot-fallback");
+                expect(html, pathname).not.toContain("data-slot-id=");
+                expect(html, pathname).not.toContain("data-detail-id=");
+              } else {
+                expect(html, pathname).toContain(`data-page-id="${id}"`);
+                expect(html, pathname).toContain(`data-slot-id="${id}"`);
+                expect(html, pathname).toContain(`data-detail-id="${id}"`);
+                expect(html, pathname).not.toContain("data-slot-fallback");
+              }
+            }),
+          );
+          const head = await fetch(`${origin}/workspace/items/first`, { method: "HEAD" });
+          expect(head.status).toBe(200);
+          expect(await head.text()).toBe("");
+        },
+        "/workspace",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("runs route middleware for pages beneath the configured basePath", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "dashboard"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "dashboard", "page.tsx"),
+        `export default function Page() { return <main>dashboard page</main>; }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "dashboard", "middleware.ts"),
+        `export default function middleware(ctx) { ctx.headers.set("x-dashboard-middleware", "ran"); }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          basePath: "/workspace",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-base-path-middleware-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("dashboard page");
+          expect(response.headers.get("x-dashboard-middleware")).toBe("ran");
+        },
+        "/workspace/dashboard",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("negotiates Markdown using the post-middleware pathname", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "middleware.ts"),
+        `export default function middleware(ctx) {
+  if (ctx.pathname === "/to-markdown") {
+    ctx.rewrite("/index.md");
+    ctx.headers.set("x-mirror-rewrite", "markdown");
+  } else if (ctx.pathname === "/from-markdown.md") {
+    ctx.rewrite("/");
+    ctx.headers.set("x-mirror-rewrite", "html");
+  }
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-markdown-rewrite-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toContain("text/markdown");
+          expect(response.headers.get("content-location")).toBe("/index.md");
+          expect(response.headers.get("x-mirror-rewrite")).toBe("markdown");
+          expect(await response.text()).toContain("prebuilt SSR output: src alias resolved");
+
+          const html = await fetch(new URL("/from-markdown.md", response.url), {
+            headers: { accept: "text/html" },
+          });
+          expect(html.status).toBe(200);
+          expect(html.headers.get("content-type")).toContain("text/html");
+          expect(html.headers.get("x-mirror-rewrite")).toBe("html");
+          expect(await html.text()).toContain('data-prebuilt-ssr="ready"');
+
+          const head = await fetch(response.url, {
+            method: "HEAD",
+            headers: { accept: "text/html" },
+          });
+          expect(head.status).toBe(200);
+          expect(head.headers.get("content-type")).toContain("text/markdown");
+          expect(head.headers.get("x-mirror-rewrite")).toBe("markdown");
+          expect(await head.text()).toBe("");
+        },
+        "/to-markdown",
+        { headers: { accept: "text/html" } },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("hydrates client components inside a Markdown page under a hydrating layout", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "layout-mark.tsx"),
+        `"use client";\nexport function LayoutMark() { return <span data-layout-mark>layout</span>; }`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "layout.tsx"),
+        `import { LayoutMark } from "./layout-mark";
+export default function RootLayout({ children }) {
+  return <html><body><LayoutMark />{children}</body></html>;
+}`,
+      );
+      await fs.mkdir(path.join(root, "src", "components"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "components", "copy-button.tsx"),
+        `"use client";
+import { useState } from "react";
+export function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  return <button data-copy-island onClick={() => setCopied(true)}>{copied ? "copied" : text}</button>;
+}`,
+      );
+      await fs.writeFile(
+        path.join(root, "src", "markdown-components.tsx"),
+        `import { CopyButton } from "./components/copy-button";\nexport const components = { CopyButton };`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "notes"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "notes", "page.md"),
+        `# Notes\n\nSome server-rendered text.\n\n<CopyButton text="copy me" />\n`,
+      );
+      await fs.mkdir(path.join(root, "src", "app", "notes-mdx"), { recursive: true });
+      await fs.copyFile(
+        path.join(root, "src", "app", "notes", "page.md"),
+        path.join(root, "src", "app", "notes-mdx", "page.mdx"),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          mdx: { components: "./src/markdown-components.tsx" },
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "markdown-islands-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      const clientJavaScript = await readAllClientJavaScript(root);
+      expect(clientJavaScript).toContain("data-copy-island");
+      // The island loader is keyed by the module the server marker names.
+      expect(clientJavaScript).toContain('"/src/components/copy-button.tsx"');
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toContain("Some server-rendered text.");
+          expect(html).toContain('data-farm-layout-client="true"');
+          expect(html).toMatch(/<farm-client-boundary[^>]*copy-button/);
+          expect(html).toContain("<title>Notes</title>");
+
+          const mdx = await fetch(new URL("/notes-mdx", response.url));
+          expect(mdx.status).toBe(200);
+          const mdxHtml = await mdx.text();
+          expect(mdxHtml).toContain("Some server-rendered text.");
+          expect(mdxHtml).toMatch(/<farm-client-boundary[^>]*copy-button/);
+          expect(mdxHtml).toContain("<title>Notes</title>");
+
+          for (const pathname of ["/notes.md", "/notes-mdx.md"]) {
+            const raw = await fetch(new URL(pathname, response.url));
+            expect(raw.status).toBe(200);
+            expect(raw.headers.get("content-type")).toContain("text/markdown");
+            expect(await raw.text()).toBe(
+              `# Notes\n\nSome server-rendered text.\n\n<CopyButton text="copy me" />\n`,
+            );
+          }
+        },
+        "/notes",
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -509,6 +1786,27 @@ describe("production prebuilt SSR output", () => {
         "/docs/reference",
         { method: "POST" },
       );
+      // The raw spec is fetchable as JSON at the well-known /openapi.json path.
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+          const spec = await response.json();
+          expect(spec.openapi ?? spec.swagger).toBeTruthy();
+          expect(spec.paths["/health"].get.operationId).toBe("get_health");
+        },
+        "/openapi.json",
+      );
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(405);
+          expect(response.headers.get("allow")).toBe("GET, HEAD");
+        },
+        "/openapi.json",
+        { method: "POST" },
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -543,6 +1841,23 @@ describe("production prebuilt SSR output", () => {
       const clientJavaScript = await readAllClientJavaScript(root);
       expect(serverJavaScript).toContain("production_site_active");
       expect(clientJavaScript).not.toContain("production_site_active");
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(response.headers.get("cache-control")).toBe("no-store");
+          expect(await response.json()).toEqual({
+            schemaVersion: 1,
+            eventType: "production_site_attestation",
+            packageName: "@farm.js/core",
+            packageVersion: expect.any(String),
+            renderer: "react",
+            deployTarget: "node",
+          });
+        },
+        "/.well-known/farm-telemetry",
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -576,6 +1891,177 @@ describe("production prebuilt SSR output", () => {
         "utf8",
       );
       expect(serverJavaScript).not.toContain("production_site_active");
+      expect(serverJavaScript).not.toContain("production_site_attestation");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.each([
+    { label: "without a plugin runtime", withPlugin: false },
+    { label: "alongside a runtime plugin", withPlugin: true },
+  ])(
+    "sends Farm Infra analytics only when the environment links a project, $label",
+    async ({ withPlugin }) => {
+      const root = await createProductionFixture();
+      const received: { headers: Record<string, string | string[] | undefined>; body: string }[] =
+        [];
+      const receiver = createHttpServer((request, response) => {
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          received.push({ headers: request.headers, body });
+          response.writeHead(202).end();
+        });
+      });
+      await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+      const receiverPort = (receiver.address() as { port: number }).port;
+      const key = `fti_${"t".repeat(43)}`;
+
+      try {
+        await fs.mkdir(path.join(root, "src", "app", "users", "[id]"), { recursive: true });
+        await fs.writeFile(
+          path.join(root, "src", "app", "users", "[id]", "page.tsx"),
+          `export default function User({ params }) { return <main data-user={params.id}>user</main>; }`,
+        );
+        // The same plugin in the built config and in the runtime config module.
+        const pluginSource = `{
+  name: "fixture-runtime",
+  runtime: {
+    after({ response }) {
+      const headers = new Headers(response.headers);
+      headers.set("x-fixture-plugin", "ran");
+      return new Response(response.body, { status: response.status, headers });
+    },
+  },
+}`;
+        const fixturePlugin = definePlugin({
+          name: "fixture-runtime",
+          runtime: { after: ({ response }) => response },
+        });
+        if (withPlugin) {
+          await fs.writeFile(
+            path.join(root, "farm.config.ts"),
+            `export default { plugins: [${pluginSource}] };`,
+          );
+        }
+        // No Infra variables at build time: the server reads them when it starts.
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            images: { provider: "none" },
+            telemetry: false,
+            ...(withPlugin ? { plugins: [fixturePlugin] } : {}),
+            generateBuildId: () => "infra-analytics-test",
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        const serverDir = path.join(root, ".farm", ".output", "server");
+        const pathname = "/users/private-customer?secret=private-query";
+
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            await expect(response.text()).resolves.toContain('data-user="private-customer"');
+          },
+          pathname,
+        );
+        // The server flushes on shutdown, so an unlinked app has had every chance to send.
+        expect(received).toEqual([]);
+
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            expect(response.headers.get("x-fixture-plugin")).toBe(withPlugin ? "ran" : null);
+            await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 5_000 });
+          },
+          pathname,
+          { headers: { "user-agent": "Claude-User/1.0", cookie: "session=private-cookie" } },
+          { FARMJS_API_KEY: key, FARMJS_API_URL: `http://127.0.0.1:${receiverPort}` },
+        );
+        expect(received[0]!.headers.authorization).toBe(`Bearer ${key}`);
+        expect(received[0]!.body).not.toContain("private");
+        expect(JSON.parse(received[0]!.body)).toEqual({
+          schemaVersion: 1,
+          events: [
+            {
+              id: expect.any(String),
+              requestId: expect.any(String),
+              timestamp: expect.any(String),
+              kind: "request",
+              route: "/users/[id]",
+              method: "GET",
+              status: 200,
+              durationMs: expect.any(Number),
+              agent: { family: "anthropic", category: "agent", identity: "self-reported" },
+            },
+          ],
+        });
+      } finally {
+        await new Promise((resolve) => receiver.close(resolve));
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  it("marks Nitro's prerender worker so built-in analytics ignores build requests", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `export const ssg = true;
+export default function Page() {
+  return <main data-prerender-marker={String(process.env.FARM_PRERENDER)}>static</main>;
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "infra-analytics-prerender-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      // createFarmInfraAnalyticsPlugin returns null whenever this marker is set.
+      await expect(
+        fs.readFile(path.join(root, ".farm", ".output", "public", "index.html"), "utf8"),
+      ).resolves.toContain('data-prerender-marker="1"');
+      expect(process.env.FARM_PRERENDER).toBeUndefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("leaves Farm Infra analytics out of the server when analytics is false", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          analytics: false,
+          generateBuildId: () => "infra-analytics-disabled-test",
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      const serverJavaScript = await readJavaScriptOutput(
+        path.join(root, ".farm", ".output", "server"),
+      );
+      expect(serverJavaScript).not.toContain("farm:infra-analytics");
+      expect(serverJavaScript).not.toContain("FARMJS_PROJECT_ID");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -906,7 +2392,10 @@ export default function SecondPage() {
             const page = await browser.newPage();
             const browserErrors: string[] = [];
             page.on("console", (message) => {
-              if (message.type() === "error") browserErrors.push(message.text());
+              if (message.type() === "error") {
+                if (message.location().url.endsWith("/favicon.ico")) return;
+                browserErrors.push(message.text());
+              }
             });
             page.on("pageerror", (error) => browserErrors.push(error.message));
             await page.goto(response.url);
@@ -1328,6 +2817,7 @@ await server.listen(Number(process.env.PORT));
               state.__farmIdleCallbacks = [];
               state.__farmIdlePending = new Map();
               state.__farmObserverDisconnects = 0;
+              state.__farmObserverUnobserves = 0;
               state.__farmIdleCancellations = 0;
               state.IntersectionObserver = class {
                 callback: IntersectionObserverCallback;
@@ -1338,6 +2828,10 @@ await server.listen(Number(process.env.PORT));
                 }
                 observe(target: Element) {
                   this.target = target;
+                }
+                unobserve() {
+                  // Retain the target to simulate deliveries queued before cleanup.
+                  state.__farmObserverUnobserves++;
                 }
                 disconnect() {
                   state.__farmObserverDisconnects++;
@@ -1439,9 +2933,11 @@ await server.listen(Number(process.env.PORT));
             ).toBe(0);
             const cleanup = await page.evaluate(() => ({
               observers: (globalThis as any).__farmObserverDisconnects,
+              targets: (globalThis as any).__farmObserverUnobserves,
               idle: (globalThis as any).__farmIdleCancellations,
             }));
             expect(cleanup.observers).toBeGreaterThanOrEqual(1);
+            expect(cleanup.targets).toBeGreaterThanOrEqual(1);
             expect(cleanup.idle).toBeGreaterThanOrEqual(1);
 
             await page.evaluate(() => {
@@ -1842,68 +3338,83 @@ export default function PageOwner() { return <section data-page-owner><LiveCount
     }
   }, 180_000);
 
-  it("retries an incomplete Rolldown client bundle after the parallel SSR build", async () => {
-    const root = await createProductionFixture();
-
-    try {
-      await fs.writeFile(
-        path.join(root, "src", "app", "globals.css"),
-        ".client-output-marker { color: red; }",
-      );
-      await fs.writeFile(
-        path.join(root, "src", "app", "page.tsx"),
-        `
+  async function buildWithIncompleteClientAttempts(root: string, incompleteAttempts: number) {
+    await fs.writeFile(
+      path.join(root, "src", "app", "globals.css"),
+      ".client-output-marker { color: red; }",
+    );
+    await fs.writeFile(
+      path.join(root, "src", "app", "page.tsx"),
+      `
 "use client";
 
 export default function Page() {
   return <main className="client-output-marker">client output retry</main>;
 }
 `.trim(),
-      );
+    );
 
-      const config = await resolveConfig(
-        {
-          root,
-          srcDir: "src",
-          images: { provider: "none" },
-          generateBuildId: () => "client-output-retry-test",
-        },
-        "production",
-      );
-      const productionVite = await loadFarmProductionVite();
-      let clientBuildAttempts = 0;
-      const buildWithIncompleteFirstClient = (async (inlineConfig: any) => {
-        if (!inlineConfig.build?.ssr) {
-          clientBuildAttempts++;
-          if (clientBuildAttempts === 1) {
-            const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
-            await fs.mkdir(outputDir, { recursive: true });
-            await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
-            return { output: [] };
-          }
-        }
-
-        return productionVite.build(inlineConfig);
-      }) as FarmProductionViteRuntime["build"];
-      const retryingProductionVite: FarmProductionViteRuntime = {
-        ...productionVite,
-        build: buildWithIncompleteFirstClient,
-        builder: "rolldown",
-      };
-
-      await build(config, {
+    const config = await resolveConfig(
+      {
         root,
-        preset: "node-server",
-        productionVite: retryingProductionVite,
-      });
+        srcDir: "src",
+        images: { provider: "none" },
+        generateBuildId: () => "client-output-retry-test",
+      },
+      "production",
+    );
+    const productionVite = await loadFarmProductionVite();
+    let clientBuildAttempts = 0;
+    const buildWithIncompleteClient = (async (inlineConfig: any) => {
+      if (!inlineConfig.build?.ssr) {
+        clientBuildAttempts++;
+        if (clientBuildAttempts <= incompleteAttempts) {
+          const outputDir = path.resolve(inlineConfig.root, inlineConfig.build.outDir);
+          await fs.mkdir(outputDir, { recursive: true });
+          await fs.writeFile(path.join(outputDir, "farm-client.js"), "");
+          return { output: [] };
+        }
+      }
 
-      expect(clientBuildAttempts).toBe(2);
+      return productionVite.build(inlineConfig);
+    }) as FarmProductionViteRuntime["build"];
+
+    const result = build(config, {
+      root,
+      preset: "node-server",
+      productionVite: { ...productionVite, build: buildWithIncompleteClient },
+    });
+    return { result, attempts: () => clientBuildAttempts };
+  }
+
+  it("recovers an incomplete Rolldown client bundle after the parallel SSR build", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 1);
+      await result;
+
+      expect(attempts()).toBe(2);
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.js"), "utf8"),
       ).resolves.not.toBe("");
       await expect(
         fs.readFile(path.join(root, ".farm", "client", "farm-client.css"), "utf8"),
       ).resolves.toContain(".client-output-marker");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("fails instead of shipping a client bundle that stays incomplete after the retry", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const { result, attempts } = await buildWithIncompleteClientAttempts(root, 2);
+      await expect(result).rejects.toThrow(
+        "The client bundle was still incomplete after a sequential rebuild",
+      );
+      expect(attempts()).toBe(2);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -2098,6 +3609,25 @@ export default function DynamicPage({ params }) {
               source: "/:path*",
               headers: [{ key: "X-Production-Header", value: "standalone" }],
             },
+            {
+              source: "/:slug",
+              headers: [
+                { key: "X-Header-Order", value: "dynamic" },
+                { key: "Set-Cookie", value: "shared=1; Path=/" },
+              ],
+            },
+            {
+              source: "/about",
+              headers: [
+                { key: "X-Header-Order", value: "exact" },
+                { key: "Set-Cookie", value: "shared=1; Path=/" },
+                { key: "set-cookie", value: "about=1; Path=/" },
+              ],
+            },
+            {
+              source: "/docs/:parts*",
+              headers: [{ key: "X-Header-Order", value: "catch-all" }],
+            },
           ],
           generateBuildId: () => "prebuilt-ssr-test",
         },
@@ -2106,9 +3636,14 @@ export default function DynamicPage({ params }) {
       const nodeEnvBeforeBuild = process.env.NODE_ENV;
       await build(config, { root, preset: "node-server" });
       expect(process.env.NODE_ENV).toBe(nodeEnvBeforeBuild);
-      await expect(
-        fs.readFile(path.join(root, ".farm", "ssr", "nitro-entry.mjs"), "utf8"),
-      ).resolves.toContain("farmNitroApp.hooks.hook('close'");
+      const nitroEntry = await fs.readFile(
+        path.join(root, ".farm", "ssr", "nitro-entry.mjs"),
+        "utf8",
+      );
+      expect(nitroEntry).toContain("registerFarmCloseHook()");
+      expect(nitroEntry).toContain("from '#nitro/runtime/app'");
+      expect(nitroEntry).not.toContain("from 'nitro/app'");
+      expect(nitroEntry).not.toContain("from 'nitro/runtime'");
 
       const clientBundle = await readClientBundle(root);
       expect(clientBundle).toContain("Minified React error");
@@ -2136,6 +3671,7 @@ export default function DynamicPage({ params }) {
       await runProductionRequest(serverDir, async (response) => {
         expect(response.status).toBe(200);
         expect(response.headers.get("x-production-header")).toBe("standalone");
+        expect(response.headers.has("x-header-order")).toBe(false);
         expect(response.headers.get("cache-control")).toBe("private, no-store");
         const html = await response.text();
         expect(html).toContain("prebuilt SSR output");
@@ -2165,11 +3701,18 @@ export default function DynamicPage({ params }) {
         for (const pathname of ["/about", "/about/"]) {
           const exactResponse = await fetch(new URL(pathname, response.url));
           expect(exactResponse.status).toBe(200);
+          expect(exactResponse.headers.get("x-header-order")).toBe("exact");
+          expect(exactResponse.headers.getSetCookie()).toEqual([
+            "shared=1; Path=/",
+            "about=1; Path=/",
+          ]);
           await expect(exactResponse.text()).resolves.toContain("exact production route");
         }
 
         const dynamicResponse = await fetch(new URL("/contact", response.url));
         expect(dynamicResponse.status).toBe(200);
+        expect(dynamicResponse.headers.get("x-header-order")).toBe("dynamic");
+        expect(dynamicResponse.headers.getSetCookie()).toEqual(["shared=1; Path=/"]);
         const dynamicHtml = await dynamicResponse.text();
         expect(dynamicHtml).toContain("dynamic production route");
         expect(dynamicHtml).toContain("contact");
@@ -2177,6 +3720,7 @@ export default function DynamicPage({ params }) {
         for (const pathname of ["/docs", "/docs/routing/production"]) {
           const catchAllResponse = await fetch(new URL(pathname, response.url));
           expect(catchAllResponse.status).toBe(200);
+          expect(catchAllResponse.headers.get("x-header-order")).toBe("catch-all");
           await expect(catchAllResponse.text()).resolves.toContain(
             "optional catch-all production route",
           );
@@ -2777,6 +4321,7 @@ export default defineRoutes(() => [
             root,
             srcDir: "src",
             images: { provider: "none" },
+            experimental: { ppr: true },
             generateBuildId: () => "production-boundaries-test",
           },
           "production",
@@ -2991,70 +4536,109 @@ export const GET = createEndpoint(
     }
   }, 120_000);
 
-  it("keeps plugin-replaced requests current during production rendering", async () => {
-    const root = await createProductionFixture();
-    const runtimePlugin = `
+  it.each([false, true])(
+    "keeps plugin-replaced requests current during production rendering (headers: %s)",
+    async (withHeaders) => {
+      const root = await createProductionFixture();
+      const runtimePlugin = `
 {
   name: "production-runtime-request-context",
   runtime: {
     before({ request }) {
       const headers = new Headers(request.headers);
       headers.set("x-plugin-request", "transformed");
-      return new Request(request, { headers });
+      const url = new URL(request.url);
+      url.pathname = "/base/target";
+      return new Request(new Request(url, request), { headers });
     },
   },
 }`;
 
-    try {
-      await fs.writeFile(
-        path.join(root, "farm.config.mjs"),
-        `export default { plugins: [${runtimePlugin}] };`,
-      );
-      await fs.writeFile(
-        path.join(root, "src", "app", "page.tsx"),
-        `
+      try {
+        await fs.writeFile(
+          path.join(root, "farm.config.mjs"),
+          `export default { plugins: [${runtimePlugin}] };`,
+        );
+        await fs.mkdir(path.join(root, "src", "app", "target"));
+        await fs.writeFile(
+          path.join(root, "src", "app", "target", "page.tsx"),
+          `
 import { getCurrentRequest } from "@farm.js/core/request";
 
 export default function Page() {
-  return <main data-plugin-request={getCurrentRequest().headers.get("x-plugin-request")}>plugin request context</main>;
+  return <main data-plugin-request={getCurrentRequest().headers.get("x-plugin-request")} data-plugin-url={getCurrentRequest().url}>
+    <link rel="preload" as="image" href="/first.webp" />
+    <link rel="preload" as="image" href="/second.webp" />
+    plugin request context
+  </main>;
 }
 `.trim(),
-      );
-      const config = await resolveConfig(
-        {
-          root,
-          srcDir: "src",
-          images: { provider: "none" },
-          generateBuildId: () => "production-runtime-request-context-test",
-          plugins: [
-            definePlugin({
-              name: "production-runtime-request-context",
-              runtime: {
-                before({ request }) {
-                  const headers = new Headers(request.headers);
-                  headers.set("x-plugin-request", "transformed");
-                  return new Request(request, { headers });
+        );
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            basePath: "/base",
+            images: { provider: "none" },
+            telemetry: false,
+            headers: () =>
+              withHeaders
+                ? [
+                    { source: "/incoming", headers: [{ key: "x-response-path", value: "stale" }] },
+                    {
+                      source: "/target",
+                      headers: [
+                        { key: "x-response-path", value: "current" },
+                        { key: "Set-Cookie", value: "first=1; Path=/" },
+                        { key: "Set-Cookie", value: "second=2; Path=/" },
+                      ],
+                    },
+                  ]
+                : [],
+            generateBuildId: () => "production-runtime-request-context-test",
+            plugins: [
+              definePlugin({
+                name: "production-runtime-request-context",
+                runtime: {
+                  before({ request }) {
+                    const headers = new Headers(request.headers);
+                    headers.set("x-plugin-request", "transformed");
+                    const url = new URL(request.url);
+                    url.pathname = "/base/target";
+                    return new Request(new Request(url, request), { headers });
+                  },
                 },
-              },
-            }),
-          ],
-        },
-        "production",
-      );
-      await build(config, { root, preset: "node-server" });
+              }),
+            ],
+          },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
 
-      await runProductionRequest(
-        path.join(root, ".farm", ".output", "server"),
-        async (response) => {
-          expect(response.status).toBe(200);
-          const html = await response.text();
-          expect(html.match(/<main[^>]*>/)?.[0]).toContain('data-plugin-request="transformed"');
-        },
-      );
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  }, 120_000);
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(200);
+            const html = await response.text();
+            expect(html.match(/<main[^>]*>/)?.[0]).toContain('data-plugin-request="transformed"');
+            expect(html.match(/<main[^>]*>/)?.[0]).toContain("/base/target?q=one&amp;q=two");
+            expect(html).toContain('href="/first.webp"');
+            expect(html).not.toContain('href="/second.webp"');
+            expect(response.headers.get("x-response-path")).toBe(withHeaders ? "current" : null);
+            if (withHeaders)
+              expect(response.headers.getSetCookie()).toEqual([
+                "first=1; Path=/",
+                "second=2; Path=/",
+              ]);
+          },
+          "/base/incoming?q=one&q=two",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
 
   it("honors NITRO_BUILDER=rollup", async () => {
     const root = await createProductionFixture();
@@ -3488,4 +5072,599 @@ export default function OpenGraphImage() {
       await fs.rm(root, { recursive: true, force: true });
     }
   }, 120_000);
+
+  it("bundles React DOM's edge server build for the Cloudflare Pages worker", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "react-edge-server-build-test",
+          deploy: { target: "cloudflare" },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "cloudflare-pages" });
+
+      const workerOutput = await readJavaScriptOutput(
+        path.join(root, config.deploy.outputDir, "_worker.js"),
+        [".js", ".mjs"],
+      );
+      expect(workerOutput).toContain("renderToReadableStream");
+      // Only React DOM's Node server build exports these.
+      expect(workerOutput).not.toContain("prerenderToNodeStream");
+      expect(workerOutput).not.toContain("resumeToPipeableStream");
+      // React 19's browser server build creates a MessageChannel at module
+      // load, which fails in Workers on older compatibility dates. The edge
+      // build does not.
+      expect(workerOutput).not.toContain("MessageChannel");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("bundles React into the Cloudflare module worker", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "react-cloudflare-module-test",
+          deploy: { target: "cloudflare", preset: "cloudflare-module" },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "cloudflare-module" });
+
+      // A Worker has no node_modules, so a bare React import fails at startup
+      // with `No such module "react"`.
+      const serverOutput = await readJavaScriptOutput(
+        path.join(root, config.deploy.outputDir, "server"),
+      );
+      expect(serverOutput).toContain("renderToReadableStream");
+      expect(serverOutput).not.toMatch(/\bfrom\s*["']react(?:-dom(?:\/server)?)?["']/);
+      expect(serverOutput).not.toMatch(/\bimport\s*\(?\s*["']react(?:-dom(?:\/server)?)?["']/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("rejects @farm.js/core/og in a client component at build time", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "app", "share-button.tsx"),
+        `
+"use client";
+
+import { ImageResponse } from "@farm.js/core/og";
+
+export default function ShareButton() {
+  return <button onClick={() => new ImageResponse(<div />)}>share</button>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "page.tsx"),
+        `
+import ShareButton from "./share-button";
+
+export default function Page() {
+  return <main><ShareButton /></main>;
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "og-image-response-client-test",
+        },
+        "production",
+      );
+
+      await expect(build(config, { root, preset: "node-server" })).rejects.toThrow(
+        "@farm.js/core/og is server-only and cannot be imported into client code",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("serves a React.lazy opengraph-image as a PNG from a built universal node-server", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.writeFile(
+        path.join(root, "src", "lib", "lazy-og-target.tsx"),
+        `
+export default function LazyLabel() {
+  return <span className="text-4xl text-white">Lazy OG</span>;
+}
+`.trim(),
+      );
+      await fs.writeFile(
+        path.join(root, "src", "app", "opengraph-image.tsx"),
+        `
+import { lazy } from "react";
+
+const LazyLabel = lazy(() => import("../lib/lazy-og-target"));
+
+export const alt = "Lazy universal metadata image";
+
+export default function OpenGraphImage() {
+  return (
+    <div className="flex h-full w-full items-center justify-center bg-black text-white">
+      <LazyLabel />
+    </div>
+  );
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "metadata-image-lazy-universal-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (homeResponse) => {
+          expect(homeResponse.status).toBe(200);
+          const og = await fetch(`${new URL(homeResponse.url).origin}/opengraph-image`);
+          expect(og.status).toBe(200);
+          expect(og.headers.get("content-type")).toBe("image/png");
+          const bytes = Buffer.from(await og.arrayBuffer());
+          expect(bytes.subarray(0, 8)).toEqual(
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          );
+          expect(bytes.length).toBeGreaterThan(0);
+        },
+        "/",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("serves a @vercel/og ImageResponse from an API route on a built node-server", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      // No metadata image route: the API route alone must pull in the image runtime.
+      await fs.mkdir(path.join(root, "src", "app", "api", "card"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "card", "route.tsx"),
+        `
+import { ImageResponse } from "@vercel/og";
+
+export function GET(request) {
+  const title = new URL(request.url).searchParams.get("title") ?? "Farm.js";
+  return new ImageResponse(
+    <div style={{ display: "flex", width: "100%", height: "100%", alignItems: "center", justifyContent: "center", background: "#09090b", color: "white", fontSize: 48 }}>
+      {title}
+    </div>,
+    { width: 600, height: 315, headers: { "cache-control": "public, max-age=60" } },
+  );
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "vercel-og-api-route-node-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe("image/png");
+          expect(response.headers.get("cache-control")).toBe("public, max-age=60");
+          const bytes = Buffer.from(await response.arrayBuffer());
+          expect(imageSize(bytes)).toMatchObject({ width: 600, height: 315, type: "png" });
+        },
+        "/api/card?title=Shared",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("serves an @farm.js/core/og ImageResponse from an API route on a built node-server", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      // The import reaches @vercel/og through core's bundled og entry, not the app.
+      await fs.mkdir(path.join(root, "src", "app", "api", "card"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "card", "route.tsx"),
+        `
+import { ImageResponse } from "@farm.js/core/og";
+
+export function GET() {
+  return new ImageResponse(<div style={{ display: "flex" }}>core og route</div>, {
+    width: 600,
+    height: 315,
+  });
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "core-og-api-route-node-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe("image/png");
+          const bytes = Buffer.from(await response.arrayBuffer());
+          expect(imageSize(bytes)).toMatchObject({ width: 600, height: 315, type: "png" });
+        },
+        "/api/card",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("keeps a @vercel/og API route import bundled in Cloudflare worker output", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      // Node presets keep @vercel/og external; a Worker has no node_modules to load it from.
+      await fs.mkdir(path.join(root, "src", "app", "api", "card"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "api", "card", "route.tsx"),
+        `
+import { ImageResponse } from "@vercel/og";
+
+export function GET() {
+  return new ImageResponse(<div style={{ display: "flex" }}>Cloudflare og route</div>, {
+    width: 600,
+    height: 315,
+  });
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "vercel-og-api-route-cloudflare-test",
+          deploy: { target: "cloudflare", preset: "cloudflare-module" },
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "cloudflare-module" });
+
+      const serverOutput = await readJavaScriptOutput(
+        path.join(root, config.deploy.outputDir, "server"),
+      );
+      expect(serverOutput).toContain("Cloudflare og route");
+      expect(serverOutput).not.toContain(".wasm?module");
+      expect(serverOutput).not.toMatch(/\bfrom\s*["']@vercel\/og["']/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("titles the not-found page from its own and the root layout's metadata", async () => {
+    // Both document shapes: a layout that renders <html> itself, and one that doesn't.
+    for (const layout of [
+      "export default function Layout({ children }) { return <html><head><title>Hard-coded</title></head><body>{children}</body></html>; }",
+      'export default function Layout({ children }) { return <div id="app">{children}</div>; }',
+    ]) {
+      const root = await createProductionFixture();
+      try {
+        await fs.writeFile(
+          path.join(root, "src", "app", "layout.tsx"),
+          'export const metadata = { title: { template: "%s | Acme", default: "Acme" }, description: "Acme app" };\n' +
+            layout,
+        );
+        await fs.writeFile(
+          path.join(root, "src", "app", "not-found.tsx"),
+          'export const metadata = { title: "Page not found" };\n' +
+            "export default function NotFound() { return <main>custom not found</main>; }",
+        );
+        const config = await resolveConfig(
+          { root, srcDir: "src", images: { provider: "none" }, telemetry: false },
+          "production",
+        );
+        await build(config, { root, preset: "node-server" });
+        await runProductionRequest(
+          path.join(root, ".farm", ".output", "server"),
+          async (response) => {
+            expect(response.status).toBe(404);
+            const html = await response.text();
+            expect(html).toContain("custom not found");
+            expect(html.match(/<title>[^<]*<\/title>/g)).toEqual([
+              "<title>Page not found | Acme</title>",
+            ]);
+            expect(html).toContain('<meta name="description" content="Acme app"');
+          },
+          "/missing",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 240_000);
+
+  it("answers redirect() and notFound() from pages, streams and middleware", async () => {
+    const root = await createProductionFixture();
+    const write = async (relativePath: string, source: string) => {
+      const filePath = path.join(root, "src", "app", relativePath);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, source.trim());
+    };
+    const navigation = 'import { notFound, redirect } from "@farm.js/core/navigation";';
+    const wait = "await new Promise((resolve) => setTimeout(resolve, 50));";
+
+    try {
+      // A fragment layout and a root loading boundary: pages stream behind Suspense.
+      await write(
+        "layout.tsx",
+        "export default function Layout({ children }) { return <>{children}</>; }",
+      );
+      await write("loading.tsx", "export default function Loading() { return <p>loading</p>; }");
+      await write(
+        "not-found.tsx",
+        "export default function NotFound({ pathname }) { return <main>custom not found: {pathname}</main>; }",
+      );
+      await write(
+        "sync-missing/page.tsx",
+        `${navigation}\nexport default function Page() { notFound(); }`,
+      );
+      await write(
+        "sync-redirect/page.tsx",
+        `${navigation}\nexport default function Page() { redirect("/"); }`,
+      );
+      // Production awaits an async page before rendering, so its notFound() is
+      // early. A nested async component behind its own boundary is late.
+      await write(
+        "async-missing/page.tsx",
+        `${navigation}\nexport default async function Page() { ${wait} notFound(); }`,
+      );
+      for (const [name, call] of [
+        ["late-missing", "notFound()"],
+        ["late-redirect", 'redirect("/")'],
+      ]) {
+        await write(
+          `${name}/page.tsx`,
+          `import { Suspense } from "react";\n${navigation}\n` +
+            `async function Late() { ${wait} ${call}; }\n` +
+            "export default function Page() { return <Suspense fallback={<p>loading</p>}><Late /></Suspense>; }",
+        );
+      }
+      for (const [name, call] of [
+        ["middleware-missing", "notFound()"],
+        ["middleware-redirect", 'redirect("/")'],
+      ]) {
+        await write(
+          `${name}/middleware.ts`,
+          `${navigation}\nexport function middleware() { ${call}; }`,
+        );
+        await write(
+          `${name}/page.tsx`,
+          "export default function Page() { return <main>should not render</main>; }",
+        );
+      }
+      // A page that hydrates ships its root-entry notFound import to the browser.
+      await write(
+        "hydrated/counter.tsx",
+        '"use client";\nexport function Counter() { return <button>count</button>; }',
+      );
+      await write(
+        "hydrated/page.tsx",
+        'import { notFound } from "@farm.js/core";\nimport { Counter } from "./counter";\n' +
+          "export default function Page({ params }) { if (params.missing) notFound(); return <Counter />; }",
+      );
+
+      const config = await resolveConfig(
+        { root, srcDir: "src", images: { provider: "none" }, telemetry: false },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      const manual: RequestInit = { redirect: "manual" };
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(404);
+          expect(await response.text()).toMatch(/custom not found: (<!-- -->)?\/sync-missing/);
+        },
+        "/sync-missing",
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(307);
+          expect(response.headers.get("location")).toBe("/");
+        },
+        "/sync-redirect",
+        manual,
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(404);
+          expect(await response.text()).toMatch(/custom not found: (<!-- -->)?\/async-missing/);
+        },
+        "/async-missing",
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(404);
+          const html = await response.text();
+          expect(html).toContain("custom not found");
+          expect(html).not.toContain("should not render");
+        },
+        "/middleware-missing",
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(307);
+          expect(response.headers.get("location")).toBe("/");
+        },
+        "/middleware-redirect",
+        manual,
+      );
+
+      // After the 200 shell, the document recovers in the browser.
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          const html = await response.text();
+          expect(html).toMatch(
+            /<template id="__farm_late_not_found__"><main>custom not found: (<!-- -->)?\/late-missing<\/main><\/template>/,
+          );
+          expect(html).toContain('m.content="noindex"');
+        },
+        "/late-missing",
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain('window.location.replace("/")');
+        },
+        "/late-redirect",
+        manual,
+      );
+
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("<button>count</button>");
+        },
+        "/hydrated",
+      );
+      // The browser bundle resolved notFound from the root entry.
+      expect(await readAllClientJavaScript(root)).toContain("FARM_NOT_FOUND");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+  // Programmatic routes load through a virtual id that ends in the route path
+  // (`routes.tsx?farm-route=api:%2Ffeed.xml`). A path ending in a file extension
+  // used to make the production transform read the id as an .xml or .json file.
+  it.each(["rolldown"] as const)(
+    "builds programmatic routes whose path ends in a file extension with %s",
+    async (builder) => {
+      const root = await createProductionFixture();
+
+      try {
+        await fs.writeFile(
+          path.join(root, "src", "routes.tsx"),
+          `
+import { defineRoutes } from "@farm.js/core";
+
+function Guide() {
+  return <main data-dotted-page="true">guide v2</main>;
+}
+
+export default defineRoutes(({ api, page }) => [
+  api("/feed.xml", {
+    GET: () =>
+      new Response("<rss><channel><title>feed</title></channel></rss>", {
+        headers: { "content-type": "application/rss+xml" },
+      }),
+  }),
+  api("/data.json", { GET: () => Response.json({ ok: true }) }),
+  page("/guide.v2", { component: Guide }),
+]);
+`.trim(),
+        );
+
+        const config = await resolveConfig(
+          {
+            root,
+            srcDir: "src",
+            images: { provider: "none" },
+            generateBuildId: () => `dotted-programmatic-routes-${builder}`,
+          },
+          "production",
+        );
+        await build(config, {
+          root,
+          preset: "node-server",
+          productionVite: await loadFarmProductionVite(),
+        });
+
+        const serverDir = path.join(root, ".farm", ".output", "server");
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            expect(response.headers.get("content-type")).toContain("application/rss+xml");
+            await expect(response.text()).resolves.toContain("<title>feed</title>");
+          },
+          "/feed.xml",
+        );
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            await expect(response.json()).resolves.toEqual({ ok: true });
+          },
+          "/data.json",
+        );
+        await runProductionRequest(
+          serverDir,
+          async (response) => {
+            expect(response.status).toBe(200);
+            await expect(response.text()).resolves.toContain('data-dotted-page="true"');
+          },
+          "/guide.v2",
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
 });

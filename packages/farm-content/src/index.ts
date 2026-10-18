@@ -5,11 +5,14 @@ import fg from "fast-glob";
 import { asset } from "./assets.js";
 import { collection, files, isSupportedContentFile } from "./config.js";
 import { loadContentCollections, writeContentServerModule } from "./loader.js";
+import { registerContentWriteRuntime, setContentAfterWrite } from "./runtime.js";
 import type { ContentCollections, ContentOptions, ContentPlugin } from "./types.js";
 
 const CONTENT_SERVER_ID = "@farm.js/content/server";
 
 export { asset, collection, files };
+export { remote } from "./config.js";
+export type { ContentRemoteOptions } from "./config.js";
 export type { ContentFilesOptions } from "./config.js";
 export type {
   AppContentEntry,
@@ -25,6 +28,9 @@ export type {
   ContentEntry,
   ContentFileAsset,
   ContentFileSource,
+  ContentRemoteDocument,
+  ContentRemoteSource,
+  ContentSource,
   ContentImageAsset,
   ContentOptions,
   ContentPlugin,
@@ -41,6 +47,22 @@ export function content<const TCollections extends ContentCollections>(
   options: ContentOptions<TCollections>,
 ): ContentPlugin<TCollections> {
   validateOptions(options);
+
+  // Writes need the live sources and schemas; the snapshot module carries
+  // only data. Registered here so both dev and the production runtime (where
+  // the config module is evaluated too) can reach them.
+  const unregisterWriteRuntime = registerContentWriteRuntime(
+    Object.fromEntries(
+      Object.entries(options.collections).map(([name, definition]) => [
+        name,
+        {
+          ...(definition.source.kind === "remote" ? { source: definition.source } : {}),
+          schema: definition.schema,
+        },
+      ]),
+    ),
+  );
+
   let root = process.cwd();
   let generatedFile = "";
   let sourceFiles = new Set<string>();
@@ -77,13 +99,18 @@ export function content<const TCollections extends ContentCollections>(
     },
   }) as ContentPlugin<TCollections>;
 
-  async function rebuild(): Promise<void> {
+  async function rebuild(): Promise<boolean> {
     const attemptedSourceFiles = new Set<string>();
     try {
       await assertGeneratedOutputInsideRoot(root, generatedFile);
       const loaded = await loadContentCollections(root, options.collections, attemptedSourceFiles);
-      await writeContentServerModule(generatedFile, loaded.collections, loaded.assetImports);
+      const changed = await writeContentServerModule(
+        generatedFile,
+        loaded.collections,
+        loaded.assetImports,
+      );
       sourceFiles = new Set(loaded.sourceFiles);
+      return changed;
     } catch (error) {
       sourceFiles = new Set([...sourceFiles, ...attemptedSourceFiles]);
       throw error;
@@ -143,6 +170,72 @@ export function content<const TCollections extends ContentCollections>(
         };
         server.watcher.on("all", onFile);
         server.httpServer?.once("close", () => server.watcher.off?.("all", onFile));
+
+        // A successful write refreshes the snapshot immediately in development.
+        // The stored chain must always settle: a rejected tail would swallow
+        // the next watcher rebuild entirely, so the error report lives inside
+        // the chain and the queue continues past it.
+        const disposeAfterWrite = setContentAfterWrite(async () => {
+          const settled = (rebuildQueue = rebuildQueue
+            .then(async () => {
+              if (!(await rebuild())) return;
+              const modules = server.moduleGraph.getModulesByFile?.(generatedFile);
+              for (const module of modules ?? []) server.moduleGraph.invalidateModule(module);
+              server.ws.send({ type: "full-reload" });
+            })
+            .catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              server.ws.send({
+                type: "error",
+                err: { message, stack: error instanceof Error ? error.stack : undefined },
+              });
+            }));
+          await settled;
+        });
+        // Vite restart creates the replacement server before closing this one;
+        // the scoped disposers only clear registrations this server owns.
+        server.httpServer?.once("close", () => {
+          disposeAfterWrite();
+          unregisterWriteRuntime();
+        });
+
+        // Remote sources have no file events; poll the ones that asked for it.
+        // One timer at the smallest requested cadence keeps ordering simple,
+        // and a reload only goes out when the generated module actually changed.
+        const intervals = Object.values(options.collections)
+          .map((definition) => definition.source)
+          .filter((candidate) => candidate.kind === "remote")
+          .map((candidate) => candidate.refreshInterval)
+          .filter((value): value is number => typeof value === "number");
+        if (intervals.length > 0) {
+          // A persistently failing remote fetch reports once per distinct
+          // message, not once per tick - the overlay is a signal, not a log.
+          let lastPollError: string | undefined;
+          const timer = setInterval(
+            () => {
+              rebuildQueue = rebuildQueue
+                .then(async () => {
+                  if (!(await rebuild())) return;
+                  lastPollError = undefined;
+                  const modules = server.moduleGraph.getModulesByFile?.(generatedFile);
+                  for (const module of modules ?? []) server.moduleGraph.invalidateModule(module);
+                  server.ws.send({ type: "full-reload" });
+                })
+                .catch((error) => {
+                  const message = error instanceof Error ? error.message : String(error);
+                  if (message === lastPollError) return;
+                  lastPollError = message;
+                  server.ws.send({
+                    type: "error",
+                    err: { message, stack: error instanceof Error ? error.stack : undefined },
+                  });
+                });
+            },
+            Math.min(...intervals),
+          );
+          timer.unref?.();
+          server.httpServer?.once("close", () => clearInterval(timer));
+        }
       },
     };
   }
@@ -228,6 +321,7 @@ async function shouldRebuildForFile(
   }
 
   for (const definition of Object.values(collections)) {
+    if (definition.source.kind !== "files") continue;
     const matches = await fg([...definition.source.patterns], {
       cwd: root,
       absolute: true,

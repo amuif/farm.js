@@ -81,6 +81,15 @@ const OVERLAY_STYLES = `
   display: block;
   width: 100%;
   height: 100%;
+  /* Owned by the overlay: the default error page's source marker is a neutral
+     accent, but the overlay uses this to mark the expression that threw. */
+  --farm-runtime-error-inline-code: #f87171;
+}
+
+@media (prefers-color-scheme: light) {
+  :host {
+    --farm-runtime-error-inline-code: #b91c1c;
+  }
 }
 
 :host([hidden]) {
@@ -115,11 +124,15 @@ const OVERLAY_STYLES = `
 
 .farm-runtime-error__viewport .farm-default-error__row {
   min-height: 48px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  column-gap: 20px;
+  padding: 0 20px;
 }
 
 .farm-runtime-error__viewport .farm-default-error__details {
-  padding-top: 16px;
-  padding-bottom: 14px;
+  /* The overlay draws a box around the panel, so its content needs the same inset as the rows. */
+  padding: 16px 20px;
+  border-bottom: 0;
 }
 
 .farm-runtime-error__viewport .farm-default-error__details-header {
@@ -137,7 +150,7 @@ const OVERLAY_STYLES = `
 }
 
 .farm-runtime-error__viewport .farm-default-error__meta {
-  margin-top: 10px;
+  margin: 12px 0 0;
 }
 
 .farm-runtime-error__viewport .farm-default-error__actions {
@@ -152,7 +165,7 @@ const OVERLAY_STYLES = `
   padding: 0 8px;
   border: 1px solid var(--farm-error-line);
   color: var(--farm-error-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--farm-error-font-mono);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -188,12 +201,12 @@ const OVERLAY_STYLES = `
 }
 
 .farm-runtime-error__message-value {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--farm-error-font-sans);
 }
 
 .farm-runtime-error__inline-code {
-  color: var(--farm-error-source-marker);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: var(--farm-runtime-error-inline-code);
+  font-family: var(--farm-error-font-mono);
   font-size: 0.94em;
   font-weight: 600;
   line-height: inherit;
@@ -216,6 +229,16 @@ const OVERLAY_STYLES = `
 
   .farm-runtime-error__viewport .farm-default-error__actions {
     width: 100%;
+  }
+
+  .farm-runtime-error__viewport .farm-default-error__row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+    padding: 12px 16px;
+  }
+
+  .farm-runtime-error__viewport .farm-default-error__details {
+    padding: 14px 16px;
   }
 
   .farm-runtime-error__viewport .farm-default-error__action {
@@ -253,11 +276,19 @@ const OVERLAY_STYLES = `
 
   .farm-runtime-error__viewport .farm-default-error__details {
     padding-top: 12px;
-    padding-bottom: 10px;
+    padding-bottom: 12px;
   }
 
   .farm-runtime-error__viewport .farm-default-error__actions {
+    /* The redesigned page is taller than a short window. Rather than shrink it
+       until it is unreadable, keep the recovery controls pinned to the bottom
+       so they stay reachable while the rest of the report scrolls under them. */
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     margin-top: 10px;
+    padding: 10px 0;
+    background: var(--farm-error-bg);
   }
 }
 `;
@@ -362,7 +393,12 @@ class DefaultFarmRuntimeErrorOverlay implements FarmRuntimeErrorOverlay {
   }
 
   show(errorLike: unknown, context: FarmRuntimeErrorOverlayContext): void {
-    if (this.destroyed || isChunkLoadError(errorLike) || isChunkLoadError(context.sourceEvent)) {
+    if (
+      this.destroyed ||
+      isChunkLoadError(errorLike) ||
+      isChunkLoadError(context.sourceEvent) ||
+      isResizeObserverLoopNotice(context.sourceEvent)
+    ) {
       return;
     }
 
@@ -886,6 +922,19 @@ function formatDisplaySourceUrl(url: string, clientWindow: Window): string {
   } catch {
     return url.replace(/[?#].*$/, "");
   }
+}
+
+/**
+ * The browser reports a ResizeObserver whose callback changed layout again
+ * as a window error with no error object. It is a spec'd notice, delivered on
+ * the next frame, not an application failure. An app that throws an Error with
+ * the same message still reaches the overlay, because that event carries it.
+ */
+function isResizeObserverLoopNotice(event: Event | undefined): boolean {
+  if (!event || !("message" in event) || (event as ErrorEvent).error != null) return false;
+  return /^ResizeObserver loop (?:completed with undelivered notifications|limit exceeded)/.test(
+    String((event as ErrorEvent).message),
+  );
 }
 
 function isBrowserExtensionUrl(url: string): boolean {

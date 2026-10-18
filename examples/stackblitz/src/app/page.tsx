@@ -36,7 +36,7 @@ export default function HomePage() {
                 <span>Compiled client island</span>
               </div>
               <p className="demo-note">
-                This counter opts into the experimental AOT compiler with a{" "}
+                This counter opts into the AOT compiler with a{" "}
                 <code>"use compiler"</code> directive (see{" "}
                 <code>src/components/counter.tsx</code>): its state updates
                 patch the DOM directly, skipping the reconciler. The guestbook

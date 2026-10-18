@@ -15,6 +15,15 @@ export type FarmClientCacheEntry<TData = unknown> = {
   status?: FarmClientCacheStatus;
   error?: Error | null;
   fetching?: boolean;
+  /** Marks an entry the persistence layer may write to its adapter. */
+  persist?: boolean;
+};
+
+/** @internal Observation seam for the client cache persistence engine. */
+export type FarmClientCachePersistenceSink = {
+  onSet(key: string, entry: FarmClientCacheEntry): void;
+  onDelete(key: string): void;
+  onClear(): void;
 };
 
 type FarmClientCacheListener = (event?: "invalidate") => void;
@@ -51,46 +60,61 @@ const cacheFinalizer =
     ? new FinalizationRegistry<() => void>((unsubscribe) => unsubscribe())
     : undefined;
 
-// This closure must only capture a weak reference, never the cache itself.
-function subscribeWeakCache(reference: WeakRef<FarmClientDataCache>): () => void {
-  const unsubscribe = subscribeFarmCacheInvalidation((key) => {
-    const cache = reference.deref();
-    if (cache) cache.invalidate(key);
-    else dispose();
-  });
-  function dispose() {
-    unsubscribe();
-    cacheFinalizer?.unregister(reference);
-  }
-  return dispose;
-}
+const DEFAULT_GC_SWEEP_INTERVAL_MS = 30_000;
 
 export class FarmClientDataCache {
   private entries = new Map<string, FarmClientCacheEntry>();
   private aliases = new Map<string, string>();
+  private aliasesByTarget = new Map<string, Set<string>>();
   private invalidatedAt = new Map<string, number>();
   private listeners = new Map<string, Set<FarmClientCacheListener>>();
   private inflight = new Map<string, Promise<unknown>>();
+  private pendingMetadataSweeps = new Set<string>();
   private unsubscribeInvalidation: (() => void) | undefined;
+  private gcTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly gcSweepIntervalMs: number | false;
+  private persistence: FarmClientCachePersistenceSink | undefined;
 
-  constructor(options: { subscribeToInvalidation?: boolean } = {}) {
+  constructor(
+    options: { subscribeToInvalidation?: boolean; gcSweepIntervalMs?: number | false } = {},
+  ) {
+    this.gcSweepIntervalMs = options.gcSweepIntervalMs ?? DEFAULT_GC_SWEEP_INTERVAL_MS;
     if (options.subscribeToInvalidation !== false) {
       if (typeof WeakRef === "function") {
         const reference = new WeakRef(this);
-        const unsubscribe = subscribeWeakCache(reference);
+        const unsubscribe = FarmClientDataCache.subscribeWeakCache(reference);
         cacheFinalizer?.register(this, unsubscribe, reference);
         this.unsubscribeInvalidation = unsubscribe;
       } else {
         // Keep invalidation working on older runtimes without weak references.
         this.unsubscribeInvalidation = subscribeFarmCacheInvalidation((key) =>
-          this.invalidate(key),
+          this.applyInvalidation(key, Date.now(), false),
         );
       }
     }
   }
 
+  // This closure must only capture a weak reference, never the cache itself.
+  private static subscribeWeakCache(reference: WeakRef<FarmClientDataCache>): () => void {
+    const unsubscribe = subscribeFarmCacheInvalidation((key) => {
+      const cache = reference.deref();
+      if (cache) cache.applyInvalidation(key, Date.now(), false);
+      else dispose();
+    });
+    function dispose() {
+      unsubscribe();
+      cacheFinalizer?.unregister(reference);
+    }
+    return dispose;
+  }
+
   get size(): number {
     return this.entries.size;
+  }
+
+  /** @internal Attach or detach the persistence engine's observation sink. */
+  attachPersistence(sink: FarmClientCachePersistenceSink | undefined): void {
+    this.persistence = sink;
   }
 
   resolveKey(key: string): string {
@@ -111,7 +135,12 @@ export class FarmClientDataCache {
     if (!entry) return undefined;
 
     if (entry.gcAt !== undefined && now >= entry.gcAt) {
+      // Match the scheduled sweep: fetching entries still own live work and
+      // are replaced when that work settles. Do not return their expired data.
+      if (entry.fetching) return undefined;
       this.entries.delete(resolved);
+      this.persistence?.onDelete(resolved);
+      this.sweepEntryMetadata(new Set([resolved]));
       this.emit(resolved);
       return undefined;
     }
@@ -132,6 +161,9 @@ export class FarmClientDataCache {
     }
 
     this.entries.set(resolved, nextEntry);
+    this.pendingMetadataSweeps.delete(resolved);
+    if (nextEntry.gcAt !== undefined) this.scheduleGcSweep();
+    this.persistence?.onSet(resolved, nextEntry);
     this.emit(resolved);
     return this;
   }
@@ -140,6 +172,12 @@ export class FarmClientDataCache {
     const resolved = this.resolveKey(key);
     const deleted = this.entries.delete(resolved);
     this.inflight.delete(resolved);
+    if (deleted) this.persistence?.onDelete(resolved);
+    // Match expiry cleanup, retaining aliases/marks only while a live owner
+    // needs them. A no-op delete must preserve invalidation before first set.
+    if (deleted || this.pendingMetadataSweeps.has(resolved)) {
+      this.sweepEntryMetadata(new Set([resolved]));
+    }
     this.emit(resolved);
     return deleted;
   }
@@ -148,14 +186,21 @@ export class FarmClientDataCache {
     const keys = new Set([...this.entries.keys(), ...this.listeners.keys()]);
     this.entries.clear();
     this.aliases.clear();
+    this.aliasesByTarget.clear();
     this.invalidatedAt.clear();
     this.inflight.clear();
+    this.pendingMetadataSweeps.clear();
+    this.persistence?.onClear();
     for (const key of keys) this.emit(key);
   }
 
   dispose(): void {
     this.unsubscribeInvalidation?.();
     this.unsubscribeInvalidation = undefined;
+    if (this.gcTimer !== undefined) {
+      clearTimeout(this.gcTimer);
+      this.gcTimer = undefined;
+    }
     this.clear();
   }
 
@@ -165,11 +210,22 @@ export class FarmClientDataCache {
   }
 
   invalidate(key: string, now = Date.now()): void {
+    // Explicit invalidation can precede a set/alias; preserve that contract.
+    this.applyInvalidation(key, now, true);
+  }
+
+  private applyInvalidation(key: string, now: number, retainUnowned: boolean): void {
     const resolved = this.resolveKey(key);
     for (const keys of invalidationTrackers.get(this) ?? []) keys.add(resolved);
-    this.invalidatedAt.set(resolved, now);
-
     const entry = this.entries.get(resolved);
+    const alreadyRetained = this.invalidatedAt.has(resolved);
+    // Broadcasts reach every cache, including caches which have never used the
+    // key. Late-discovered response keys are already tracked per request above.
+    // Retain shared timestamps only while the cache actually owns the key.
+    if (retainUnowned || entry || alreadyRetained || this.hasMetadataOwner(resolved)) {
+      this.invalidatedAt.set(resolved, now);
+      if (!entry && !retainUnowned && !alreadyRetained) this.pendingMetadataSweeps.add(resolved);
+    }
     if (entry) {
       this.entries.set(resolved, {
         ...entry,
@@ -181,6 +237,15 @@ export class FarmClientDataCache {
     this.emit(resolved, "invalidate");
   }
 
+  private hasMetadataOwner(key: string): boolean {
+    const related = new Set([key]);
+    for (const target of related) {
+      if (this.listeners.has(target) || this.inflight.has(target)) return true;
+      for (const alias of this.aliasesByTarget.get(target) ?? []) related.add(alias);
+    }
+    return false;
+  }
+
   alias(alias: string, key: string): void {
     const resolved = this.resolveKey(key);
     if (alias === resolved) return;
@@ -190,9 +255,10 @@ export class FarmClientDataCache {
     const resolvedInvalidatedAt = this.invalidatedAt.get(resolved);
     if (aliasEntry && !this.entries.has(resolved)) {
       this.entries.set(resolved, aliasEntry);
+      this.persistence?.onSet(resolved, aliasEntry);
     }
 
-    this.entries.delete(alias);
+    if (this.entries.delete(alias)) this.persistence?.onDelete(alias);
     this.invalidatedAt.delete(alias);
     const invalidatedAt = [aliasInvalidatedAt, resolvedInvalidatedAt].reduce<number | undefined>(
       (latest, value) =>
@@ -224,7 +290,23 @@ export class FarmClientDataCache {
       this.inflight.set(resolved, aliasInflight);
     }
     this.inflight.delete(alias);
-    this.aliases.set(alias, resolved);
+    if (this.pendingMetadataSweeps.delete(alias) && !this.entries.has(resolved)) {
+      this.pendingMetadataSweeps.add(resolved);
+    }
+    const previousTarget = this.aliases.get(alias);
+    if (previousTarget !== resolved) {
+      const previousResolved =
+        previousTarget !== undefined && this.pendingMetadataSweeps.size > 0
+          ? this.resolveKey(alias)
+          : undefined;
+      this.removeAlias(alias);
+      this.aliases.set(alias, resolved);
+      let aliases = this.aliasesByTarget.get(resolved);
+      if (!aliases) this.aliasesByTarget.set(resolved, (aliases = new Set()));
+      aliases.add(alias);
+      // Retargeting can release the last owner of a previously expired target.
+      if (previousResolved !== undefined) this.sweepPendingEntryMetadata(previousResolved);
+    }
     this.emit(alias);
     this.emit(resolved, this.invalidatedAt.has(resolved) ? "invalidate" : undefined);
   }
@@ -239,7 +321,13 @@ export class FarmClientDataCache {
     listeners.add(listener);
     return () => {
       listeners!.delete(listener);
-      if (listeners!.size === 0) this.listeners.delete(key);
+      // Only drop the map entry if it still holds this exact set. A repeated or
+      // stale unsubscribe (called after the key was drained and resubscribed)
+      // must not evict a newer subscriber's live listener set.
+      if (listeners!.size === 0 && this.listeners.get(key) === listeners) {
+        this.listeners.delete(key);
+        this.sweepPendingEntryMetadata(key);
+      }
     };
   }
 
@@ -252,12 +340,124 @@ export class FarmClientDataCache {
   }
 
   deleteInflight(key: string): void {
-    this.inflight.delete(this.resolveKey(key));
+    const resolved = this.resolveKey(key);
+    if (this.inflight.delete(resolved)) this.sweepPendingEntryMetadata(resolved);
+  }
+
+  private scheduleGcSweep(): void {
+    if (this.gcSweepIntervalMs === false || this.gcTimer !== undefined) return;
+    const timer = setTimeout(() => {
+      this.gcTimer = undefined;
+      this.sweepExpiredEntries();
+    }, this.gcSweepIntervalMs);
+    // Cache cleanup must never keep a Node.js process (SSR, tests) alive.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.gcTimer = timer;
+  }
+
+  private sweepExpiredEntries(now = Date.now()): void {
+    const watched = new Set<string>();
+    for (const key of this.listeners.keys()) watched.add(this.resolveKey(key));
+
+    let remaining = false;
+    const swept = new Set<string>();
+    for (const [key, entry] of this.entries) {
+      if (entry.gcAt === undefined) continue;
+      if (now < entry.gcAt || entry.fetching || this.inflight.has(key) || watched.has(key)) {
+        remaining = true;
+        continue;
+      }
+      // Only unwatched entries are swept, so eviction is unobservable: a read
+      // of this key would already evict it lazily before returning data.
+      this.entries.delete(key);
+      this.persistence?.onDelete(key);
+      swept.add(key);
+    }
+
+    if (swept.size > 0) this.sweepEntryMetadata(swept);
+    if (remaining) this.scheduleGcSweep();
+  }
+
+  /**
+   * Entry eviction alone leaves the per-key metadata behind. `invalidatedAt`
+   * marks and provisional aliases are created per query invocation, so with
+   * dynamic keys they accumulate for the lifetime of the page even though the
+   * entries they describe are long gone.
+   */
+  private sweepEntryMetadata(swept: Set<string>): void {
+    const protectedKeys = new Set<string>();
+    // A lazy read usually evicts one key. Do not rescan every unrelated live
+    // subscription/request for each expired entry; follow its reverse aliases.
+    for (const key of swept) if (this.hasMetadataOwner(key)) protectedKeys.add(key);
+
+    for (const key of swept) {
+      if (this.entries.has(key)) {
+        this.pendingMetadataSweeps.delete(key);
+      } else if (protectedKeys.has(key)) {
+        this.pendingMetadataSweeps.add(key);
+      } else {
+        this.pendingMetadataSweeps.delete(key);
+        this.invalidatedAt.delete(key);
+      }
+    }
+
+    // Walk only the reverse edges owned by swept targets, including aliases
+    // of aliases. Discover the complete chain before deleting any edge.
+    const related = new Set<string>();
+    const targets = new Set(swept);
+    for (const target of targets) {
+      for (const alias of this.aliasesByTarget.get(target) ?? []) {
+        related.add(alias);
+        targets.add(alias);
+      }
+    }
+    const removable: string[] = [];
+    for (const alias of related) {
+      // Keep any alias that is still addressable: one that has its own entry,
+      // that something is subscribed to, that owns in-flight work, or whose
+      // target is still live.
+      if (this.entries.has(alias) || this.listeners.has(alias) || this.inflight.has(alias))
+        continue;
+      const resolved = this.resolveKey(alias);
+      if (!swept.has(resolved)) continue;
+      if (this.entries.has(resolved) || protectedKeys.has(resolved)) continue;
+      removable.push(alias);
+    }
+    for (const alias of removable) {
+      this.removeAlias(alias);
+      this.invalidatedAt.delete(alias);
+    }
+  }
+
+  private removeAlias(alias: string): void {
+    const target = this.aliases.get(alias);
+    if (target === undefined) return;
+    this.aliases.delete(alias);
+    const aliases = this.aliasesByTarget.get(target);
+    aliases?.delete(alias);
+    if (aliases?.size === 0) this.aliasesByTarget.delete(target);
+  }
+
+  private sweepPendingEntryMetadata(key?: string): void {
+    if (this.pendingMetadataSweeps.size === 0) return;
+    // Owner releases affect one canonical key, not every pending eviction.
+    if (key !== undefined) {
+      const resolved = this.resolveKey(key);
+      if (this.pendingMetadataSweeps.has(resolved)) {
+        this.sweepEntryMetadata(new Set([resolved]));
+      }
+      return;
+    }
+    this.sweepEntryMetadata(new Set(this.pendingMetadataSweeps));
   }
 
   private emit(key: string, event?: "invalidate"): void {
     this.notifyListeners(key, event);
+    if (this.listeners.size === 0) return;
     for (const [alias, target] of this.aliases) {
+      // Check live subscriptions in alias order: earlier listeners may add or
+      // remove subscribers while notification is in progress.
+      if (!this.listeners.has(alias)) continue;
       if (this.resolveKey(target) === key) {
         this.notifyListeners(alias, event);
       }
@@ -266,7 +466,15 @@ export class FarmClientDataCache {
 
   private notifyListeners(key: string, event?: "invalidate"): void {
     for (const listener of this.listeners.get(key) ?? []) {
-      listener(event);
+      // One subscriber must not be able to break the others, or to make an
+      // ordinary cache write or invalidation throw in its caller. This matches
+      // the isolation the global invalidation bus already provides.
+      try {
+        listener(event);
+      } catch (error) {
+        const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+        console.warn(`[farm:client-cache] cache listener failed: ${detail}`);
+      }
     }
   }
 }

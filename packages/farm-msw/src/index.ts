@@ -1,3 +1,4 @@
+import { loadFarmDevModule, type FarmDevModuleServer } from "@farm.js/core/plugin";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -37,8 +38,7 @@ interface FarmModuleNode {
   importedModules?: Set<FarmModuleNode>;
 }
 
-interface FarmViteDevServer {
-  ssrLoadModule(id: string): Promise<Record<string, unknown>>;
+interface FarmViteDevServer extends FarmDevModuleServer {
   moduleGraph?: {
     getModulesByFile(file: string): Set<FarmModuleNode> | undefined;
   };
@@ -182,17 +182,37 @@ export function msw(options: MswPluginOptions) {
     client: browserClient,
   });
 
+  // Stamped as an own property so it survives the descriptor copy an
+  // integration performs when it takes ownership of a contributed plugin.
+  Object.defineProperty(plugin, MSW_PLUGIN_MARKER, { value: true });
+
   return plugin;
 }
 
+/**
+ * Marks this plugin so production removal can find it by identity-independent
+ * means. An integration that contributes the plugin re-creates it with
+ * `Object.create(prototype, ownDescriptors)`, which produces a different object
+ * with the same own properties, so a `!==` filter silently matched nothing and
+ * left `farm:msw` in the production config.
+ */
+const MSW_PLUGIN_MARKER = Symbol.for("farm.msw.plugin");
+
 function withoutPlugin(config: any, plugin: FarmPlugin<any, any, any, any>): any {
-  if (!config.plugins?.includes(plugin)) return;
-  return {
-    ...config,
-    plugins: config.plugins.filter(
-      (candidate: FarmPlugin<any, any, any, any>) => candidate !== plugin,
-    ),
-  };
+  const plugins: FarmPlugin<any, any, any, any>[] = config.plugins ?? [];
+  const remaining = plugins.filter(
+    (candidate) => candidate !== plugin && !(candidate as any)?.[MSW_PLUGIN_MARKER],
+  );
+  if (remaining.length === plugins.length) {
+    // Failing loudly beats shipping a dev-only plugin: its vite plugin is not
+    // registered in production, so the build either dies on an unresolvable
+    // virtual module or ships the dev runtime to the browser.
+    throw new Error(
+      "farm:msw could not remove itself from the production config. " +
+        "Report this with the integration that contributed it.",
+    );
+  }
+  return { ...config, plugins: remaining };
 }
 
 function createMswVitePlugin(input: {
@@ -244,7 +264,7 @@ async function loadHandlers(
   cacheBust?: number,
 ): Promise<RequestHandler[]> {
   const id = `${toModuleId(handlersFile)}${cacheBust ? `?farm-msw=${cacheBust}` : ""}`;
-  const loaded = await server.ssrLoadModule(id);
+  const loaded = await loadFarmDevModule(server, id);
   const candidate = loaded.handlers ?? loaded.default;
   if (!Array.isArray(candidate)) throw new TypeError(invalidHandlersMessage(handlersFile));
   return candidate as RequestHandler[];

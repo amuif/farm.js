@@ -19,7 +19,7 @@ This project was generated from the Better Auth template included with `@farm.js
 ## Quick start
 
 ```bash
-pnpm --config.minimumReleaseAge=0 create @farm.js/app@beta my-app --template better-auth --renderer solid
+pnpm create @farm.js/app my-app --template better-auth --renderer solid
 cd my-app
 cp .env.example .env.local
 ```
@@ -77,7 +77,10 @@ environment before building.
 Run `pnpm auth:migrate` (or `farm migrate`) as an explicit deployment step before serving traffic.
 The production build itself never runs database migrations.
 
-The FARMJS deployment target is configured in [`farm.config.ts`](./farm.config.ts) for Vercel.
+`pnpm run deploy` deploys to Vercel. `pnpm build` detects Vercel, Netlify, and Cloudflare Pages builds and
+outputs for that platform; anywhere else it builds a Node server that `pnpm start` runs, so the app
+also deploys to Dokploy, Railway, or your own server. Set `deploy.target` in
+[`farm.config.ts`](./farm.config.ts) to pin one.
 
 ## Commands
 
@@ -86,6 +89,7 @@ pnpm dev         # start the development server
 pnpm auth:migrate # apply Better Auth database migrations
 pnpm type-check  # run TypeScript checks
 pnpm build       # create the production build
+pnpm start       # run the production build as a Node server
 pnpm check       # type-check and build
 pnpm run deploy -- --prod  # deploy the prebuilt Farm output to Vercel
 ```

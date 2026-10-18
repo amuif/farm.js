@@ -297,6 +297,20 @@ describe("server cache primitives", () => {
     await expect(fromB()).resolves.toEqual({ from: "B" });
   });
 
+  it("separates closures that capture different variables via keyParts", async () => {
+    // Identity is derived from source so it stays stable across processes, which
+    // means closures with identical source but different captured variables share
+    // an identity. Callers disambiguate by listing the captured value in keyParts
+    // (the documented contract); this keeps their entries separate.
+    const makeLoader = (table: string) =>
+      unstable_cache(async (id: number) => ({ table, id }), [table]);
+    const users = makeLoader("users");
+    const posts = makeLoader("posts");
+
+    await expect(users(1)).resolves.toEqual({ table: "users", id: 1 });
+    await expect(posts(1)).resolves.toEqual({ table: "posts", id: 1 });
+  });
+
   it("treats revalidate: 0 as always stale", async () => {
     let calls = 0;
     const getPrices = unstable_cache(
@@ -329,6 +343,97 @@ describe("server cache primitives", () => {
       calls: 2,
     });
     expect(calls).toBe(2);
+  });
+
+  it("rejects invalid revalidate values without conflating them with no expiry", async () => {
+    const local = new FarmDataCache();
+    for (const revalidate of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => local.set("invalid", { ok: true }, { revalidate })).toThrow(
+        "Cache revalidate must be false or a finite, non-negative number.",
+      );
+    }
+
+    expect(local.set("forever", { ok: true }, { revalidate: false }).revalidate).toBe(false);
+    expect(local.set("immediate", { ok: true }, { revalidate: 0 }).revalidate).toBe(0);
+    expect(local.set("ttl", { ok: true }, { revalidate: 30 }).revalidate).toBe(30);
+    expect(local.set("default", { ok: true }).revalidate).toBeUndefined();
+
+    const adapter = new TestSharedCacheAdapter();
+    const distributed = new FarmDataCache({ adapter, namespace: "validation" });
+    const producer = vi.fn(async () => ({ ok: true }));
+    await expect(
+      distributed.getOrSet("invalid", producer, { revalidate: Number.NEGATIVE_INFINITY }),
+    ).rejects.toThrow("Cache revalidate must be false or a finite, non-negative number.");
+    expect(producer).not.toHaveBeenCalled();
+    await expect(adapter.get("validation:entry:invalid")).resolves.toBeNull();
+  });
+
+  it("bounds the default memory cache instead of retaining expired entries forever", () => {
+    const cache = new FarmDataCache();
+    const expiredAt = Date.now() - 60_000;
+
+    for (let index = 0; index < 10_000; index++) {
+      cache.set(`expired-${index}`, index, { createdAt: expiredAt, revalidate: 1 });
+    }
+
+    expect(cache.size).toBe(1_024);
+    expect(cache.get("expired-0")).toBeUndefined();
+    expect(cache.get("expired-9999", { allowStale: true })).toBe(9_999);
+  });
+
+  it("evicts the least recently used entry at a configured memory limit", () => {
+    const cache = new FarmDataCache({ maxEntries: 2 });
+    cache.set("first", 1);
+    cache.set("second", 2);
+
+    expect(cache.get("first")).toBe(1);
+    cache.set("third", 3);
+
+    expect(cache.get("first")).toBe(1);
+    expect(cache.get("second")).toBeUndefined();
+    expect(cache.get("third")).toBe(3);
+  });
+
+  it("compacts tag invalidation versions when no entry or fill needs them", async () => {
+    const cache = new FarmDataCache({ maxEntries: 2 });
+
+    for (let index = 0; index < 10_000; index++) {
+      cache.revalidateTag(`unused-${index}`);
+    }
+    expect((cache as any).invalidatedTagVersions.size).toBe(0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = cache.getOrSet(
+      "active",
+      async () => {
+        await gate;
+        return "old";
+      },
+      { tags: ["products"] },
+    );
+    await vi.waitFor(() => expect((cache as any).activeGenerations.size).toBe(1));
+
+    cache.revalidateTag("products");
+    expect((cache as any).invalidatedTagVersions.size).toBe(1);
+    release();
+    await expect(pending).resolves.toBe("old");
+    expect(cache.get("active")).toBeUndefined();
+
+    await expect(
+      cache.getOrSet("active", async () => "fresh", { tags: ["products"] }),
+    ).resolves.toBe("fresh");
+    expect((cache as any).invalidatedTagVersions.size).toBe(0);
+  });
+
+  it("rejects invalid memory cache limits", () => {
+    for (const maxEntries of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(() => new FarmDataCache({ maxEntries })).toThrow(
+        "cache.maxEntries must be a positive integer.",
+      );
+    }
   });
 
   it("dedupes concurrent cache fills", async () => {
@@ -417,6 +522,49 @@ describe("server cache primitives", () => {
     await expect(secondAdapter.get("second:entry:products")).resolves.toMatchObject({
       value: { source: "second" },
     });
+  });
+
+  it("reports lease release failures without replacing a successful fill", async () => {
+    const events: FarmEvent[] = [];
+    configureFarmObservability({ onEvent: (event) => events.push(event) });
+    const adapter = new TestSharedCacheAdapter();
+    const releaseError = new Error("lease release failed");
+    vi.spyOn(adapter, "releaseLease").mockRejectedValue(releaseError);
+    const cache = new FarmDataCache({ adapter, namespace: "release-success" });
+
+    await expect(cache.getOrSet("products", async () => ({ ok: true }))).resolves.toEqual({
+      ok: true,
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "cache.error",
+        key: "products",
+        operation: "set",
+        error: releaseError,
+      }),
+    );
+  });
+
+  it("preserves the producer error when lease release also fails", async () => {
+    const events: FarmEvent[] = [];
+    configureFarmObservability({ onEvent: (event) => events.push(event) });
+    const adapter = new TestSharedCacheAdapter();
+    const producerError = new Error("producer failed");
+    const releaseError = new Error("lease release failed");
+    vi.spyOn(adapter, "releaseLease").mockRejectedValue(releaseError);
+    const cache = new FarmDataCache({ adapter, namespace: "release-error" });
+
+    await expect(
+      cache.getOrSet("products", async () => {
+        throw producerError;
+      }),
+    ).rejects.toBe(producerError);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "cache.error", error: releaseError }),
+        expect.objectContaining({ type: "cache.error", error: producerError }),
+      ]),
+    );
   });
 
   it("does not return an entry from an adapter retired during lookup", async () => {
@@ -524,6 +672,37 @@ describe("server cache primitives", () => {
     await expect(
       cache.getOrSet("featured", async () => ({ calls: ++calls }), { tags: ["products"] }),
     ).resolves.toEqual({ calls: 2 });
+  });
+
+  it("does not join an in-flight fill that started before its tag was invalidated", async () => {
+    const cache = new FarmDataCache();
+    let finishOldFill!: () => void;
+    const oldFillGate = new Promise<void>((resolve) => {
+      finishOldFill = resolve;
+    });
+    let started = false;
+
+    const oldFill = cache.getOrSet(
+      "featured",
+      async () => {
+        started = true;
+        await oldFillGate;
+        return "old";
+      },
+      { tags: ["products"] },
+    );
+    await vi.waitFor(() => expect(started).toBe(true));
+
+    cache.revalidateTag("products");
+    const freshRead = cache.getOrSet("featured", async () => "fresh", { tags: ["products"] });
+    const dedupedRead = cache.getOrSet("featured", async () => "duplicate", {
+      tags: ["products"],
+    });
+
+    await expect(freshRead).resolves.toBe("fresh");
+    await expect(dedupedRead).resolves.toBe("fresh");
+    finishOldFill();
+    await expect(oldFill).resolves.toBe("old");
   });
 
   it("shares entries and tag invalidation through a distributed adapter", async () => {
@@ -657,7 +836,20 @@ describe("server cache primitives", () => {
     expect(normalizeRevalidatePath("HTTPS://example.com/docs?tab=api#intro")).toBe("/docs");
     expect(normalizeRevalidatePath("/docs#intro")).toBe("/docs");
     expect(normalizeRevalidatePath("docs///intro/")).toBe("/docs/intro");
+    expect(normalizeRevalidatePath("/a/./products")).toBe("/a/products");
+    expect(normalizeRevalidatePath("/a/../products")).toBe("/products");
+    expect(normalizeRevalidatePath("../../products")).toBe("/products");
+    expect(normalizeRevalidatePath("/a/%2E%2E/products")).toBe("/products");
+    expect(normalizeRevalidatePath("/a/%2F/products")).toBe("/a/%2F/products");
     expect(createFarmCacheKey([{ b: 1, a: 2 }])).toBe(createFarmCacheKey([{ a: 2, b: 1 }]));
+  });
+
+  it("uses the same canonical path tag for cache writes and invalidation", () => {
+    const cache = new FarmDataCache();
+    cache.set("products", { ok: true }, { paths: ["/catalog/../products"] });
+
+    expect(cache.revalidatePath("/products")).toBe(1);
+    expect(cache.get("products")).toBeUndefined();
   });
 });
 

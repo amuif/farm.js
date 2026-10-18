@@ -160,6 +160,7 @@ export class FarmApp {
       preset: config.preset ?? "node-server",
       deploy: config.deploy || {},
       storage: config.storage || {},
+      schema: config.schema || {},
       cache: config.cache || {},
       auth: isResolvedAuthConfig(config.auth) ? config.auth : resolveFarmAuthConfig(config.auth),
       integrations: config.integrations || {},
@@ -193,6 +194,7 @@ export class FarmApp {
       mdx: resolveMdxConfig(config.mdx),
       observability: config.observability ?? false,
       telemetry: config.telemetry !== false,
+      analytics: config.analytics !== false,
       devtools: resolveFarmDevtoolsConfig(
         config.devtools,
         process.env.NODE_ENV === "production" ? "production" : "development",
@@ -207,8 +209,10 @@ export class FarmApp {
         serverComponents: config.experimental?.serverComponents ?? false,
         serverActions: config.experimental?.serverActions ?? false,
         isolatedClientHydration: config.experimental?.isolatedClientHydration ?? "off",
+        ppr: config.experimental?.ppr ?? false,
         ...config.experimental,
       },
+      agent: config.agent ?? {},
       vite: config.vite || {},
     };
   }

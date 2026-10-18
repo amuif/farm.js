@@ -34,7 +34,6 @@ This example enables route-level `loading.tsx` and `error.tsx` boundaries with:
 export default defineConfig({
   experimental: {
     serverComponents: true,
-    serverActions: true,
   },
 });
 ```
@@ -73,7 +72,8 @@ With the dev server running, `/about.md` renders the same `/about` page as `text
 
 ### PPR static shell
 
-The `/ppr-demo` page opts into static-shell caching:
+PPR is experimental and gated by `experimental.ppr: true` in `farm.config.ts` (this example
+enables it). With the flag on, the `/ppr-demo` page opts into static-shell caching:
 
 ```ts
 export const experimental_ppr = true;

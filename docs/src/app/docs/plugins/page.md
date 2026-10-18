@@ -14,10 +14,12 @@ Use an [integration](/docs/integrations) for a product or service such as authen
 
 | Plugin                                 | Purpose                                                                                           |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [API MCP](/docs/plugins/mcp)           | Expose opted-in typed API routes as authenticated Streamable HTTP tools.                          |
 | [Analyzer](/docs/plugins/analyzer)     | Explain page, client, and server build size and enforce readable CI limits.                       |
 | [Content](/docs/plugins/content)       | Validate local Markdown, MDX, JSON, and YAML as typed server collections.                         |
 | [DevTools](/docs/plugins/devtools)     | Inspect routes, runtime configuration, diagnostics, and browser module output during development. |
 | [Federation](/docs/plugins/federation) | Publish and load independently deployed browser modules while server capabilities stay local.     |
+| [Health](/docs/plugins/health)         | Expose dependency-aware liveness, readiness, and startup probes to hosting platforms.             |
 | [Hints](/docs/plugins/hints)           | Find accessibility, performance, HTML, and third-party problems in the live development page.     |
 | [MSW](/docs/plugins/msw)               | Share request handlers across development SSR and the browser without shipping production mocks.  |
 | [Partytown](/docs/plugins/partytown)   | Move explicitly opted-in third-party scripts from the main thread into a web worker.              |
@@ -30,6 +32,14 @@ Use an [integration](/docs/integrations) for a product or service such as authen
 | [WebMCP](/docs/plugins/webmcp)         | Expose explicit, typed browser tools to agents through the experimental WebMCP API.               |
 
 Each published plugin has its own setup page in this section. Use [Create a Plugin](/docs/plugins/create-plugin) when the behavior is specific to your application or package.
+
+## Community plugins
+
+Community plugins are maintained by their authors outside the Farm project.
+
+| Plugin                     | Purpose                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------ |
+| [Blyp](/docs/plugins/blyp) | Record request-scoped logs, propagate traces, and collect lifecycle and browser telemetry. |
 
 ## Plugin authoring
 
@@ -176,18 +186,28 @@ Only define the groups your plugin needs.
 
 Both hooks receive Farm's plugin context. `setup` additionally receives the resolved `env`. Its returned state is private to that plugin instance and is not serialized to the browser.
 
+In development, a native Vite restart keeps the same Farm plugin runtime and instrumentation
+alive; it does not rerun `setup` or dispose resources registered with `lifecycle.onShutdown()`.
+Awaiting the Farm dev server's `close()` waits for an in-progress restart, closes the current
+Vite server, and then awaits plugin cleanup and instrumentation shutdown exactly once. Cleanup
+errors reject `close()`. New restart requests are rejected once final shutdown begins.
+
 ### Runtime hooks
 
-| Hook              | Runs                                                         | May return                                                       |
-| ----------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- |
-| `runtime.start`   | Once when the runtime manager starts.                        | Nothing.                                                         |
-| `runtime.context` | At the start of every request.                               | A plain object merged into typed request `ctx`.                  |
-| `runtime.before`  | Before Farm invokes the matched handler.                     | A replacement `Request`, a short-circuit `Response`, or nothing. |
-| `runtime.after`   | After a handler or short circuit produces a response.        | A replacement `Response` or nothing.                             |
-| `runtime.error`   | When runtime context, before, handler, or after work throws. | Nothing.                                                         |
-| `runtime.close`   | During graceful shutdown in long-running Node output.        | Nothing.                                                         |
+| Hook                | Runs                                                         | May return                                                       |
+| ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `runtime.start`     | Once when the runtime manager starts.                        | Nothing.                                                         |
+| `runtime.endpoints` | On an exact application-relative path owned by the plugin.   | A Web `Response`.                                                |
+| `runtime.context`   | At the start of every request.                               | A plain object merged into typed request `ctx`.                  |
+| `runtime.before`    | Before Farm invokes the matched handler.                     | A replacement `Request`, a short-circuit `Response`, or nothing. |
+| `runtime.after`     | After a handler or short circuit produces a response.        | A replacement `Response` or nothing.                             |
+| `runtime.error`     | When runtime context, before, handler, or after work throws. | Nothing.                                                         |
+| `runtime.close`     | During graceful shutdown in long-running Node output.        | Nothing.                                                         |
 
-Runtime hooks apply to page, API, server-action, integration, docs, asset, and general requests. Use the event's `kind` and `route` values when behavior should apply only to part of the application.
+Runtime request hooks apply to page, API, server-action, integration, docs, asset, and general
+requests. Use `runtime.endpoints` when a plugin owns a small exact URL and should not make unrelated
+static pages dynamic. Endpoint paths are application-relative, automatically honor `basePath`, and
+do not accept route parameters or wildcards.
 
 Direct `api` calls from [`createApiClients()`](/docs/api-client#server-callers) invoke an endpoint
 inside the current request; they do not create another plugin request lifecycle. Endpoint
@@ -195,18 +215,19 @@ inside the current request; they do not create another plugin request lifecycle.
 
 ### Runtime event values
 
-| Value         | Available in                  | Meaning                                                                     |
-| ------------- | ----------------------------- | --------------------------------------------------------------------------- |
-| `request`     | Context, before, after, error | Current Web `Request`, including transformations from earlier plugins.      |
-| `response`    | After                         | Current Web `Response`, including transformations from earlier plugins.     |
-| `state`       | Every grouped hook            | Private value returned by this plugin's `setup`.                            |
-| `ctx`         | Before, after, error          | Read-only merge of all plugin request-context results.                      |
-| `req`         | Context, before, after, error | Mutable request store shared with middleware and server rendering.          |
-| `kind`        | Runtime request hooks         | Request category such as `page`, `api`, `action`, `integration`, or `docs`. |
-| `route`       | Runtime request hooks         | Matched pathname, route pattern, and params when Farm has them.             |
-| `signal`      | Runtime request hooks         | Abort signal for cancelled or disconnected requests.                        |
-| `waitUntil()` | Runtime request hooks         | Registers non-blocking work with hosts that support background tasks.       |
-| `durationMs`  | After, error                  | Elapsed request time at that lifecycle phase.                               |
+| Value         | Available in                            | Meaning                                                                 |
+| ------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| `request`     | Endpoint, context, before, after, error | Current Web `Request`, including transformations from earlier plugins.  |
+| `response`    | After                                   | Current Web `Response`, including transformations from earlier plugins. |
+| `state`       | Every grouped hook                      | Private value returned by this plugin's `setup`.                        |
+| `ctx`         | Before, after, error                    | Read-only merge of all plugin request-context results.                  |
+| `req`         | Endpoint, context, before, after, error | Mutable request store shared with middleware and server rendering.      |
+| `kind`        | Runtime request hooks                   | Request category such as `endpoint`, `page`, `api`, or `action`.        |
+| `route`       | Runtime request hooks                   | Matched pathname, route pattern, and params when Farm has them.         |
+| `path`        | Endpoint                                | Normalized application-relative endpoint path registered by the plugin. |
+| `signal`      | Runtime request hooks                   | Abort signal for cancelled or disconnected requests.                    |
+| `waitUntil()` | Runtime request hooks                   | Registers non-blocking work with hosts that support background tasks.   |
+| `durationMs`  | After, error                            | Elapsed request time at that lifecycle phase.                           |
 
 ### Router hooks
 
@@ -273,15 +294,20 @@ Only JSON-safe values in `client.public` enter the browser bundle. Server setup 
 
 For each application request, Farm runs the runtime hooks in this order:
 
-1. Every `runtime.context` creates request-local values.
-2. Every `runtime.before` runs in plugin order.
-3. Farm calls the page, API route, or integration handler unless a plugin returned a `Response`.
-4. Every `runtime.after` can transform the response.
-5. `runtime.error` observes an error if any preceding phase throws.
+1. An exact `runtime.endpoints` match runs before ordinary request context and routing.
+2. Otherwise, every `runtime.context` creates request-local values.
+3. Every `runtime.before` runs in plugin order.
+4. Farm calls the page, API route, or integration handler unless a plugin returned a `Response`.
+5. Every `runtime.after` can transform the response, including an endpoint response.
+6. `runtime.error` observes an error if any preceding phase throws.
 
 `runtime.before` may return a new `Request`, return a `Response` to short-circuit, or return nothing. A short-circuit response still passes through `runtime.after`. `runtime.after` may return a new `Response` or return nothing.
 
 Runtime hooks use Web APIs, so the same plugin works in development and universal production builds. The event includes `kind`, route metadata, the request `AbortSignal`, and `waitUntil()` for background work supported by the host.
+
+An endpoint is intentionally isolated from `runtime.context` and `runtime.before`. Perform any
+endpoint-specific authentication inside its handler. Global `runtime.after` and `runtime.error`
+hooks still observe endpoint responses and failures.
 
 ## State and context
 
@@ -310,7 +336,7 @@ runtime: {
 },
 ```
 
-Only values marked `exposeToPage: true` appear in `props.context?.data`. Farm preserves the request store when a plugin returns a transformed `Request`.
+Only values marked `exposeToPage: true` appear in `props.context?.data`. Farm preserves the request store when a plugin returns a transformed `Request`, buffers a request body, or clones a request for production dispatch. Private values stay private; these replacements do not expose them to page props or another request.
 
 ## Ordering
 
@@ -361,6 +387,21 @@ The production compression plugin negotiates Brotli or gzip from `Accept-Encodin
 encoded response body, adds `Vary: Accept-Encoding`, and removes the identity `Content-Length`.
 Responses that are already encoded, partial, marked `no-transform`, or sent as server-sent events
 are left unchanged.
+
+Dynamic Brotli responses use compression quality 5 to balance response latency and transfer size.
+Both Brotli and gzip flush each chunk so streaming content can arrive before the response finishes.
+Gzip keeps its existing compression level; this setting does not change precompressed static assets
+or compression managed by a deployment platform.
+
+Compression applies to media types that actually shrink: every `text/*` type, `application/json`,
+`application/javascript`, `application/xml`, `application/wasm`, `application/x-ndjson`, any
+`+json` or `+xml` type such as `image/svg+xml` or `application/manifest+json`, and the
+uncompressed font formats (`font/ttf`, `font/otf`, `application/vnd.ms-fontobject`). Already
+compressed payloads are skipped, so images, video, audio, archives, PDFs, Office documents,
+`font/woff`, `font/woff2` and `application/octet-stream` are streamed through untouched with their
+identity `Content-Length` and strong `ETag` intact. A response with no `Content-Type` is also left
+alone, since its bytes may already be compressed. Set a `Content-Type` when a route returns text
+that should be compressed.
 
 ## Legacy hooks
 

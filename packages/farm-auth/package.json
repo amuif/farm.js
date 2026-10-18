@@ -1,6 +1,6 @@
 {
   "name": "@farm.js/auth",
-  "version": "0.1.0-beta.95",
+  "version": "0.1.26",
   "description": "Farm-native authentication with email/password, server helpers, and React hooks",
   "license": "MIT",
   "repository": {
@@ -47,16 +47,17 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "better-auth": "1.5.5",
+    "better-auth": "1.7.7",
     "pg": "8.20.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^20.10.5",
+    "@types/node": "^22.20.5",
     "@types/react": "^18.2.45",
     "react": "19.2.8",
     "typescript": "^5.3.3",
-    "vitest": "^3.2.7"
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
   },
   "peerDependencies": {
     "react": "^18.2.0 || ^19.0.0"

@@ -7,47 +7,15 @@ import type { ViteDevServer } from "vite";
 import type { MiddlewareContext, CookieJar, CookieOptions } from "./types";
 import type { FarmServerConfig, ResolvedFarmServerConfig } from "../server-http";
 import { resolveFarmRequestURL } from "../server/request";
-import { parseMiddlewareCookieHeader } from "./cookie-header";
+import {
+  parseMiddlewareCookieHeader,
+  serializeMiddlewareCookie as serializeCookie,
+  serializeMiddlewareCookieDeletion,
+} from "./cookie-header";
 
 /**
  * Serialize a cookie
  */
-function serializeCookie(name: string, value: string, options: CookieOptions = {}): string {
-  let cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}`;
-
-  if (options.maxAge != null) {
-    cookie += `; Max-Age=${options.maxAge}`;
-  }
-
-  if (options.expires) {
-    cookie += `; Expires=${options.expires.toUTCString()}`;
-  }
-
-  if (options.path) {
-    cookie += `; Path=${options.path}`;
-  } else {
-    cookie += "; Path=/";
-  }
-
-  if (options.domain) {
-    cookie += `; Domain=${options.domain}`;
-  }
-
-  if (options.secure) {
-    cookie += "; Secure";
-  }
-
-  if (options.httpOnly) {
-    cookie += "; HttpOnly";
-  }
-
-  if (options.sameSite) {
-    cookie += `; SameSite=${options.sameSite.charAt(0).toUpperCase() + options.sameSite.slice(1)}`;
-  }
-
-  return cookie;
-}
-
 /**
  * Cookie Jar implementation
  */
@@ -81,13 +49,11 @@ class CookieJarImpl implements CookieJar {
     this.res.setHeader("Set-Cookie", this.setCookies);
   }
 
-  delete(name: string): void {
+  delete(name: string, options: CookieOptions = {}): void {
     delete this.cookies[name];
-    const cookieString = serializeCookie(name, "", {
-      maxAge: 0,
-      expires: new Date(0),
-    });
-    this.setCookies.push(cookieString);
+    // Path and Domain must match the cookie that was set, or the tombstone
+    // addresses a different cookie and the original survives.
+    this.setCookies.push(serializeMiddlewareCookieDeletion(name, options));
     this.res.setHeader("Set-Cookie", this.setCookies);
   }
 
@@ -173,10 +139,11 @@ export function createContext(
     rewrite(rewriteUrl: string): void {
       ctx._rewriteUrl = rewriteUrl;
       // Update the URL for downstream middleware
-      const newUrl = new URL(rewriteUrl, `http://${req.headers.host || "localhost"}`);
+      const newUrl = new URL(rewriteUrl, ctx.url);
       ctx.url = newUrl;
       ctx.pathname = newUrl.pathname;
       ctx.searchParams = newUrl.searchParams;
+      ctx.route = newUrl.pathname;
       // Update the original request URL
       req.url = rewriteUrl;
     },

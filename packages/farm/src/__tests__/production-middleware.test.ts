@@ -1,6 +1,8 @@
 // @vitest-environment node
 
 import fs from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -16,6 +18,10 @@ async function readJavaScriptOutput(dir: string): Promise<string> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const contents = await Promise.all(
     entries.map(async (entry) => {
+      // Runtime packages are staged alongside the Nitro bundle. Inspect only
+      // generated server chunks here; package internals may legitimately
+      // mention their optional native package names (Sharp 0.35+ does this).
+      if (entry.name === "node_modules") return "";
       const entryPath = path.join(dir, entry.name);
       if (entry.isDirectory()) return readJavaScriptOutput(entryPath);
       return entry.name.endsWith(".mjs") ? fs.readFile(entryPath, "utf8") : "";
@@ -35,7 +41,7 @@ function readInlineFarmProps(html: string): Record<string, any> {
 describe("production middleware runtime", () => {
   it("runs farm.config middleware and app middleware in a production build", async () => {
     const root = await createMiddlewareProductionFixture();
-    const originalFetch = globalThis.fetch;
+    let imageOriginServer: Server | undefined;
 
     try {
       const userConfig = await loadConfig(root, undefined, "production");
@@ -63,8 +69,51 @@ describe("production middleware runtime", () => {
       const vercelOutputConfig = JSON.parse(
         await fs.readFile(path.join(root, ".vercel", "output", "config.json"), "utf8"),
       );
-      expect(vercelOutputConfig.routes[0]).toEqual(createFarmVercelImmutableAssetRoute());
-      expect(vercelOutputConfig.routes[1]).toEqual({ handle: "filesystem" });
+      // Farm's immutable asset route is the last source route before the
+      // filesystem handler. The preset's redirect/header routes — including the
+      // per-prerendered-route cache headers this fixture injects (PPR + ISR
+      // pages) — are now preserved ahead of it instead of being discarded, so
+      // the immutable route is no longer necessarily at index 0.
+      const filesystemIndex = vercelOutputConfig.routes.findIndex(
+        (route: { handle?: string }) => route.handle === "filesystem",
+      );
+      expect(filesystemIndex).toBeGreaterThan(0);
+      expect(vercelOutputConfig.routes[filesystemIndex - 1]).toEqual(
+        createFarmVercelImmutableAssetRoute(),
+      );
+      expect(vercelOutputConfig.routes[filesystemIndex]).toEqual({ handle: "filesystem" });
+      // public/llms.txt ships as a static file, which the filesystem phase serves before
+      // the function's generated agent.llmsTxt index.
+      expect(
+        await fs.readFile(path.join(root, ".vercel", "output", "static", "llms.txt"), "utf8"),
+      ).toBe("# Static fixture index\n");
+      expect(
+        await fs.readFile(path.join(root, ".vercel", "output", "static", "llms-full.txt"), "utf8"),
+      ).toBe("# Static fixture index, in full\n");
+      // At least one preset source route (a redirect or header route) is
+      // preserved ahead of the immutable route; the old wholesale rebuild
+      // dropped every one of them on Vercel.
+      const preservedSourceRoutes = vercelOutputConfig.routes.slice(0, filesystemIndex - 1);
+      expect(preservedSourceRoutes.length).toBeGreaterThan(0);
+      expect(preservedSourceRoutes).toContainEqual(
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            "Access-Control-Allow-Origin": "https://client.example",
+          }),
+        }),
+      );
+      expect(
+        vercelOutputConfig.routes.some(
+          (route: { headers?: Record<string, string> }) =>
+            route.headers?.["Access-Control-Allow-Origin"] === "*",
+        ),
+      ).toBe(false);
+      expect(
+        preservedSourceRoutes.every(
+          (route: { handle?: string; continue?: boolean }) =>
+            route.handle === undefined && route.continue !== true,
+        ),
+      ).toBe(true);
 
       const staticAssetsDir = path.join(root, ".vercel", "output", "static", "assets");
       // The client build emits this image under more than one hashed name, and readdir
@@ -108,20 +157,25 @@ describe("production middleware runtime", () => {
         path.join(root, ".vercel", "output", "functions", "__nitro.func"),
       );
       expect(nitroBundle).not.toContain("@img/sharp-");
-      globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        const requestedAsset = productAssetNames.find((name) => url.pathname.endsWith(name));
-        if (url.origin === "https://example.test" && requestedAsset) {
-          const bytes = await fs.readFile(path.join(staticAssetsDir, requestedAsset));
-          return new Response(bytes, {
-            headers: {
-              "content-type": "image/png",
-              "content-length": String(bytes.byteLength),
-            },
-          });
+      imageOriginServer = createServer(async (request, response) => {
+        const requestedAsset = productAssetNames.find((name) => request.url?.endsWith(name));
+        if (!requestedAsset) {
+          response.writeHead(404).end();
+          return;
         }
-        return originalFetch(input, init);
-      }) as typeof fetch;
+        const bytes = await fs.readFile(path.join(staticAssetsDir, requestedAsset));
+        response.writeHead(200, {
+          "content-type": "image/png",
+          "content-length": String(bytes.byteLength),
+        });
+        response.end(bytes);
+      });
+      await new Promise<void>((resolve, reject) => {
+        imageOriginServer!.once("error", reject);
+        imageOriginServer!.listen(0, "127.0.0.1", resolve);
+      });
+      const imageOriginAddress = imageOriginServer.address() as AddressInfo;
+      const imageOrigin = `http://127.0.0.1:${imageOriginAddress.port}`;
 
       const entryPath = path.join(
         root,
@@ -146,7 +200,18 @@ describe("production middleware runtime", () => {
 
       expect(response.status).toBe(200);
       expect(response.headers.get("x-farm-middleware")).toBe("yes");
+      // Config middleware from a layer runs in the built app as it does in dev.
+      expect(response.headers.get("x-layer-middleware")).toBe("yes");
       expect(response.headers.get("cache-control")).toBe("private, no-store");
+      // Agent JSON-LD from the resolved agent config is baked into the document head.
+      expect(html).toContain('<script type="application/ld+json">');
+      const jsonLd = html.match(/application\/ld\+json">(.*?)<\/script>/s)?.[1] ?? "";
+      expect(JSON.parse(jsonLd)).toMatchObject({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: "Farm production fixture",
+        url: "https://example.test",
+      });
       expect(html).toContain(
         "production middleware: dashboard / settings / dashboard-file / /dashboard/settings",
       );
@@ -189,7 +254,11 @@ describe("production middleware runtime", () => {
       expect(html).toContain('<meta property="og:image:width" content="2">');
       expect(html).toContain('<meta property="og:image:height" content="1">');
       expect(html).toContain('<meta property="og:image:alt" content="Dashboard preview">');
+      // The guard layer's config middleware, the project's config middleware,
+      // then the dashboard file middleware.
       expect((globalThis as any).__farmMiddlewareEvents.map((event: any) => event.type)).toEqual([
+        "middleware.start",
+        "middleware.complete",
         "middleware.start",
         "middleware.complete",
         "middleware.start",
@@ -225,7 +294,7 @@ describe("production middleware runtime", () => {
       expect(staticImageCachedResponse.status).toBe(304);
 
       const optimizedImageResponse = await serverModule.default.fetch(
-        new Request(`https://example.test${optimizedImageHref}`, {
+        new Request(`${imageOrigin}${optimizedImageHref}`, {
           headers: { accept: "image/webp" },
         }),
       );
@@ -246,6 +315,107 @@ describe("production middleware runtime", () => {
       expect(sitemapXml).toContain("<loc>https://example.test/?campaign=spring&amp;summer</loc>");
       expect(sitemapXml).toContain("<lastmod>2026-08-16T12:00:00.000Z</lastmod>");
 
+      // agent.llmsTxt with no root llms.ts: the generated index of static pages.
+      const llmsResponse = await serverModule.default.fetch(
+        new Request("https://example.test/llms.txt"),
+      );
+      expect(llmsResponse.status).toBe(200);
+      expect(llmsResponse.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      const llmsText = await llmsResponse.text();
+      expect(
+        llmsText.startsWith(
+          "# Farm production fixture\n\n> Pages served by the production fixture.\n\n## Pages\n\n",
+        ),
+      ).toBe(true);
+      expect(llmsText).toContain(
+        "- [Explicit image](https://example.test/dashboard/explicit.md)\n",
+      );
+      expect(llmsText).toContain("- [Dashboard notes](https://example.test/dashboard/notes.md)\n");
+      expect(llmsText).toContain("- [Public notes](https://example.test/public-notes.md)\n");
+      expect(llmsText).not.toContain("rewrite-target");
+      expect(llmsText).not.toContain("[id]");
+      // Listed even though it answers 401: the index only names pages.
+      expect(llmsText).toContain(
+        "- [Private notes](https://example.test/dashboard/private-notes.md)\n",
+      );
+
+      // llms-full.txt inlines each listed page's .md mirror, read through the same server.
+      const llmsFullResponse = await serverModule.default.fetch(
+        new Request("https://example.test/llms-full.txt"),
+      );
+      expect(llmsFullResponse.status).toBe(200);
+      expect(llmsFullResponse.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      const llmsFull = await llmsFullResponse.text();
+      expect(
+        llmsFull.startsWith(
+          "# Farm production fixture\n\n> Pages served by the production fixture.\n\n## ",
+        ),
+      ).toBe(true);
+      // A Markdown page contributes its source; a React page its rendered mirror.
+      expect(llmsFull).toContain(
+        "## Public notes\n\nURL: https://example.test/public-notes.md\n\n# Public notes\n\npublic-notes-source\n",
+      );
+      expect(llmsFull).toContain(
+        "## Explicit image\n\nURL: https://example.test/dashboard/explicit.md\n\n# Explicit image\n\nSource: /dashboard/explicit\n\nexplicit image page",
+      );
+      // Concurrent requests share one render, and HEAD reads no pages.
+      const concurrent = await Promise.all(
+        [0, 1, 2].map(() =>
+          serverModule.default.fetch(new Request("https://example.test/llms-full.txt")),
+        ),
+      );
+      for (const response of concurrent) expect(await response.text()).toBe(llmsFull);
+      const llmsFullHead = await serverModule.default.fetch(
+        new Request("https://example.test/llms-full.txt", { method: "HEAD" }),
+      );
+      expect(llmsFullHead.status).toBe(200);
+      expect(await llmsFullHead.text()).toBe("");
+      expect(
+        await (
+          await serverModule.default.fetch(new Request("https://example.test/llms-full.txt"))
+        ).text(),
+      ).toBe(llmsFull);
+      // /dashboard/private-notes answers 401 without credentials. Its block stays,
+      // but the body is never read into a file anyone can fetch.
+      expect(llmsFull).toContain(
+        "## Private notes\n\nURL: https://example.test/dashboard/private-notes.md\n\n---",
+      );
+      expect(llmsFull).not.toContain("dashboard-private-notes-source");
+      expect(llmsFull).not.toContain("rewrite-target");
+
+      // A nested llms-full.ts that returns a string is served exactly as written.
+      const notesFullResponse = await serverModule.default.fetch(
+        new Request("https://example.test/public-notes/llms-full.txt"),
+      );
+      expect(notesFullResponse.status).toBe(200);
+      expect(await notesFullResponse.text()).toBe(
+        "# Fixture notes, in full\n\npublic-notes-source\n",
+      );
+
+      // A nested llms.ts receives the same pages and defaults and wins under its segment.
+      const notesLlmsResponse = await serverModule.default.fetch(
+        new Request("https://example.test/public-notes/llms.txt"),
+      );
+      expect(notesLlmsResponse.status).toBe(200);
+      expect(await notesLlmsResponse.text()).toBe(
+        [
+          "# Fixture notes",
+          "",
+          "> Pages served by the production fixture.",
+          "",
+          "## Notes",
+          "",
+          "- [Dashboard notes](https://example.test/dashboard/notes.md)",
+          "- [Private notes](https://example.test/dashboard/private-notes.md)",
+          "- [Public notes](https://example.test/public-notes.md)",
+          "",
+          "## Optional",
+          "",
+          "- [Status](https://status.example.test)",
+          "",
+        ].join("\n"),
+      );
+
       const userSitemapResponse = await serverModule.default.fetch(
         new Request("https://example.test/users/42/sitemap.xml"),
       );
@@ -259,9 +429,39 @@ describe("production middleware runtime", () => {
       );
       expect(robotsResponse.status).toBe(200);
       expect(robotsResponse.headers.get("content-type")).toBe("text/plain; charset=utf-8");
-      await expect(robotsResponse.text()).resolves.toContain(
-        "Sitemap: https://example.test/sitemap.xml",
+      const robotsText = await robotsResponse.text();
+      expect(robotsText).toContain("Sitemap: https://example.test/sitemap.xml");
+      // The app's robots.ts wins over agent.crawlers.
+      expect(robotsText).toContain("Disallow: /private/");
+      expect(robotsText).not.toContain("GPTBot");
+
+      // Agents that request Markdown for a missing page get a Markdown 404 body.
+      const markdownExtension404 = await serverModule.default.fetch(
+        new Request("https://example.test/does-not-exist.md"),
       );
+      expect(markdownExtension404.status).toBe(404);
+      expect(markdownExtension404.headers.get("content-type")).toContain("text/markdown");
+      const markdown404Body = await markdownExtension404.text();
+      expect(markdown404Body).toContain("# Page not found");
+      expect(markdown404Body.length).toBeGreaterThan(20);
+      expect(markdown404Body).not.toContain("<html");
+
+      const markdownAccept404 = await serverModule.default.fetch(
+        new Request("https://example.test/also-missing", {
+          headers: { accept: "text/markdown" },
+        }),
+      );
+      expect(markdownAccept404.status).toBe(404);
+      expect(markdownAccept404.headers.get("content-type")).toContain("text/markdown");
+
+      // A normal browser 404 stays HTML.
+      const html404 = await serverModule.default.fetch(
+        new Request("https://example.test/also-missing", {
+          headers: { accept: "text/html,*/*;q=0.8" },
+        }),
+      );
+      expect(html404.status).toBe(404);
+      expect(html404.headers.get("content-type")).toContain("text/html");
 
       const manifestResponse = await serverModule.default.fetch(
         new Request("https://example.test/manifest.webmanifest"),
@@ -402,6 +602,52 @@ describe("production middleware runtime", () => {
         await expect(pprResponse.text()).resolves.toContain("configured context PPR route");
       }
 
+      // The pattern page router drops empty segments, so a repeated slash
+      // still renders this dynamic page and must pass the same config matcher.
+      // The runtime keeps a leading `//` in the pathname rather than reading
+      // it as a host.
+      for (const spelling of [
+        "/dashboard/projects/7",
+        "//dashboard/projects/7",
+        "/dashboard//projects/7",
+      ]) {
+        const projectResponse = await serverModule.default.fetch(
+          new Request(`https://example.test${spelling}`),
+        );
+        expect({
+          spelling,
+          status: projectResponse.status,
+          body: (await projectResponse.text()).includes("project: 7 / dashboard"),
+        }).toEqual({ spelling, status: 200, body: true });
+      }
+
+      // Raw markdown-source routes serve page content, so app middleware must
+      // run first: a guard on the route blocks the .md representation too.
+      const guardedMarkdownResponse = await serverModule.default.fetch(
+        new Request("https://example.test/dashboard/private-notes.md"),
+      );
+      expect(guardedMarkdownResponse.status).toBe(401);
+      expect(guardedMarkdownResponse.headers.get("x-file-response")).toBe("markdown-guard");
+      const guardedMarkdownBody = await guardedMarkdownResponse.text();
+      expect(guardedMarkdownBody).not.toContain("dashboard-private-notes-source");
+
+      // A pass-through middleware match still serves the source and carries
+      // the middleware's response headers.
+      const allowedMarkdownResponse = await serverModule.default.fetch(
+        new Request("https://example.test/dashboard/notes.md"),
+      );
+      expect(allowedMarkdownResponse.status).toBe(200);
+      expect(allowedMarkdownResponse.headers.get("content-type")).toContain("text/markdown");
+      expect(allowedMarkdownResponse.headers.get("x-farm-middleware")).toBe("yes");
+      await expect(allowedMarkdownResponse.text()).resolves.toContain("dashboard-notes-source");
+
+      // Routes outside every matcher keep serving their markdown source.
+      const publicMarkdownResponse = await serverModule.default.fetch(
+        new Request("https://example.test/public-notes.md"),
+      );
+      expect(publicMarkdownResponse.status).toBe(200);
+      await expect(publicMarkdownResponse.text()).resolves.toContain("public-notes-source");
+
       const generatedMetadataResponse = await serverModule.default.fetch(
         new Request("https://example.test/metadata/42?variant=featured"),
       );
@@ -444,7 +690,11 @@ describe("production middleware runtime", () => {
       expect(rewriteResponse.status).toBe(200);
       await expect(rewriteResponse.text()).resolves.toContain("current request: /rewrite-target");
     } finally {
-      globalThis.fetch = originalFetch;
+      if (imageOriginServer) {
+        await new Promise<void>((resolve, reject) => {
+          imageOriginServer!.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
       delete (globalThis as any).__farmMiddlewareEvents;
       await cleanupMiddlewareProductionFixture(root);
     }

@@ -92,6 +92,46 @@ describe("deferred route data", () => {
     expect((data.reviews as any).status).toBe("fulfilled");
   });
 
+  it("reports completion only after a deferred stream closes", async () => {
+    const source = createControlledPromise<string>();
+    const onComplete = vi.fn();
+    const response = createDeferredDataResponse({ value: defer(source.promise) });
+    const data = await readDeferredDataResponse<{ value: Promise<string> }>(response, {
+      onComplete,
+    });
+
+    expect(onComplete).not.toHaveBeenCalled();
+    source.resolve("ready");
+    await expect(data.value).resolves.toBe("ready");
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+  });
+
+  it("does not report completion when the stream is cut with values outstanding", async () => {
+    // A dropped connection ends the read loop exactly like a finished stream
+    // does. Reporting completion here let the SPA router cache page data whose
+    // deferred fields were already rejected, so returning to the route
+    // replayed those errors instead of refetching.
+    const source = createControlledPromise<string>();
+    const full = createDeferredDataResponse({ value: defer(source.promise) });
+    const reader = full.body!.getReader();
+    const firstChunk = await reader.read();
+    const initialLine = new TextDecoder().decode(firstChunk.value!);
+    await reader.cancel();
+    // Everything the server managed to send before the connection dropped,
+    // carrying the real streaming content type so it takes the streaming path.
+    const truncated = new Response(initialLine, {
+      headers: { "content-type": full.headers.get("content-type")! },
+    });
+
+    const onComplete = vi.fn();
+    const data = await readDeferredDataResponse<{ value: Promise<string> }>(truncated, {
+      onComplete,
+    });
+
+    await expect(data.value).rejects.toThrow(/ended before completion/);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("streams nested deferred values discovered after the first result", async () => {
     const details = createControlledPromise<{ related: Deferred<string[]> }>();
     const related = createControlledPromise<string[]>();

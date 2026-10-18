@@ -1,3 +1,4 @@
+import type { ResolvedFarmI18nConfig } from "@farm.js/core/i18n";
 import type {
   FarmServerActionsConfig,
   ResolvedFarmServerActionsConfig,
@@ -93,11 +94,34 @@ export interface EntryContext {
   /** Resolved build identifier embedded into the server and browser entries. */
   deploymentId: string;
 
+  /**
+   * Resolved i18n configuration. Middleware path matching runs against the
+   * locale-stripped pathname, so without this a `/de/dashboard` request never
+   * matches a `/dashboard` middleware.
+   */
+  i18n?: ResolvedFarmI18nConfig;
+
+  /**
+   * Server settings the request path needs. `trustProxy` decides whether
+   * forwarded headers are believed when middleware reads the client address.
+   */
+  server?: { trustProxy: boolean };
+
+  /**
+   * Ordered config modules that can contribute live middleware handlers.
+   * Layer configs come first and the application config comes last, matching
+   * Farm's normal config merge order.
+   */
+  middlewareConfigPaths?: string[];
+
   /** Whether debug mode is enabled */
   debug: boolean;
 
   /** True only for the Vite serve command, never for a production build. */
   development?: boolean;
+
+  /** Generated import/init fragments for `cache.client.adapter` persistence. */
+  clientCachePersistence?: { imports: string; init: string };
 }
 
 /**

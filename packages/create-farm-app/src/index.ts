@@ -375,6 +375,7 @@ export async function createApp(projectName?: string, options: CreateAppOptions 
   const integrationResult = await copyTemplate(template!, projectPath, renderer);
 
   await updatePackageJson(projectPath, projectName!, packageManager);
+  await updatePackageManagerInstructions(projectPath, packageManager.name);
 
   logger.success(`🚜 Created ${projectName}`);
 
@@ -393,7 +394,7 @@ export async function createApp(projectName?: string, options: CreateAppOptions 
   logger.info(`  ${getDevCommand(packageManager.name)}`);
   logger.info("");
   for (const instruction of templateDetails[template!]?.instructions ?? []) {
-    logger.info(instruction);
+    logger.info(rewritePackageManagerCommands(instruction, packageManager.name));
   }
   if (integrationResult) {
     const details = templateDetails[template!].integration!;
@@ -466,6 +467,14 @@ async function applyRendererTemplate(
 ) {
   const rendererTemplatePath = path.join(__dirname, "..", "templates", "_renderers", renderer);
 
+  // The starter docs page and config are powered by React-only packages. A
+  // renderer overlay must not leave that route or its configuration behind.
+  await Promise.all([
+    fs.rm(path.join(projectPath, "docs.config.ts"), { force: true }),
+    fs.rm(path.join(projectPath, "docs.json"), { force: true }),
+    fs.rm(path.join(projectPath, "src", "app", "docs"), { recursive: true, force: true }),
+  ]);
+
   if (renderer === "vue" || renderer === "svelte") {
     await Promise.all([
       fs.rm(path.join(projectPath, "src", "app", "page.tsx"), { force: true }),
@@ -489,7 +498,15 @@ function mergeRendererPackageJson(
   const dependencies = { ...base.dependencies, ...renderer.dependencies };
   const devDependencies = { ...base.devDependencies, ...renderer.devDependencies };
 
-  for (const name of ["react", "react-dom"]) delete dependencies[name];
+  for (const name of [
+    "@farming-labs/docs",
+    "@farming-labs/farmjs",
+    "@farming-labs/theme",
+    "react",
+    "react-dom",
+  ]) {
+    delete dependencies[name];
+  }
   for (const name of ["@types/react", "@types/react-dom"]) delete devDependencies[name];
 
   return {
@@ -855,4 +872,54 @@ function getDevCommand(packageManager: PackageManagerName) {
     return `${packageManager} run dev`;
   }
   return `${packageManager} dev`;
+}
+
+function getRunCommand(packageManager: PackageManagerName, script: string) {
+  if (packageManager === "npm" || packageManager === "bun") {
+    return `${packageManager} run ${script}`;
+  }
+  return `${packageManager} ${script}`;
+}
+
+function rewritePackageManagerCommands(content: string, packageManager: PackageManagerName) {
+  let output = content.replace(/\bpnpm install\b/g, `${packageManager} install`);
+  output = output.replace(
+    /\bpnpm run (dev|auth:migrate|type-check|build|check|deploy|experiment|start)\b/g,
+    (match, script: string) =>
+      packageManager === "pnpm" ? match : getRunCommand(packageManager, script),
+  );
+  return output.replace(
+    /\bpnpm (dev|auth:migrate|type-check|build|check|deploy|experiment|start)\b/g,
+    (_match, script: string) => getRunCommand(packageManager, script),
+  );
+}
+
+async function updatePackageManagerInstructions(
+  projectPath: string,
+  packageManager: PackageManagerName,
+): Promise<void> {
+  const generatedGuidanceFiles = [
+    "package.json",
+    "README.md",
+    "farm.config.ts",
+    "src/app/page.tsx",
+    "src/app/page.jsx",
+    "src/app/page.vue",
+    "src/app/page.svelte",
+  ];
+
+  await Promise.all(
+    generatedGuidanceFiles.map(async (file) => {
+      const entryPath = path.join(projectPath, file);
+      try {
+        const content = await fs.readFile(entryPath, "utf8");
+        const nextContent = rewritePackageManagerCommands(content, packageManager);
+        if (nextContent !== content) {
+          await fs.writeFile(entryPath, nextContent, "utf8");
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }),
+  );
 }

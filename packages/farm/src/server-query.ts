@@ -16,8 +16,12 @@ import {
   type ServerFnHandler,
   type ServerFnHandlerContext,
   type ServerFnMiddlewareContext,
+  type ServerFnMCPMetadata,
   type ServerFnSchema,
+  _attachServerFunctionDescriptor,
   _parseServerFnSchema,
+  _runServerFunctionForCaller,
+  createServerFunctionDescriptor,
 } from "./server-fn";
 import { createFarmServerQueryResult, type FarmServerQueryResult } from "./server-query-protocol";
 
@@ -43,6 +47,10 @@ export type ServerQueryOptions<
   >;
   /** Milliseconds, a duration string such as "30s", or false for no expiry. */
   staleTime?: ServerQueryStaleTime;
+  /** Allow the configured client cache persistence adapter to store results on the device. */
+  persist?: boolean;
+  /** Expose this query as a read-only MCP tool when it is listed in `mcp.tools`. `name` is required. */
+  mcp?: ServerFnMCPMetadata;
   handler: ServerFnHandler<
     TSchema extends ServerFnSchema ? InferServerFnSchemaOutput<TSchema> : unknown,
     TResult,
@@ -64,6 +72,10 @@ export type ServerQueryOutputOptions<
   >;
   /** Milliseconds, a duration string such as "30s", or false for no expiry. */
   staleTime?: ServerQueryStaleTime;
+  /** Allow the configured client cache persistence adapter to store results on the device. */
+  persist?: boolean;
+  /** Expose this query as a read-only MCP tool when it is listed in `mcp.tools`. `name` is required. */
+  mcp?: ServerFnMCPMetadata;
   handler: ServerFnHandler<
     TInputSchema extends ServerFnSchema ? InferServerFnSchemaOutput<TInputSchema> : unknown,
     unknown,
@@ -87,6 +99,8 @@ type AnyServerQueryOptions = {
   middleware?: readonly AnyServerFnMiddleware[];
   key: ServerQueryKey<any, any>;
   staleTime?: ServerQueryStaleTime;
+  persist?: boolean;
+  mcp?: ServerFnMCPMetadata;
   handler: ServerFnHandler<any, any, any>;
 };
 
@@ -167,6 +181,7 @@ export function createServerQuery(options: AnyServerQueryOptions): ServerQuery<u
         key: clientKey,
         staleTime,
         updatedAt,
+        ...(options.persist === true ? { persist: true } : {}),
       });
     },
   });
@@ -194,6 +209,17 @@ export function createServerQuery(options: AnyServerQueryOptions): ServerQuery<u
       enumerable: false,
     },
   });
+
+  _attachServerFunctionDescriptor(
+    query,
+    createServerFunctionDescriptor("query", options, async (value) => {
+      const result = (await _runServerFunctionForCaller(
+        execute,
+        value,
+      )) as FarmServerQueryResult<unknown>;
+      return result.data;
+    }),
+  );
 
   return query as ServerQuery<unknown, unknown>;
 }

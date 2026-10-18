@@ -1,11 +1,18 @@
 import {
   AmbiguousRouteError,
-  assertTerminalCatchAll,
-  assertUniqueRouteParameters,
   compareRouteSpecificity,
   getRoutePatternShape,
   type RouteSegmentSpecificity,
 } from "./routing/specificity";
+import {
+  matchSegmentParts,
+  normalizePathname,
+  normalizeRoutePattern,
+  parseRoutePattern,
+  splitNormalizedPathname,
+  splitPathname,
+  type RouterSegment,
+} from "./routing/matcher";
 
 export type FarmRouterPrimitiveParam = string | number | boolean;
 export type FarmRouterPathParam =
@@ -53,18 +60,6 @@ export interface FarmRouter<TMeta = unknown> {
   isActive(pattern: string, pathname: string, options?: FarmRouterActiveOptions): boolean;
 }
 
-type RouterSegment =
-  | {
-      type: "static";
-      value: string;
-    }
-  | {
-      type: "dynamic";
-      name: string;
-      catchAll: boolean;
-      optional: boolean;
-    };
-
 interface NormalizedRouterRoute<TMeta> {
   route: FarmRouterRoute<TMeta>;
   segments: RouterSegment[];
@@ -88,14 +83,33 @@ export function createFarmRouter<TMeta = unknown>(
     patternsByShape.set(shape, entry.route.path);
   }
   normalizedRoutes.sort(compareRoutes);
+  const exactRoutes = new Map<string, NormalizedRouterRoute<TMeta>>();
+  for (const entry of normalizedRoutes) {
+    if (entry.segments.every((segment) => segment.type === "static")) {
+      const pathname = entry.segments.length
+        ? `/${entry.segments.map((segment) => encodePathSegment(segment.value)).join("/")}`
+        : "/";
+      exactRoutes.set(pathname, entry);
+    }
+  }
 
   return {
     routes: normalizedRoutes.map((entry) => entry.route),
     match(pathname) {
       const normalizedPathname = normalizePathname(pathname);
+      const exactRoute = exactRoutes.get(normalizedPathname);
+      if (exactRoute) {
+        return {
+          route: exactRoute.route,
+          pathname: normalizedPathname,
+          params: {},
+        };
+      }
+
+      const parts = splitNormalizedPathname(normalizedPathname);
 
       for (const entry of normalizedRoutes) {
-        const params = matchSegments(entry.segments, normalizedPathname);
+        const params = matchSegmentParts(entry.segments, parts);
         if (params) {
           return {
             route: entry.route,
@@ -168,12 +182,13 @@ export function isFarmRouteActive(
   options: FarmRouterActiveOptions = {},
 ): boolean {
   const normalizedPathname = normalizePathname(pathname);
-  if (matchFarmRoute(pattern, normalizedPathname)) return true;
+  const segments = parseRoutePattern(pattern);
+  const parts = splitNormalizedPathname(normalizedPathname);
+  if (matchSegmentParts(segments, parts)) return true;
   if (options.exact !== false) return false;
 
-  const segments = parseRoutePattern(pattern);
   if (segments.length === 0) return normalizedPathname === "/";
-  return matchSegments(segments, normalizedPathname, true) !== null;
+  return matchSegmentParts(segments, parts, true) !== null;
 }
 
 function normalizeRouteInput<TMeta>(
@@ -181,8 +196,8 @@ function normalizeRouteInput<TMeta>(
   index: number,
 ): NormalizedRouterRoute<TMeta> {
   const route = typeof input === "string" ? { path: input } : input;
-  const path = normalizePathname(route.path);
-  const segments = parseRoutePattern(path);
+  const segments = parseRoutePattern(route.path);
+  const path = normalizeRoutePattern(route.path);
 
   return {
     route: {
@@ -195,95 +210,12 @@ function normalizeRouteInput<TMeta>(
   };
 }
 
-function parseRoutePattern(pattern: string): RouterSegment[] {
-  assertTerminalCatchAll(pattern, "router");
-  assertUniqueRouteParameters(pattern, "router");
-  return splitPathname(pattern)
-    .filter((part) => !isRouteGroup(part))
-    .map((part) => {
-      const optionalCatchAll = part.match(/^\[\[\.\.\.([A-Za-z0-9_$-]+)\]\]$/);
-      if (optionalCatchAll) {
-        return {
-          type: "dynamic",
-          name: optionalCatchAll[1],
-          catchAll: true,
-          optional: true,
-        };
-      }
-
-      const catchAll = part.match(/^\[\.\.\.([A-Za-z0-9_$-]+)\]$/);
-      if (catchAll) {
-        return {
-          type: "dynamic",
-          name: catchAll[1],
-          catchAll: true,
-          optional: false,
-        };
-      }
-
-      const dynamic = part.match(/^\[([A-Za-z0-9_$-]+)\]$/) || part.match(/^:([A-Za-z0-9_$-]+)$/);
-      if (dynamic) {
-        return {
-          type: "dynamic",
-          name: dynamic[1],
-          catchAll: false,
-          optional: false,
-        };
-      }
-
-      const star = part.match(/^\*([A-Za-z0-9_$-]+)(\?)?$/);
-      if (star) {
-        return {
-          type: "dynamic",
-          name: star[1],
-          catchAll: true,
-          optional: !!star[2],
-        };
-      }
-
-      return {
-        type: "static",
-        value: decodePathSegment(part),
-      };
-    });
-}
-
 function matchSegments(
   segments: RouterSegment[],
   pathname: string,
   allowTrailingSegments = false,
 ): FarmRouterParams | null {
-  const parts = splitPathname(pathname);
-  const params: FarmRouterParams = {};
-
-  if (segments.length === 0) {
-    return parts.length === 0 ? params : null;
-  }
-
-  let pathIndex = 0;
-
-  for (const segment of segments) {
-    if (segment.type === "static") {
-      if (decodePathSegment(parts[pathIndex] || "") !== segment.value) return null;
-      pathIndex++;
-      continue;
-    }
-
-    if (segment.catchAll) {
-      const remaining = parts.slice(pathIndex).map(decodePathSegment);
-      if (remaining.length === 0 && !segment.optional) return null;
-      params[segment.name] = remaining.join("/");
-      pathIndex = parts.length;
-      continue;
-    }
-
-    const value = parts[pathIndex];
-    if (!value) return null;
-    params[segment.name] = decodePathSegment(value);
-    pathIndex++;
-  }
-
-  return allowTrailingSegments || pathIndex === parts.length ? params : null;
+  return matchSegmentParts(segments, splitPathname(pathname), allowTrailingSegments);
 }
 
 function compareRoutes<TMeta>(
@@ -299,38 +231,6 @@ function getRouterSegmentSpecificity(segment: RouterSegment): RouteSegmentSpecif
   if (segment.type === "static") return "static";
   if (!segment.catchAll) return "dynamic";
   return segment.optional ? "optional-catch-all" : "catch-all";
-}
-
-function normalizePathname(value: string) {
-  const raw = value || "/";
-  let pathname = raw;
-
-  try {
-    pathname = new URL(raw, "http://farm.local").pathname;
-  } catch {
-    pathname = raw.split(/[?#]/, 1)[0] || "/";
-  }
-
-  pathname = pathname.replace(/\\/g, "/").replace(/\/+/g, "/");
-  if (!pathname.startsWith("/")) pathname = `/${pathname}`;
-  if (pathname.length > 1) pathname = pathname.replace(/\/+$/, "");
-  return pathname || "/";
-}
-
-function splitPathname(pathname: string) {
-  return normalizePathname(pathname).split("/").filter(Boolean);
-}
-
-function isRouteGroup(part: string) {
-  return part.startsWith("(") && part.endsWith(")");
-}
-
-function decodePathSegment(value: string) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 function encodePathSegment(value: string) {

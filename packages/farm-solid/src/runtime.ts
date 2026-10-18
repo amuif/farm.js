@@ -2,8 +2,9 @@ import {
   ErrorBoundary as SolidErrorBoundary,
   Suspense as SolidSuspense,
   createComponent,
+  sharedConfig,
 } from "solid-js";
-import { Dynamic } from "solid-js/web";
+import { Dynamic, isServer } from "solid-js/web";
 
 const FARM_SOLID_ELEMENT = Symbol.for("farm.solid.element");
 const FARM_SOLID_FRAGMENT = Symbol.for("farm.solid.fragment");
@@ -14,6 +15,13 @@ export interface FarmSolidElement {
   readonly props: Record<string, unknown> | null;
   readonly children: readonly unknown[];
 }
+
+/**
+ * Written by the server on a FARMJS island container: the Solid hydration
+ * context id of the island's root component, which the client passes to
+ * `hydrate` as its `renderId`.
+ */
+export const FARM_SOLID_RENDER_ID_ATTRIBUTE = "data-farm-solid-render-id";
 
 export const Fragment = FARM_SOLID_FRAGMENT;
 export const Suspense = SolidSuspense;
@@ -62,6 +70,19 @@ export function isValidElement(value: unknown): boolean {
   return value !== null && value !== undefined && value !== false;
 }
 
+function rejectAsyncComponentResult(value: unknown): unknown {
+  if (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  ) {
+    throw new TypeError(
+      "FARMJS Solid renderer does not support async function components. Resolve async data before rendering the component.",
+    );
+  }
+  return value;
+}
+
 // CSS properties whose numeric values are unitless in React's style objects.
 const UNITLESS_STYLE_PROPERTIES = new Set([
   "animation-iteration-count",
@@ -89,6 +110,7 @@ const UNITLESS_STYLE_PROPERTIES = new Set([
   "opacity",
   "order",
   "orphans",
+  "scale",
   "stop-opacity",
   "stroke-dasharray",
   "stroke-dashoffset",
@@ -124,7 +146,13 @@ function farmStyleObjectToCss(style: Record<string, unknown>): string {
 }
 
 function normalizeProps(element: FarmSolidElement): Record<string, unknown> {
-  const props = { ...element.props };
+  // Preserve accessors used by renderer-owned route state. Object spread
+  // eagerly evaluates Solid props and would flatten page/param signals before
+  // a compiled layout can subscribe to them.
+  const props = Object.defineProperties(
+    {},
+    Object.getOwnPropertyDescriptors(element.props || {}),
+  ) as Record<string, unknown>;
 
   if ("className" in props && !("class" in props)) {
     props.class = props.className;
@@ -149,6 +177,18 @@ function normalizeProps(element: FarmSolidElement): Record<string, unknown> {
     props.onDblClick = props.onDoubleClick;
     delete props.onDoubleClick;
   }
+  // React reconciliation metadata, never a DOM attribute.
+  delete props.key;
+  // React seeds uncontrolled inputs by rendering defaultValue/defaultChecked as
+  // value/checked; Solid would otherwise emit a dead `defaultvalue` attribute.
+  if ("defaultValue" in props && !("value" in props)) {
+    props.value = props.defaultValue;
+    delete props.defaultValue;
+  }
+  if ("defaultChecked" in props && !("checked" in props)) {
+    props.checked = props.defaultChecked;
+    delete props.defaultChecked;
+  }
   delete props.suppressHydrationWarning;
 
   if (element.children.length > 0) {
@@ -160,9 +200,54 @@ function normalizeProps(element: FarmSolidElement): Record<string, unknown> {
         return materialized.length === 1 ? materialized[0] : materialized;
       },
     });
+  } else if ("children" in props) {
+    // Children can also arrive as a prop rather than positionally: core wraps
+    // every layout as `createElement(Layout, { children: element, ... })`, and
+    // route slots pass their element through a prop too. The spread copied the
+    // raw Farm element(s), which Solid would escape to the string "undefined",
+    // so materialize them the same way as positional children.
+    Object.defineProperty(props, "children", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return materializeSolidElement(element.props?.children);
+      },
+    });
   }
 
   return props;
+}
+
+/**
+ * The client hydrates an island by calling its root component directly in a
+ * hydration context it must name up front (see `materializeSolidRoot`). Record
+ * the id Solid gives that component on the server and write it on the island
+ * container. Guessing it from the first hydration key breaks as soon as the
+ * component allocates an id before its first element, as `createUniqueId()`
+ * does, and a missed guess falls back to a non-hydrating render.
+ */
+function materializeServerIsland(tag: string, element: FarmSolidElement): unknown {
+  const root = element.children.length === 1 ? element.children[0] : undefined;
+  if (!isFarmSolidElement(root) || typeof root.type !== "function") return undefined;
+
+  const Component = root.type as (props: Record<string, unknown>) => unknown;
+  let renderId: string | undefined;
+  const recordingRoot = createElement(
+    (props: Record<string, unknown>) => {
+      const context = sharedConfig.context as { id: string; noHydrate?: boolean } | undefined;
+      if (context && !context.noHydrate) renderId = context.id;
+      return Component(props);
+    },
+    root.props,
+    ...root.children,
+  );
+  // Spreading evaluates the children getter, which runs the root component.
+  const props: Record<string, unknown> & { component: string } = {
+    ...normalizeProps(createElement(tag, element.props, recordingRoot)),
+    component: tag,
+  };
+  if (renderId !== undefined) props[FARM_SOLID_RENDER_ID_ATTRIBUTE] = renderId;
+  return createComponent(Dynamic, props);
 }
 
 export function materializeSolidElement(value: unknown): unknown {
@@ -171,6 +256,11 @@ export function materializeSolidElement(value: unknown): unknown {
 
   if (value.type === FARM_SOLID_FRAGMENT) {
     return value.children.map(materializeSolidElement);
+  }
+
+  if (isServer && typeof value.type === "string" && value.props?.["data-farm-island"] != null) {
+    const island = materializeServerIsland(value.type, value);
+    if (island !== undefined) return island;
   }
 
   const props = normalizeProps(value);
@@ -186,7 +276,7 @@ export function materializeSolidElement(value: unknown): unknown {
   }
 
   const Component = value.type as any;
-  return materializeSolidElement(createComponent(Component, props));
+  return materializeSolidElement(rejectAsyncComponentResult(createComponent(Component, props)));
 }
 
 /**
@@ -200,7 +290,7 @@ export function materializeSolidRoot(value: unknown): unknown {
   }
 
   const Component = value.type as any;
-  return materializeSolidElement(Component(normalizeProps(value)));
+  return materializeSolidElement(rejectAsyncComponentResult(Component(normalizeProps(value))));
 }
 
 const SolidCompat = {

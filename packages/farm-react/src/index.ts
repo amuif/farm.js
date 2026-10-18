@@ -1,4 +1,5 @@
 import type { FarmRenderer } from "@farm.js/core/renderer";
+import { resolveCompilerOption } from "./compiler-options";
 
 export type ReactCompilerMode = "infer" | "annotation";
 export type ReactCompilerReactivity = "static" | "hybrid";
@@ -23,8 +24,13 @@ export interface ReactCompilerOptions {
 }
 
 export interface ReactRendererOptions {
+  /**
+   * Farm's AOT compiler. `true` enables automatic inference; an object
+   * customizes selection. Unsupported components always stay on React.
+   */
+  compiler?: boolean | ReactCompilerOptions;
   experimental?: {
-    /** `true` enables automatic inference; an object customizes selection. */
+    /** @deprecated Use the top-level `compiler` option. */
     compiler?: boolean | ReactCompilerOptions;
   };
 }
@@ -112,13 +118,19 @@ const REACT_RENDERER: Readonly<FarmRenderer> = Object.freeze({
     "@farm.js/react/compiler-runtime",
   ],
   capabilities: {
-    streaming: { node: true, web: false },
+    reconcilesRerenders: true,
+    streaming: {
+      node: true,
+      web: false,
+      runtimes: { edge: { node: false, web: true } },
+    },
+    functionComponents: true,
   },
 });
 
-/** Select React and optionally enable Farm's experimental AOT compiler. */
+/** Select React and optionally enable Farm's AOT compiler. */
 export function react(options: ReactRendererOptions = {}): FarmRenderer {
-  const compiler = options.experimental?.compiler;
+  const compiler = resolveCompilerOption(options, true);
   const normalizedCompiler = compiler ? normalizeReactCompilerOptions(compiler) : false;
 
   return {
@@ -126,10 +138,17 @@ export function react(options: ReactRendererOptions = {}): FarmRenderer {
     dedupe: [...(REACT_RENDERER.dedupe || [])],
     optimizeDeps: [...(REACT_RENDERER.optimizeDeps || [])],
     capabilities: {
-      streaming: { ...REACT_RENDERER.capabilities?.streaming },
+      reconcilesRerenders: true,
+      streaming: {
+        ...REACT_RENDERER.capabilities?.streaming,
+        runtimes: {
+          edge: { ...REACT_RENDERER.capabilities?.streaming?.runtimes?.edge },
+        },
+      },
+      functionComponents: true,
     },
     options: {
-      experimental: { compiler: normalizedCompiler },
+      compiler: normalizedCompiler,
     },
   };
 }

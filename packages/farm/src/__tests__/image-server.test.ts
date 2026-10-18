@@ -33,6 +33,52 @@ function passthroughTransformer(spy = vi.fn()): FarmImageTransformer {
 }
 
 describe("Farm image optimizer", () => {
+  it("rechecks remote restrictions and redirect paths after warming the pattern cache", async () => {
+    const fetcher = vi.fn(
+      async () => new Response(PNG, { headers: { "content-type": "image/png" } }),
+    );
+    const handler = createFarmImageHandler(
+      resolveFarmImageConfig({
+        remotePatterns: [
+          {
+            protocol: "https",
+            hostname: "images.example.test",
+            port: "",
+            pathname: "/public/*",
+            search: "?v=1",
+          },
+        ],
+      }),
+      { fetch: fetcher as typeof fetch, transform: passthroughTransformer() },
+    );
+    expect(
+      (await handler(new Request(optimizerUrl("https://images.example.test/public/a.png?v=1"))))
+        ?.status,
+    ).toBe(200);
+    for (const source of [
+      "http://images.example.test/public/a.png?v=1",
+      "https://other.example.test/public/a.png?v=1",
+      "https://images.example.test:444/public/a.png?v=1",
+      "https://images.example.test/public/a.png?v=2",
+      "https://images.example.test/private/a.png?v=1",
+      "https://images.example.test/public/nested/a.png?v=1",
+    ]) {
+      expect((await handler(new Request(optimizerUrl(source))))?.status).toBe(400);
+    }
+    expect(fetcher).toHaveBeenCalledOnce();
+    fetcher.mockImplementation(
+      async () => new Response(null, { status: 302, headers: { location: "/private/a.png?v=1" } }),
+    );
+    expect(
+      (
+        await handler(
+          new Request(optimizerUrl("https://images.example.test/public/redirect.png?v=1")),
+        )
+      )?.status,
+    ).toBe(400);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("optimizes allowed local images and serves cache validators", async () => {
     const transform = vi.fn();
     const fetcher = vi.fn(async (_url: URL, init?: RequestInit) => {
@@ -76,6 +122,49 @@ describe("Farm image optimizer", () => {
     expect(cached?.status).toBe(304);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(transform).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not trust the request authority to bypass private-source checks", async () => {
+    const fetch = vi.fn(async () => new Response(PNG));
+    const fetchRemote = vi.fn(async () => new Response(PNG));
+    const handler = createFarmImageHandler(resolveFarmImageConfig(undefined), {
+      fetch: fetch as typeof globalThis.fetch,
+      fetchRemote: fetchRemote as typeof globalThis.fetch,
+      transform: passthroughTransformer(),
+    });
+    const query = new URLSearchParams({ url: "/admin.png", w: "640", q: "75" });
+
+    const response = await handler(new Request(`http://127.0.0.1/_farm/image?${query}`));
+
+    expect(response?.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fetchRemote).not.toHaveBeenCalled();
+  });
+
+  it("uses an adapter-owned origin for local asset requests", async () => {
+    const fetch = vi.fn(
+      async () => new Response(PNG, { headers: { "content-type": "image/png" } }),
+    );
+    const fetchRemote = vi.fn();
+    const validateRemoteUrl = vi.fn();
+    const handler = createFarmImageHandler(resolveFarmImageConfig(undefined), {
+      fetch: fetch as typeof globalThis.fetch,
+      fetchRemote: fetchRemote as typeof globalThis.fetch,
+      validateRemoteUrl,
+      transform: passthroughTransformer(),
+    });
+
+    const response = await handler(new Request(optimizerUrl("/assets/product.png")), {
+      trustedLocalOrigin: "http://127.0.0.1:4173",
+    });
+
+    expect(response?.status).toBe(200);
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("http://127.0.0.1:4173/assets/product.png"),
+      expect.any(Object),
+    );
+    expect(fetchRemote).not.toHaveBeenCalled();
+    expect(validateRemoteUrl).not.toHaveBeenCalled();
   });
 
   it("handles HEAD without returning image bytes", async () => {
@@ -348,6 +437,111 @@ describe("Farm image optimizer", () => {
   });
 });
 
+describe("image cache keys", () => {
+  it("shares one cache entry across Accept headers that negotiate the same format", async () => {
+    const transform = vi.fn();
+    const fetcher = vi.fn(
+      async () => new Response(PNG, { headers: { "content-type": "image/png" } }),
+    );
+    const handler = createFarmImageHandler(resolveFarmImageConfig(undefined), {
+      fetch: fetcher as typeof fetch,
+      transform: passthroughTransformer(transform),
+    });
+
+    const variants = [
+      "image/webp",
+      "image/webp,*/*;q=0.8",
+      "*/*;q=0.8,image/webp",
+      "image/webp;q=1.0, image/png;q=0.5",
+    ];
+
+    for (const accept of variants) {
+      const response = await handler(
+        new Request(optimizerUrl("/assets/product.png"), { headers: { accept } }),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    // Every variant negotiates to the same output format, so one transform
+    // should serve all of them instead of each header becoming its own key.
+    expect(transform).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("image request coalescing", () => {
+  it("runs one fetch and transform for identical concurrent misses", async () => {
+    let transforms = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transform: FarmImageTransformer = async (input) => {
+      transforms += 1;
+      await gate;
+      return { body: input.source, contentType: input.sourceType };
+    };
+    const fetcher = vi.fn(
+      async () => new Response(PNG, { headers: { "content-type": "image/png" } }),
+    );
+    const handler = createFarmImageHandler(resolveFarmImageConfig(undefined), {
+      fetch: fetcher as typeof fetch,
+      transform,
+    });
+
+    const send = () =>
+      handler(
+        new Request(optimizerUrl("/assets/product.png"), { headers: { accept: "image/webp" } }),
+      );
+
+    // Both requests miss the cache and overlap on the same key.
+    const pending = [send(), send()];
+    release();
+    const responses = await Promise.all(pending);
+
+    for (const response of responses) expect(response.status).toBe(200);
+    expect(transforms).toBe(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("still serves other waiters when one request is aborted", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transform: FarmImageTransformer = async (input) => {
+      await gate;
+      return { body: input.source, contentType: input.sourceType };
+    };
+    const fetcher = vi.fn(
+      async () => new Response(PNG, { headers: { "content-type": "image/png" } }),
+    );
+    const handler = createFarmImageHandler(resolveFarmImageConfig(undefined), {
+      fetch: fetcher as typeof fetch,
+      transform,
+    });
+
+    const aborted = new AbortController();
+    const first = handler(
+      new Request(optimizerUrl("/assets/product.png"), {
+        headers: { accept: "image/webp" },
+        signal: aborted.signal,
+      }),
+    );
+    const second = handler(
+      new Request(optimizerUrl("/assets/product.png"), { headers: { accept: "image/webp" } }),
+    );
+
+    // One caller leaving must not cancel the image the other is waiting for.
+    aborted.abort();
+    release();
+
+    await first.catch(() => {});
+    const response = await second;
+    expect(response.status).toBe(200);
+  });
+});
+
 describe("image runtime adapters", () => {
   it("honors Accept quality values when selecting an output format", () => {
     const formats = ["image/avif", "image/webp"] as const;
@@ -384,6 +578,59 @@ describe("image runtime adapters", () => {
         },
       }),
     );
+  });
+
+  it("does not follow redirects the validated fetch never saw", async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "http://169.254.169.254/latest/meta-data" },
+        }),
+    );
+    const transform = createCloudflareImageTransformer(fetcher as typeof fetch);
+
+    await expect(
+      transform({
+        source: PNG,
+        sourceUrl: new URL("https://images.example.test/photo.png"),
+        sourceType: "image/png",
+        width: 828,
+        quality: 75,
+        accept: "image/webp",
+        formats: ["image/webp"],
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/redirected after validation/);
+
+    // The transform request must opt out of automatic redirect following, so a
+    // hop added after Farm validated the source is never fetched.
+    expect(fetcher).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ redirect: "manual" }),
+    );
+  });
+
+  it("enforces the configured body limit on its own fetch", async () => {
+    const oversized = new Uint8Array(2048);
+    const fetcher = vi.fn(
+      async () => new Response(oversized, { headers: { "content-type": "image/webp" } }),
+    );
+    const transform = createCloudflareImageTransformer(fetcher as typeof fetch);
+
+    await expect(
+      transform({
+        source: PNG,
+        sourceUrl: new URL("https://images.example.test/photo.png"),
+        sourceType: "image/png",
+        width: 828,
+        quality: 75,
+        accept: "image/webp",
+        formats: ["image/webp"],
+        signal: new AbortController().signal,
+        maximumResponseBody: 1024,
+      }),
+    ).rejects.toThrow(/too large/i);
   });
 
   it.each([

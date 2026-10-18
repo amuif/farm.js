@@ -1,4 +1,27 @@
+export {};
+
 declare module "@farm.js/core" {
+  export type IntegrationOriginRejection =
+    | "missing-origin"
+    | "opaque-origin"
+    | "invalid-origin"
+    | "cross-site";
+
+  export type IntegrationOriginResult =
+    | { ok: true }
+    | { ok: false; reason: IntegrationOriginRejection };
+
+  export interface IntegrationOriginPolicy {
+    allowedOrigins?: readonly string[];
+    requireOriginMetadata?: boolean;
+  }
+
+  export function validateIntegrationRequestOrigin(
+    request: Request,
+    policy?: IntegrationOriginPolicy,
+  ): IntegrationOriginResult;
+
+  export function describeIntegrationOriginRejection(reason: IntegrationOriginRejection): string;
   export type FarmIntegrationCategory =
     | "auth"
     | "payment"
@@ -644,15 +667,22 @@ declare module "@farm.js/core" {
   type InferFarmEndpointSchema<TSchema> =
     TSchema extends FarmEndpointSchema<infer TValue> ? TValue : unknown;
 
-  export type FarmTypedEndpoint<TBody = never, TQuery = never, TResponse = unknown> = {
+  export type FarmTypedEndpoint<
+    TBody = never,
+    TQuery = never,
+    TResponse = unknown,
+    THeaders = never,
+  > = {
     __types: {
       body: TBody;
       query: TQuery;
+      headers: THeaders;
+      inputHeaders: THeaders;
       response: TResponse;
     };
     __path?: string;
     __method?: string;
-  } & ((options?: { body?: TBody; query?: TQuery }) => Promise<TResponse>);
+  } & ((options?: { body?: TBody; query?: TQuery; headers?: THeaders }) => Promise<TResponse>);
 
   export function createEndpoint<
     TBodySchema extends FarmEndpointSchema | undefined = undefined,
@@ -680,7 +710,8 @@ declare module "@farm.js/core" {
   ): FarmTypedEndpoint<
     InferFarmEndpointSchema<TBodySchema>,
     InferFarmEndpointSchema<TQuerySchema>,
-    Awaited<TResponse>
+    Awaited<TResponse>,
+    THeadersSchema extends FarmEndpointSchema ? InferFarmEndpointSchema<THeadersSchema> : never
   >;
 
   export const integrationRoute: {

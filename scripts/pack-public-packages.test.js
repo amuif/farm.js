@@ -7,6 +7,24 @@ const { test } = require("node:test");
 const { packPublicPackages } = require("./pack-public-packages");
 const { readPublicPackages } = require("./public-packages");
 
+const independentRendererDirectories = [
+  "farm-react",
+  "farm-preact",
+  "farm-solid",
+  "farm-svelte",
+  "farm-vue",
+];
+
+test("independently released renderers require compatible stable core", () => {
+  for (const directory of independentRendererDirectories) {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "..", "packages", directory, "package.json"), "utf8"),
+    );
+
+    assert.equal(manifest.peerDependencies["@farm.js/core"], ">=0.1.0 <0.2.0", directory);
+  }
+});
+
 test("discovers every public package without consulting the registry", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "farm-public-packages-"));
   try {

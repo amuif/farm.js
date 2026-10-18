@@ -37,17 +37,61 @@ export async function createMiddlewareProductionFixture(): Promise<string> {
     recursive: true,
   });
   await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module" }, null, 2));
+  // A layer that ships config middleware. Layers append their middleware ahead
+  // of the project's, in development and in the built app alike.
+  await fs.mkdir(path.join(root, "layers", "guard"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "layers", "guard", "farm.config.ts"),
+    `
+export default {
+  middleware: {
+    matcher: "/dashboard/settings",
+    handler(ctx) {
+      ctx.headers.set("x-layer-middleware", "yes");
+    },
+  },
+};
+`.trim(),
+  );
   await fs.writeFile(
     path.join(root, "farm.config.ts"),
     `
 export default {
+  extends: ["./layers/guard"],
   srcDir: "src",
+  experimental: {
+    ppr: true,
+  },
+  agent: {
+    jsonLd: {
+      type: "SoftwareApplication",
+      name: "Farm production fixture",
+      url: "https://example.test",
+    },
+    llmsTxt: {
+      title: "Farm production fixture",
+      summary: "Pages served by the production fixture.",
+      exclude: ["/rewrite-target"],
+    },
+    // The fixture's root robots.ts keeps /robots.txt.
+    crawlers: { training: "block" },
+  },
   deploy: {
     target: "vercel",
   },
   images: {
     path: "/media/image",
     qualities: [60],
+    // The test serves its generated source asset from an isolated loopback server.
+    dangerouslyAllowLocalIP: true,
+  },
+  routeRules: {
+    "/api/public/**": {
+      cors: {
+        origin: "https://client.example",
+        methods: ["GET"],
+      },
+    },
   },
   redirects() {
     return [{ source: "/legacy", destination: "/dashboard", permanent: true }];
@@ -99,6 +143,13 @@ export default {
 `.trim(),
   );
   await fs.writeFile(path.join(root, "src", "app", "globals.css"), "");
+  // A static llms.txt overrides the agent.llmsTxt index where the platform serves files first.
+  await fs.mkdir(path.join(root, "public"), { recursive: true });
+  await fs.writeFile(path.join(root, "public", "llms.txt"), "# Static fixture index\n");
+  await fs.writeFile(
+    path.join(root, "public", "llms-full.txt"),
+    "# Static fixture index, in full\n",
+  );
   await fs.writeFile(
     path.join(root, "src", "app", "sitemap.ts"),
     `
@@ -338,6 +389,23 @@ export default function ExplicitImagePage() {
 }
 `.trim(),
   );
+  await fs.mkdir(path.join(root, "src", "app", "dashboard", "projects", "[id]"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "src", "app", "dashboard", "projects", "[id]", "page.tsx"),
+    `
+import React from "react";
+
+export default function ProjectPage(props: any) {
+  return React.createElement(
+    "main",
+    null,
+    \`project: \${props.params.id} / \${props.middleware?.data.get("config.area") || "unguarded"}\`
+  );
+}
+`.trim(),
+  );
   await fs.writeFile(
     path.join(root, "src", "app", "dashboard", "dashboard-identity.tsx"),
     `
@@ -392,6 +460,56 @@ export async function middleware(
       },
     });
   }
+  if (pathname.startsWith("/dashboard/private-notes")) {
+    return new Response("private notes require sign-in", {
+      status: 401,
+      headers: {
+        "x-file-response": "markdown-guard",
+      },
+    });
+  }
+}
+`.trim(),
+  );
+  await fs.mkdir(path.join(root, "src", "app", "dashboard", "notes"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "src", "app", "dashboard", "notes", "page.md"),
+    `# Dashboard notes\n\ndashboard-notes-source\n`,
+  );
+  await fs.mkdir(path.join(root, "src", "app", "dashboard", "private-notes"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "src", "app", "dashboard", "private-notes", "page.md"),
+    `# Private notes\n\ndashboard-private-notes-source\n`,
+  );
+  await fs.mkdir(path.join(root, "src", "app", "public-notes"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "src", "app", "public-notes", "page.md"),
+    `# Public notes\n\npublic-notes-source\n`,
+  );
+  await fs.writeFile(
+    path.join(root, "src", "app", "public-notes", "llms-full.ts"),
+    `
+export default async function llmsFull({ markdown }: any) {
+  const notes = await markdown("https://example.test/public-notes.md");
+  return "# Fixture notes, in full\\n\\n" + notes.split("\\n\\n")[1].trim() + "\\n";
+}
+`.trim(),
+  );
+  // Overrides agent.llmsTxt under /public-notes and builds on the generated pages.
+  await fs.writeFile(
+    path.join(root, "src", "app", "public-notes", "llms.ts"),
+    `
+export default function llms({ pages, defaults }: any) {
+  return {
+    ...defaults,
+    title: "Fixture notes",
+    sections: [
+      { title: "Notes", links: pages.filter((page: any) => page.path.endsWith("notes")) },
+      { title: "Optional", links: [{ title: "Status", url: "https://status.example.test" }] },
+    ],
+  };
 }
 `.trim(),
   );

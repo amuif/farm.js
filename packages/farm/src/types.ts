@@ -1,6 +1,8 @@
 import type { FarmRenderer } from "./renderer";
 import type { IncomingMessage, ServerResponse } from "http";
+import type { FarmAgentUserConfig } from "./agent-config";
 import type { FarmStorageUserConfig } from "./storage/types";
+import type { FarmSchemaConfig } from "./schema";
 import type { FarmIntegrationsUserConfig } from "./integrations";
 import type { FarmDocsResolvedConfig, FarmDocsUserConfig } from "./docs/types";
 import type { FarmMarkdownResolvedConfig, FarmMarkdownUserConfig } from "./markdown";
@@ -181,6 +183,8 @@ export interface FarmConfig {
     };
   };
   storage?: FarmStorageUserConfig;
+  /** Rules for the tables plugins and integrations declare, such as which app tables they may add columns to. */
+  schema?: FarmSchemaConfig;
   /** Shared application data, route, ISR, and PPR cache. */
   cache?: FarmCacheUserConfig;
   integrations?: FarmIntegrationsUserConfig;
@@ -202,6 +206,8 @@ export interface FarmConfig {
   serverActions?: FarmServerActionsConfig;
   /** App-wide HTTP security policy. */
   security?: FarmSecurityConfig | ResolvedFarmSecurityConfig;
+  /** Opt-in agent-readiness primitives (JSON-LD and related). Off by default. */
+  agent?: FarmAgentUserConfig;
   images?: FarmImageConfig;
   /** Browser resource scheduling and preload budgets. */
   performance?: FarmPerformanceConfig;
@@ -224,7 +230,19 @@ export interface FarmConfig {
   observability?: FarmObservabilityUserConfig;
   /** Farm product telemetry for deployed server runtimes. Set to false to disable. */
   telemetry?: boolean;
-  /** Development-only runtime inspector. Enabled by default during `farm dev`. */
+  /**
+   * Request and MCP tool analytics for a Farm Infra project. On only when the server
+   * environment links the app to one (`FARMJS_API_KEY` plus `FARMJS_PROJECT_ID`, or a
+   * project's write-only key). Set to false to never send them.
+   */
+  analytics?: boolean;
+  /**
+   * Development-only runtime inspector. Enabled by default during `farm dev`.
+   *
+   * @deprecated The built-in dashboard is deprecated. Install `@farm.js/devtools` and add
+   * `devtools()` to `plugins` instead; it reuses this runtime and owns the maintained UI.
+   * `devtools: false` and `shortcut` remain supported for the transition.
+   */
   devtools?: FarmDevtoolsUserConfig;
   /** Development-only browser feedback for build and HMR activity. */
   devIndicators?: FarmDevIndicatorsConfig;
@@ -236,6 +254,17 @@ export interface FarmConfig {
   experimental?: {
     serverComponents?: boolean;
     serverActions?: boolean;
+    /**
+     * Enables Partial Prerendering (static-shell caching). Routes still opt in
+     * individually with `export const ppr = true`, the Next-compatible
+     * `export const experimental_ppr = true`, or a `"use ppr"` directive;
+     * without this flag those declarations are inert and the route renders
+     * fully dynamically.
+     *
+     * @experimental
+     * @default false
+     */
+    ppr?: boolean;
     /**
      * Controls non-RSC hydration ownership for server modules that import
      * leaf `"use client"` components.
@@ -494,6 +523,7 @@ export interface RouteModule<TRoute extends FarmRoutePropsTarget = FarmRouteProp
   /**
    * Opt into Partial Prerendering/static-shell caching for this route.
    * Compatible with Farm's `ppr` export and Next.js `experimental_ppr`.
+   * Requires `experimental.ppr` in `farm.config.ts`; inert without it.
    */
   ppr?: boolean;
   experimental_ppr?: boolean;
@@ -560,16 +590,37 @@ export interface LayoutModule<TRoute extends FarmRoutePropsTarget = FarmRoutePro
   generateMetadata?: (props: LayoutMetadataProps<TRoute>) => Promise<Metadata> | Metadata;
 }
 
+/** A schema.org JSON-LD object, such as `{ "@context": "https://schema.org", "@type": "Article" }`. */
+export type MetadataJsonLd = object;
+
 export interface Metadata {
   metadataBase?: string | URL;
-  title?: string | { default?: string; template?: string };
+  /** `absolute` names a page exactly, past any parent `template` (as in Next.js). */
+  title?: string | { default?: string; template?: string; absolute?: string };
   description?: string;
   keywords?: string | string[];
+  /**
+   * schema.org structured data rendered as `<script type="application/ld+json">`,
+   * one per object. Layout entries come first, then the page's. Renders
+   * alongside the site-level `agent.jsonLd`.
+   */
+  jsonLd?: MetadataJsonLd | MetadataJsonLd[];
   author?: string;
   authors?: Array<{ name: string; url?: string }>;
   creator?: string;
+  /** Site ownership tokens for search consoles, one `<meta>` per token. */
+  verification?: {
+    /** `google-site-verification` */
+    google?: string | string[];
+    /** `msvalidate.01` */
+    bing?: string | string[];
+    /** `yandex-verification` */
+    yandex?: string | string[];
+    /** Any other verification meta name, keyed by name. */
+    other?: Record<string, string | string[]>;
+  };
   publisher?: string;
-  robots?: string | { index?: boolean; follow?: boolean };
+  robots?: string | MetadataRobots;
   openGraph?: {
     title?: string;
     description?: string;
@@ -594,6 +645,16 @@ export interface Metadata {
     image?: string;
     type?: string;
     locale?: string;
+    /** `article:published_time`, rendered when `type` is `"article"`. */
+    publishedTime?: string | Date;
+    /** `article:modified_time`, rendered when `type` is `"article"`. */
+    modifiedTime?: string | Date;
+    /** `article:author` profile URLs or names, rendered when `type` is `"article"`. */
+    authors?: string | string[];
+    /** `article:section`, rendered when `type` is `"article"`. */
+    section?: string;
+    /** `article:tag`, rendered when `type` is `"article"`. */
+    tags?: string | string[];
   };
   twitter?: {
     card?: "summary" | "summary_large_image" | "app" | "player";
@@ -624,6 +685,11 @@ export interface Metadata {
   alternates?: {
     canonical?: string;
     languages?: Record<string, string>;
+    /**
+     * Alternate representations keyed by MIME type, such as an RSS feed.
+     * `text/markdown` replaces the link Farm adds for a page's Markdown mirror.
+     */
+    types?: Record<string, string | Array<{ url: string; title?: string }>>;
   };
   icons?:
     | string
@@ -633,6 +699,8 @@ export interface Metadata {
         apple?: string | Array<string | { url: string; sizes?: string; type?: string }>;
       };
   manifest?: string;
+  /** Extra `<meta name content>` tags, keyed by name. An array renders one tag per value. */
+  other?: Record<string, string | number | Array<string | number>>;
 }
 
 export interface FarmRequest extends IncomingMessage {
@@ -691,4 +759,25 @@ export interface SSGCollectionResult {
   ssg: SSGPage[];
   /** Routes that will be server-rendered on each request */
   ssr: string[];
+}
+
+/** Crawler directives for a robots `<meta>` tag. Unset fields are omitted. */
+export interface MetadataRobotsDirectives {
+  index?: boolean;
+  follow?: boolean;
+  noarchive?: boolean;
+  nosnippet?: boolean;
+  noimageindex?: boolean;
+  /** Maximum text snippet length; `-1` means no limit and `0` means no snippet. */
+  "max-snippet"?: number;
+  "max-image-preview"?: "none" | "standard" | "large";
+  /** Maximum video preview length in seconds; `-1` means no limit. */
+  "max-video-preview"?: number;
+  /** Date after which the page should drop out of results, for example an ISO 8601 date. */
+  unavailable_after?: string;
+}
+
+export interface MetadataRobots extends MetadataRobotsDirectives {
+  /** Directives for a separate `<meta name="googlebot">` tag. */
+  googleBot?: string | MetadataRobotsDirectives;
 }

@@ -25,6 +25,30 @@ afterEach(async () => {
 });
 
 describe("default error page", () => {
+  it("fits the screen and scrolls long details inside the content", () => {
+    // The frame is exactly one screen tall, and the content scrolls within
+    // it, so a long stack never makes the page itself scroll.
+    expect(DEFAULT_ERROR_STYLES).toMatch(
+      /\.farm-default-error__frame \{[^}]*height: 100svh;[^}]*\}/,
+    );
+    expect(DEFAULT_ERROR_STYLES).not.toMatch(
+      /\.farm-default-error__frame \{[^}]*min-height: 100svh;[^}]*\}/,
+    );
+    expect(DEFAULT_ERROR_STYLES).toMatch(
+      /\.farm-default-error__frame > \.farm-default-error__content \{[^}]*max-height: 100%;[^}]*overflow-y: auto;[^}]*\}/,
+    );
+    // The dev overlay reuses the content class without the frame and keeps its
+    // own scroll container and pinned actions, so the base rule must not scroll.
+    expect(DEFAULT_ERROR_STYLES).not.toMatch(
+      /(^|\n)\.farm-default-error__content \{[^}]*overflow-y: auto;[^}]*\}/,
+    );
+    // Source lines are blocks inside <pre>; the newlines between them must not
+    // render as blank lines.
+    expect(DEFAULT_ERROR_STYLES).toMatch(
+      /\.farm-default-error__source-code > code \{[^}]*white-space: normal;[^}]*\}/,
+    );
+  });
+
   it("renders the approved diagnostic layout in development", () => {
     const sourceFrame: DefaultErrorSourceFrame = {
       file: "src/app/[owner]/page.tsx",
@@ -55,13 +79,15 @@ describe("default error page", () => {
     });
 
     expect(html).toContain('role="alert"');
-    expect(html).toContain(">500</p>");
-    expect(html).toContain("Runtime error");
-    expect(html).toContain("Application failed during server rendering");
+    expect(html).toContain("<span>500</span>");
+    expect(html).toContain("Something went wrong");
     expect(html).toContain("GET /query-demo");
     expect(html).toContain("500 Internal Server Error");
-    expect(html).toContain(">Details</h2>");
+    expect(html).toContain(">Technical details</h2>");
     expect(html).toContain("COPY DEBUG REPORT");
+    expect(html).toContain('href="https://farmjs.dev/docs"');
+    expect(html).not.toContain("farm.js.dev");
+    expect(html).toContain("farm-default-error__docs-icon");
     expect(html).toContain("src/app/[owner]/page.tsx:13:16");
     expect(html).toContain("farm-default-error__source-line--active");
     expect(html).toContain("# Farm.js debug report");
@@ -86,6 +112,24 @@ describe("default error page", () => {
     }
   });
 
+  it("gives 400 responses the same shell with a request-safe recovery action", () => {
+    const html = createDefaultErrorMarkup({
+      statusCode: 400,
+      requestPath: "/api/profile?draft=true",
+      method: "POST",
+      development: false,
+    });
+
+    expect(html).toContain("<span>400</span>");
+    expect(html).toContain("400 Bad Request");
+    expect(html).toContain("This request could not be completed");
+    expect(html).toContain("Check the request details, then try again.");
+    expect(html).toContain("POST /api/profile?draft=true");
+    expect(html).toContain("data-farm-error-back");
+    expect(html).toContain("GO BACK");
+    expect(html).not.toContain('type="button" data-farm-error-retry');
+  });
+
   it("supports status-bearing failures with matching copy and HTTP labels", () => {
     expect(resolveDefaultErrorStatus(Object.assign(new Error("busy"), { status: 503 }))).toBe(503);
     expect(resolveDefaultErrorStatus({ statusCode: "429" })).toBe(429);
@@ -99,7 +143,7 @@ describe("default error page", () => {
       requestPath: "/dashboard",
       development: false,
     });
-    expect(html).toContain(">503</p>");
+    expect(html).toContain("<span>503</span>");
     expect(html).toContain("503 Service Unavailable");
     expect(html).toContain("The service is temporarily unavailable");
   });
@@ -119,7 +163,9 @@ describe("default error page", () => {
       development: false,
     });
 
-    expect(html).toContain("An unexpected error prevented this page from rendering.");
+    expect(html).toContain(
+      "The application ran into an unexpected problem. Try again in a moment.",
+    );
     expect(html).toContain("TRY AGAIN");
     expect(html).toContain("RETURN HOME");
     expect(html).not.toContain("COPY DEBUG REPORT");
@@ -129,19 +175,29 @@ describe("default error page", () => {
   });
 
   it("supports adaptive themes, responsive reflow, and reduced motion", () => {
-    expect(DEFAULT_ERROR_STYLES).toContain("@media (prefers-color-scheme: dark)");
+    expect(DEFAULT_ERROR_STYLES).toContain("@media (prefers-color-scheme: light)");
     expect(DEFAULT_ERROR_STYLES).toContain(".dark .farm-default-error");
     expect(DEFAULT_ERROR_STYLES).toContain('[data-theme="dark"]');
     expect(DEFAULT_ERROR_STYLES).toContain('[data-theme="light"]');
     expect(DEFAULT_ERROR_STYLES).toContain("@media (max-width: 620px)");
     expect(DEFAULT_ERROR_STYLES).toContain("@media (prefers-reduced-motion: reduce)");
     expect(DEFAULT_ERROR_STYLES).toContain("border: 1px solid var(--farm-error-line)");
-    expect(DEFAULT_ERROR_STYLES).toContain("border: 1px solid var(--farm-error-line-strong)");
-    expect(DEFAULT_ERROR_STYLES).toContain("outline: 1px solid var(--farm-error-fg)");
+    expect(DEFAULT_ERROR_STYLES).toContain("border-top: 1px solid var(--farm-error-line-strong)");
+    expect(DEFAULT_ERROR_STYLES).toContain("outline: 2px solid var(--farm-error-fg)");
     expect(DEFAULT_ERROR_STYLES).toContain(
-      'font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
+      '--farm-error-font-sans: "Geist Variable", "Geist Sans", Geist, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;',
     );
-    expect(DEFAULT_ERROR_STYLES).toContain("font-size: clamp(76px, 13vw, 112px)");
+    expect(DEFAULT_ERROR_STYLES).toContain(
+      '--farm-error-font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;',
+    );
+    expect(DEFAULT_ERROR_STYLES).toMatch(
+      /\.farm-default-error__title\s*\{[\s\S]*font-family: var\(--farm-error-font-sans\);/,
+    );
+    expect(DEFAULT_ERROR_STYLES).toMatch(
+      /\.farm-default-error__action\s*\{[\s\S]*font-family: var\(--farm-error-font-mono\);/,
+    );
+    expect(DEFAULT_ERROR_STYLES).toContain("font-synthesis: none;");
+    expect(DEFAULT_ERROR_STYLES).toContain("font-size: clamp(36px, 5.2vw, 56px)");
   });
 });
 
@@ -186,5 +242,61 @@ describe("default error diagnostics", () => {
       content: "  const data = await loadProfile(owner);",
       highlight: true,
     });
+  });
+
+  it("redacts OAuth clientSecret and secretKey values from message and stack", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "farm-error-page-"));
+    temporaryDirectories.push(root);
+    const sourcePath = path.join(root, "src", "app", "auth", "page.tsx");
+    await mkdir(path.dirname(sourcePath), { recursive: true });
+    await writeFile(
+      sourcePath,
+      [
+        "export async function AuthPage() {",
+        "  const config = await loadOAuthConfig();",
+        "  return config;",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const secret = "sk-1234567890abcdef";
+    const error = new Error(
+      `OAuth config: clientSecret="${secret}" secretKey=${secret} client_secret: ${secret}`,
+    );
+    error.stack = [
+      `Error: OAuth config: clientSecret="${secret}" secretKey=${secret} client_secret: ${secret}`,
+      `    at AuthPage (${sourcePath}:2:22)`,
+      "    at processTicksAndRejections (node:internal/process/task_queues:105:5)",
+    ].join("\n");
+
+    const diagnostics = createDefaultErrorDiagnostics(error, root);
+
+    expect(diagnostics.message).not.toContain(secret);
+    expect(diagnostics.message).toContain("clientSecret=[REDACTED]");
+    expect(diagnostics.message).toContain("secretKey=[REDACTED]");
+    expect(diagnostics.message).toContain("client_secret=[REDACTED]");
+    expect(diagnostics.stack).not.toContain(secret);
+    expect(diagnostics.stack).toContain("<project>/src/app/auth/page.tsx:2:22");
+  });
+
+  it("redacts secret identifiers across camelCase, snake_case, and colon forms", () => {
+    const root = os.tmpdir();
+    const probe = (message: string) =>
+      createDefaultErrorDiagnostics(new Error(message), root).message;
+
+    expect(probe("clientSecret=abc")).toBe("clientSecret=[REDACTED]");
+    expect(probe("client_secret=abc")).toBe("client_secret=[REDACTED]");
+    expect(probe("secretKey=abc")).toBe("secretKey=[REDACTED]");
+    expect(probe("secret_key=abc")).toBe("secret_key=[REDACTED]");
+    expect(probe('clientSecret: "sk-xyz"')).toBe("clientSecret=[REDACTED]");
+
+    expect(probe("apiKey=abc")).toBe("apiKey=[REDACTED]");
+    expect(probe("api_key=abc")).toBe("api_key=[REDACTED]");
+    expect(probe("accessToken=abc")).toBe("accessToken=[REDACTED]");
+    expect(probe("authToken=abc")).toBe("authToken=[REDACTED]");
+    expect(probe("token=abc")).toBe("token=[REDACTED]");
+    expect(probe("password=abc")).toBe("password=[REDACTED]");
+    expect(probe("secret=abc")).toBe("secret=[REDACTED]");
   });
 });

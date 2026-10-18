@@ -1,13 +1,18 @@
 import {
   createNodePreviewGatewayHandler,
+  verifyPreviewTunnelGrant,
+  type PreviewManagedAuthOptions,
   type PreviewGatewayRequest,
   type PreviewGatewayResponse,
   type PreviewGatewaySession,
   type PreviewGatewayStore,
 } from "@farm.js/preview-gateway";
 import { createPersistentPreviewRelay } from "@farm.js/preview-tunnel";
+import { waitUntil } from "@vercel/functions";
+import { createInfraPreviewIntegration } from "../lib/infra.js";
 import { del, get, list, put } from "@vercel/blob";
 
+import { createRedisPreviewAuthExchangeRateLimiter } from "../lib/redis-auth-rate-limiter.js";
 import { createRedisPreviewRelayCoordinator } from "../lib/redis-coordinator.js";
 
 interface ExpiringValue<T> {
@@ -36,13 +41,11 @@ class VercelBlobPreviewGatewayStore implements PreviewGatewayStore {
   }
 
   async touchSession(session: PreviewGatewaySession, ttlMs: number): Promise<void> {
-    const nextSession = {
-      ...session,
-      expiresAt: Date.now() + ttlMs,
-    };
+    const nextSession = { ...session };
+    const remainingTtlMs = Math.max(1, Math.min(ttlMs, session.expiresAt - Date.now()));
     await Promise.all([
-      this.write(this.sessionKey(session.id), nextSession, ttlMs),
-      this.write(this.nameKey(session.name), session.id, ttlMs),
+      this.write(this.sessionKey(session.id), nextSession, remainingTtlMs),
+      this.write(this.nameKey(session.name), session.id, remainingTtlMs),
     ]);
   }
 
@@ -207,22 +210,85 @@ export const config = {
   maxDuration: 1800,
 };
 
-const domain = process.env.FARM_PREVIEW_DOMAIN || "preview.farming-labs.dev";
+const domain = process.env.FARM_PREVIEW_DOMAIN || "preview.farmjs.dev";
 const coordinator = createRedisPreviewRelayCoordinator();
+// Managed sign-in is Farm.js Infrastructure: developers sign in there and preview with an API key.
+const infra = process.env.FARM_PREVIEW_AUTH_SECRET
+  ? createInfraPreviewIntegration(process.env, fetch, waitUntil)
+  : undefined;
+const auth = createManagedPreviewAuth();
 const pollingGateway = createNodePreviewGatewayHandler({
   domain,
   baseUrl: process.env.FARM_PREVIEW_GATEWAY_URL,
   clientHeartbeatTimeoutMs: 1000 * 60 * 30,
   store: createVercelBlobStore(),
+  auth,
+  observer: infra?.observer("polling"),
+  authorizeSession: infra?.authorizeSession,
 });
 
 const persistentRelay = createPersistentPreviewRelay({
+  observer: infra?.observer("websocket"),
+  authorizeSession: infra?.authorizeSession,
   publicBaseUrl: process.env.FARM_PREVIEW_GATEWAY_URL || `https://${domain}`,
   publicDomain: domain,
   publicWebSocketUrl: `wss://${domain}/agent`,
   healthPath: "/api/tunnel/health",
   fallbackHandler: pollingGateway,
   coordinator,
+  // This handler is the public entry point for the whole gateway domain, so an
+  // unauthenticated /agent registration would let anyone claim a preview
+  // hostname. Managed deployments require a name-bound tunnel grant. A
+  // self-hosted legacy deployment can instead opt into one shared relay token;
+  // with neither configured the relay accepts no registrations.
+  ...(auth
+    ? {
+        authorizeAgent: ({ token, name }: { token: string; name: string }) => {
+          try {
+            const grant = verifyPreviewTunnelGrant(token, {
+              signingSecret: auth.signingSecret,
+              name,
+            });
+            return {
+              expiresAt: grant.expiresAt,
+              ownerId: `${grant.provider || "github"}:${grant.subject}`,
+              project: grant.project ?? grant.name,
+              keyId: grant.keyId,
+              grantId: grant.nonce,
+            };
+          } catch {
+            return false;
+          }
+        },
+      }
+    : { registrationToken: process.env.FARM_PREVIEW_RELAY_TOKEN }),
+  // A relay route wins over the polling fallback, so a name a live polling
+  // session owns must not be claimable over the WebSocket transport.
+  isPreviewNameClaimed: pollingGateway.isPreviewNameClaimed,
 });
+
+function createManagedPreviewAuth(): PreviewManagedAuthOptions | undefined {
+  const signingSecret = process.env.FARM_PREVIEW_AUTH_SECRET;
+  if (!signingSecret || !infra) return undefined;
+  const rateLimitExchange = createRedisPreviewAuthExchangeRateLimiter();
+  if (!rateLimitExchange && process.env.VERCEL_ENV === "production") {
+    throw new Error(
+      "Managed preview auth requires REDIS_URL, KV_URL, or UPSTASH_REDIS_URL for shared exchange rate limiting.",
+    );
+  }
+  return {
+    signingSecret,
+    deviceAuth: infra.deviceAuth,
+    dashboardUrl: infra.dashboardUrl,
+    rateLimitExchange,
+    defaultSessionTtlMs: readDuration("FARM_PREVIEW_DEFAULT_TTL_MS", 1000 * 60 * 60),
+    maxSessionTtlMs: readDuration("FARM_PREVIEW_MAX_TTL_MS", 1000 * 60 * 60 * 24),
+  };
+}
+
+function readDuration(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
 
 export default persistentRelay.server;

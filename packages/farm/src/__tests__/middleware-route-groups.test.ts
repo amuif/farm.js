@@ -18,9 +18,15 @@ describe("middleware route groups", () => {
 
     try {
       const viteServer = {
-        ssrLoadModule: vi.fn().mockResolvedValue({
-          default: async (_ctx: unknown, next: () => Promise<void>) => next(),
-        }),
+        environments: {
+          ssr: {
+            runner: {
+              import: vi.fn().mockResolvedValue({
+                default: async (_ctx: unknown, next: () => Promise<void>) => next(),
+              }),
+            },
+          },
+        },
       };
       const manager = new MiddlewareManager(appDir, viteServer as never);
       await manager.discover();

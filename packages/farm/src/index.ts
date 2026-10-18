@@ -1,20 +1,70 @@
 export * from "./types";
+export type { FarmAgentUserConfig, FarmAgentJsonLd } from "./agent-config";
+export type { FarmAgentCrawlers, FarmCrawlerPolicy } from "./agent-crawlers";
 export { defineRenderer, REACT_RENDERER } from "./renderer";
 export type {
   FarmRenderer,
   FarmRendererCapabilities,
   FarmRendererCapabilitiesInput,
+  FarmRendererRuntime,
   FarmRendererStreamingCapabilities,
+  FarmRendererStreamingPrimitives,
 } from "./renderer";
 export * from "./utils";
 export * from "./storage";
+export * from "./schema";
+export * from "./schema-sql";
+export * from "./schema-migrate";
+export * from "./schema-tables";
+export { collectSchemaDependencies, orderSchemaOwners } from "./schema-dependencies";
+export type { FarmCrossOwnerReference } from "./schema-foreign-keys";
+export { FARM_SCHEMA_STEPS_TABLE, type FarmSchemaStepPlan } from "./schema-steps";
+export type { FarmSchemaMigrationStep } from "./schema-step-types";
+export {
+  FARM_SCHEMA_STATE_TABLE,
+  type FarmSchemaChanges,
+  type FarmSchemaSnapshot,
+  type FarmSchemaState,
+} from "./schema-state";
+export {
+  collectSchemaExtensions,
+  isSchemaExtensionAllowed,
+  type FarmSchemaExtension,
+} from "./schema-extend";
 export * from "./integrations";
 export * from "./integration-orm";
 export * from "./integration-api";
 export { createFarmApp } from "./app";
 export { FarmProvider } from "./provider";
 export { getCurrentRequest } from "./server/request";
-export { definePlugin, FarmRuntimeShutdownError, PluginManager } from "./plugin";
+export { renameSchema, type FarmSchemaRenames } from "./schema-rename";
+export {
+  checkSchema,
+  collectSchemaOwners,
+  formatSchemaCheck,
+  type FarmSchemaCheckCode,
+  type FarmSchemaCheckConfig,
+  type FarmSchemaCheckIssue,
+  type FarmSchemaCheckOwner,
+  type FarmSchemaCheckOptions,
+  type FarmSchemaCheckReport,
+  type FarmSchemaCheckSeverity,
+} from "./schema-check";
+export {
+  definePlugin,
+  FarmRuntimeShutdownError,
+  PluginManager,
+  type FarmPluginDatabase,
+  type FarmPluginDefinition,
+} from "./plugin";
+export {
+  FarmPluginOptionsError,
+  type FarmPluginFactory,
+  type FarmPluginOptionsIssue,
+  type FarmPluginOptionsSchema,
+  type InferPluginOptionsInput,
+  type InferPluginOptionsOutput,
+} from "./plugin-options";
 export {
   defineConfig,
   defineFarmConfig,
@@ -126,6 +176,7 @@ export * from "./docs";
 export * from "./markdown";
 export * from "./app-markdown";
 export * from "./observability";
+export { classifyFarmAgent, type FarmAgentIdentity } from "./agent-identity";
 export * from "./devtools-config";
 export type { FarmDevtoolsSnapshot, FarmDevtoolsDiagnostic, FarmDevtoolsRuntime } from "./devtools";
 export * from "./dev-indicators";
@@ -167,6 +218,27 @@ export type {
   FarmAuthUserConfig,
   ResolvedFarmAuthConfig,
 } from "./auth-config";
+export type {
+  FarmMCPAuthorization,
+  FarmMCPEndpoint,
+  FarmMCPServerFunction,
+  FarmMCPToolDefinition,
+  FarmMCPStandaloneTool,
+  FarmMCPExecuteContext,
+  FarmMCPTool,
+  FarmMCPServer,
+  FarmMCPAuthorizeContext,
+  FarmMCPConfig,
+  FarmMCPOAuthConfig,
+  FarmMCPPrompt,
+  FarmMCPPromptMessage,
+  FarmMCPResource,
+  FarmMCPResourceContent,
+  FarmMCPResourceContext,
+  FarmMCPResourceListing,
+  FarmMCPUserConfig,
+  ResolvedFarmMCPConfig,
+} from "./mcp-config";
 export * from "./deferred";
 export * from "./after";
 export {
@@ -196,6 +268,8 @@ export type {
   FarmPluginStateContext,
   FarmPluginRuntimeBaseEvent,
   FarmPluginRuntimeContextEvent,
+  FarmPluginRuntimeEndpoint,
+  FarmPluginRuntimeEndpointEvent,
   FarmPluginRuntimeBeforeEvent,
   FarmPluginRuntimeAfterEvent,
   FarmPluginRuntimeErrorEvent,

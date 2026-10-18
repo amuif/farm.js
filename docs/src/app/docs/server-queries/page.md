@@ -128,8 +128,16 @@ timestamp is newer than the invalidation or its canonical key is learned only on
 The original caller still receives its result. Enabled mounted consumers refresh after the old
 work settles; an imperative read with `swr: false` waits for fresh data on the next call.
 Unrelated invalidations and invalidations before a read starts do not invalidate that read.
+Broadcast invalidations for keys a client cache does not own are retained only by active
+request-lifetime trackers, not indefinitely by every cache. Cached, subscribed, and pending keys
+still receive invalidations, including keys reached through provisional aliases.
 
 Use `fetchServerQuery(productQuery, input)` for an imperative browser read that should participate in deduplication and SWR. Calling the generated `productQuery(input)` reference directly still returns plain typed data, but the fetch helper supplies the browser cache lifecycle.
+
+With SWR enabled (the default), every imperative reader receives the existing stale value
+immediately while one shared refresh runs, including readers arriving after that refresh starts.
+An initial read without cached data still waits. Set `swr: false` to wait for the in-flight
+result, or `force: true` to start and await a new request instead of joining it.
 
 ## Invalidate after a mutation
 
@@ -219,6 +227,16 @@ const result = await api.products.get(
 
 The route, API caller, and server query now read and invalidate the same canonical key. Default API keys remain isolated by request origin; only an explicit structured key opts into cross-feature sharing.
 
+When overlapping server-query requests use different function references but resolve to the same
+canonical key, a late older response cannot replace a newer request's cached result. Each caller
+still receives its own result. Once both references' keys are known, newer pending and error states
+are protected too. A key cannot be associated with a previously unknown reference until a Farm
+transport returns its cache metadata; plain-data transports remain scoped to the function and input.
+
+Expired shared-cache entries keep their aliases and invalidation marks while a related subscription
+or request is active. Releasing an owner rechecks that key without scanning unrelated pending
+entries. Retargeting an alias also releases the previous target's metadata once it has no owner.
+
 ### Share optimistic updates
 
 API mutations can optimistically update data watched by `useServerQuery` when both features use the
@@ -260,6 +278,10 @@ This works through the shared Farm client cache; `useServerQuery` does not expos
 optimistic option. Keep the API response and server-query result contracts identical whenever they
 share a key.
 
+Server-function mutations reach the same shared cache through `useMutation`: pass
+key-targeted `request.optimistic` updates and `request.invalidate` targets, as described in
+[Track mutations in React](/docs/api-client#track-mutations-in-react).
+
 ## Cache lifetime
 
 | `staleTime`                         | Server behavior                                                     | Browser behavior                                                   |
@@ -269,6 +291,11 @@ share a key.
 | `false`                             | Store until explicit invalidation                                   | Keep fresh until explicit invalidation                             |
 
 Numbers are milliseconds. Duration strings support `ms`, `s`, `m`, and `h`. Failed handlers and invalid output are never cached.
+
+When the app configures a [client cache adapter](/docs/api-client#persist-the-client-cache),
+declare `persist: true` on a query to allow its results to be stored on the device and rendered
+stale-but-visible on the next cold start. Nothing persists without the flag; treat it as part of
+the query's security review, since persisted results outlive the session.
 
 ## Middleware and cancellation
 

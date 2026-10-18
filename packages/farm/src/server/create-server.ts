@@ -1,9 +1,11 @@
 import { createServer as createViteServer, type ViteDevServer } from "vite";
 import type { FarmConfig } from "../types";
-import { farmI18nClientBridgePlugin, farmPlugin } from "../vite";
+import { farmI18nClientBridgePlugin, farmPlugin, farmServerOnlyEntriesPlugin } from "../vite";
 import { logger } from "../utils";
+import { readSchemaTables } from "../schema-owner";
 import { loadConfig, resolveConfig } from "../config";
 import { PluginManager } from "../plugin";
+import { createFarmDevLifecyclePlugin } from "./dev-lifecycle";
 import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import fs from "fs";
 import path from "path";
@@ -14,6 +16,7 @@ import {
   createCompressionPlugin,
   createLoggerPlugin,
 } from "../plugins";
+import { createFarmInfraAnalyticsPlugin } from "../plugins/infra-analytics";
 import {
   createFarmClientOptimizeDepsConfig,
   createFarmClientOptimizeDepsEntries,
@@ -23,6 +26,9 @@ import { FARM_VERSION } from "../version";
 import { getFarmAppDirectories } from "../layers";
 import { createCliColors } from "../cli-colors";
 import { createFarmThemeCssPlugin } from "../theme/vite";
+import { loadTailwindVitePlugin } from "../build/tailwind";
+import { loadFarmDocsEngine } from "../docs/engine";
+import { resolveFarmImageProviderForRuntime } from "../image-runtime";
 import {
   createFarmInstrumentationLifecycle,
   loadFarmInstrumentation,
@@ -119,9 +125,18 @@ function createDevDependencyStubsPlugin() {
 }
 
 /**
+ * A --port flag outranks the app's config. It goes into the config, not only
+ * listen(), because Vite rebuilds the server from config when it restarts (an
+ * edited .env does that) and would otherwise move to the configured port.
+ */
+function withPortFlag(vite: FarmConfig["vite"], port: number | undefined): FarmConfig["vite"] {
+  return port === undefined ? vite : { ...vite, server: { ...vite?.server, port } };
+}
+
+/**
  * Create a Vite development server with Farm.js integration
  */
-export async function createServer(config: FarmConfig = {}) {
+export async function createServer(config: FarmConfig = {}, options: { port?: number } = {}) {
   let pluginManager: PluginManager | null = null;
   let instrumentation: FarmInstrumentationLifecycle | null = null;
   try {
@@ -185,6 +200,11 @@ export async function createServer(config: FarmConfig = {}) {
       }
     }
 
+    // Only an app whose environment links it to a Farm Infra project gets this plugin.
+    const infraAnalytics =
+      (resolvedConfig || config).analytics !== false ? createFarmInfraAnalyticsPlugin() : null;
+    if (infraAnalytics) pluginManager.addPlugin(infraAnalytics);
+
     if (mode === "development") {
       const hasLogger = pluginManager.getPlugins().some((p) => p.name === "farm:logger");
       if (!hasLogger) {
@@ -199,6 +219,13 @@ export async function createServer(config: FarmConfig = {}) {
     finalConfig = await pluginManager.runHookSerial("config", finalConfig);
     finalConfig.renderer = resolveFarmRenderer(finalConfig.renderer);
     const projectRoot = finalConfig.root || process.cwd();
+    finalConfig.images = resolveFarmImageProviderForRuntime(finalConfig.images, {
+      root: projectRoot,
+      dev: true,
+    });
+    if (finalConfig.docs && (finalConfig.docs === true || finalConfig.docs.enabled !== false)) {
+      await loadFarmDocsEngine();
+    }
     const rendererVitePlugins = await loadFarmRendererVitePlugins(
       finalConfig.renderer,
       projectRoot,
@@ -210,14 +237,7 @@ export async function createServer(config: FarmConfig = {}) {
     if (shouldUseProjectPostcss) {
       logger.info("📦 Using project PostCSS/Tailwind configuration");
     } else {
-      try {
-        const tailwindcss = (await import("@tailwindcss/vite")).default;
-        tailwindVitePlugin = tailwindcss();
-      } catch (error) {
-        logger.warn(
-          `Tailwind plugin auto-enable failed; continuing without it: ${(error as Error).message}`,
-        );
-      }
+      tailwindVitePlugin = await loadTailwindVitePlugin();
     }
 
     const server = await createViteServer(
@@ -231,9 +251,11 @@ export async function createServer(config: FarmConfig = {}) {
             ...(rendererVitePlugins as any[]),
             createDevDependencyStubsPlugin(),
             farmI18nClientBridgePlugin(),
+            farmServerOnlyEntriesPlugin(),
             farmPlugin(finalConfig, pluginManager),
             farmEnvironmentFunctionsPlugin(),
             createBrandingPlugin(),
+            createFarmDevLifecyclePlugin(pluginManager, instrumentation),
           ],
           server: {
             middlewareMode: false,
@@ -261,7 +283,6 @@ export async function createServer(config: FarmConfig = {}) {
               "rollup",
               "fsevents",
               "nf3",
-              "better-call",
               "zod",
               "supports-color",
               "node-fetch",
@@ -286,26 +307,13 @@ export async function createServer(config: FarmConfig = {}) {
             hasWarned: false,
           },
         },
-        finalConfig.vite,
+        withPortFlag(finalConfig.vite, options.port),
       ),
     );
 
     (server as any).__farmPluginManager = pluginManager;
+    (server as any).__farmResolvedConfig = resolvedConfig;
     (server as any).__farmInstrumentation = instrumentation;
-    const closeViteServer = server.close.bind(server);
-    server.close = async () => {
-      try {
-        await closeViteServer();
-      } finally {
-        await instrumentation?.shutdown();
-      }
-    };
-    server.httpServer?.once("close", () => {
-      instrumentation?.shutdown().catch((error) => {
-        logger.warn(`Instrumentation shutdown failed: ${error}`);
-      });
-    });
-
     // Update plugin manager with vite server
     pluginManager.updateContext({ config: finalConfig, viteServer: server });
     await pluginManager.setupPlugins();
@@ -332,18 +340,52 @@ export async function createServer(config: FarmConfig = {}) {
 }
 
 /**
+ * Say, once the server is up, which plugins have table changes migrate would
+ * apply. Not awaited, and loaded only when some plugin or integration owns
+ * tables, so it costs nothing otherwise and can never delay startup.
+ */
+/** @internal Exported for tests. True when the notice was started. */
+export function noticeSchemaChangesInBackground(
+  config: Awaited<ReturnType<typeof resolveConfig>> | null | undefined,
+): boolean {
+  if (!config) return false;
+  const candidates = [
+    ...(config.plugins ?? []),
+    ...Object.values((config.integrations ?? {}) as Record<string, unknown>),
+  ];
+  if (!candidates.some((candidate) => readSchemaTables(candidate))) return false;
+  void import("../schema-dev-notice")
+    .then(({ noticePendingSchemaChanges }) => noticePendingSchemaChanges(config as never))
+    .catch(() => {});
+  return true;
+}
+
+/**
  * Start the development server
  */
 export async function startDevServer(config: FarmConfig = {}, port?: number) {
-  const server = await createServer(config);
-  await server.listen(port);
-  const pluginManager = (server as any).__farmPluginManager as PluginManager | undefined;
-  if (pluginManager) {
-    await pluginManager.startRuntime();
-    server.httpServer?.once("close", () => {
-      pluginManager.closeRuntime("dev-server-closed").catch(() => {});
-    });
+  const server = await createServer(config, { port });
+
+  try {
+    await server.listen(port);
+    const pluginManager = (server as any).__farmPluginManager as PluginManager | undefined;
+    // Shutdown is owned by the close() installed in createServer, which awaits
+    // the plugin runtime and reports failures rather than swallowing them.
+    await pluginManager?.startRuntime();
+    noticeSchemaChangesInBackground((server as any).__farmResolvedConfig);
+  } catch (error) {
+    // createServer already opened watchers, instrumentation, and plugin
+    // resources. A failure here — an occupied port is the common one — would
+    // otherwise leave all of them running with no handle to close them, since
+    // the caller never receives the server.
+    try {
+      await server.close();
+    } catch (closeError) {
+      logger.error(`Failed to clean up after a failed dev server start: ${closeError}`);
+    }
+    throw error;
   }
+
   // Branding is handled by farmBrandingPlugin in vite.ts
   return server;
 }

@@ -1,28 +1,15 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
-import {
-  buildDocsAgentDiscoverySpec,
-  buildDocsSitemapManifest,
-  isDocsAgentDiscoveryRequest,
-  isDocsAgentsRequest,
-  isDocsSkillRequest,
-  renderDocsAgentsDocument,
-  renderDocsLlmsTxt,
-  renderDocsMarkdownDocument,
-  renderDocsRobotsTxt,
-  renderDocsSitemapMarkdown,
-  renderDocsSitemapXml,
-  renderDocsSkillDocument,
-  resolveDocsLlmsTxtFormat,
-  resolveDocsRobotsRequest,
-  resolveDocsSitemapRequest,
-  type DocsLlmsTxtPageInput,
-  type DocsMarkdownPage,
-  type DocsSitemapPageInput,
+import type {
+  DocsLlmsTxtPageInput,
+  DocsMarkdownPage,
+  DocsSitemapPageInput,
 } from "@farming-labs/docs";
+import { docsEngine, loadFarmDocsEngine } from "./engine";
 import { marked, Renderer } from "marked";
 import { highlight } from "sugar-high";
 import { FARM_NAVIGATION_HEAD_SELECTOR } from "../client/document-head";
+import { farmAcceptQuality } from "../markdown";
 import type { FarmLayoutFonts } from "../font";
 import { matchesFarmIfNoneMatch } from "../server-http";
 import {
@@ -624,8 +611,8 @@ function renderBelowTitleMeta(page: LoadedFarmDocsPage, docs: FarmDocsResolvedCo
 function renderMarkdownHtmlWithTitleMeta(
   page: LoadedFarmDocsPage,
   docs: FarmDocsResolvedConfig,
+  html: string,
 ): string {
-  const html = renderMarkdownHtml(page.body);
   const meta = renderBelowTitleMeta(page, docs);
   if (!meta) return html;
 
@@ -675,6 +662,7 @@ function getDocsDiscoveryOptions(docs: FarmDocsResolvedConfig, request: Request)
         getNavigation: false,
         getCodeExamples: false,
         getConfigSchema: false,
+        getContext: false,
       },
     },
     feedback: undefined,
@@ -698,7 +686,7 @@ function createFarmDocsPublicResponse(
   let loadedPages: LoadedFarmDocsPage[] | undefined;
   const getPages = () => (loadedPages ??= getLoadedDocsPages(contentDir, docs));
   const sitemapManifest = () =>
-    buildDocsSitemapManifest({
+    docsEngine().buildDocsSitemapManifest({
       pages: getPages().map(toDocsSitemapPage),
       entry: docs.entry,
       siteTitle: getDocsTitle(docs),
@@ -709,9 +697,9 @@ function createFarmDocsPublicResponse(
     "Cache-Control": "public, max-age=60",
   });
 
-  const llmsFormat = resolveDocsLlmsTxtFormat(url);
+  const llmsFormat = docsEngine().resolveDocsLlmsTxtFormat(url);
   if (llmsFormat) {
-    const generated = renderDocsLlmsTxt(
+    const generated = docsEngine().renderDocsLlmsTxt(
       getPages().map(toDocsLlmsPage),
       getDocsLlmsOptions(docs, request),
     );
@@ -721,10 +709,10 @@ function createFarmDocsPublicResponse(
     });
   }
 
-  const sitemapFormat = resolveDocsSitemapRequest(url, docs.config.sitemap ?? true);
+  const sitemapFormat = docsEngine().resolveDocsSitemapRequest(url, docs.config.sitemap ?? true);
   if (sitemapFormat === "xml") {
     return new Response(
-      renderDocsSitemapXml(sitemapManifest(), {
+      docsEngine().renderDocsSitemapXml(sitemapManifest(), {
         baseUrl: url.origin,
         includeLastmod: true,
       }),
@@ -736,7 +724,7 @@ function createFarmDocsPublicResponse(
   }
   if (sitemapFormat === "markdown") {
     return new Response(
-      renderDocsSitemapMarkdown(sitemapManifest(), {
+      docsEngine().renderDocsSitemapMarkdown(sitemapManifest(), {
         includeDescriptions: true,
       }),
       {
@@ -746,9 +734,9 @@ function createFarmDocsPublicResponse(
     );
   }
 
-  if (resolveDocsRobotsRequest(url, docs.config.robots ?? true)) {
+  if (docsEngine().resolveDocsRobotsRequest(url, docs.config.robots ?? true)) {
     return new Response(
-      renderDocsRobotsTxt({
+      docsEngine().renderDocsRobotsTxt({
         entry: docs.entry,
         sitemap: docs.config.sitemap ?? true,
         robots: docs.config.robots ?? true,
@@ -761,8 +749,8 @@ function createFarmDocsPublicResponse(
     );
   }
 
-  if (isDocsAgentDiscoveryRequest(url)) {
-    const spec = buildDocsAgentDiscoverySpec(getDocsDiscoveryOptions(docs, request));
+  if (docsEngine().isDocsAgentDiscoveryRequest(url)) {
+    const spec = docsEngine().buildDocsAgentDiscoverySpec(getDocsDiscoveryOptions(docs, request));
     const title = getDocsTitle(docs);
     return new Response(
       JSON.stringify({
@@ -782,9 +770,9 @@ function createFarmDocsPublicResponse(
     );
   }
 
-  if (isDocsAgentsRequest(url)) {
+  if (docsEngine().isDocsAgentsRequest(url)) {
     return new Response(
-      `${renderDocsAgentsDocument(getDocsDiscoveryOptions(docs, request)).trim()}\n`,
+      `${docsEngine().renderDocsAgentsDocument(getDocsDiscoveryOptions(docs, request)).trim()}\n`,
       {
         status: 200,
         headers: textHeaders("text/markdown; charset=utf-8"),
@@ -792,9 +780,9 @@ function createFarmDocsPublicResponse(
     );
   }
 
-  if (isDocsSkillRequest(url)) {
+  if (docsEngine().isDocsSkillRequest(url)) {
     return new Response(
-      `${renderDocsSkillDocument(getDocsDiscoveryOptions(docs, request)).trim()}\n`,
+      `${docsEngine().renderDocsSkillDocument(getDocsDiscoveryOptions(docs, request)).trim()}\n`,
       {
         status: 200,
         headers: textHeaders("text/markdown; charset=utf-8"),
@@ -824,11 +812,21 @@ function escapeHtml(value: string): string {
 
 function shouldReturnMarkdown(request: Request): boolean {
   const url = new URL(request.url);
-  return (
-    url.pathname.endsWith(".md") ||
-    request.headers.get("accept")?.includes("text/markdown") === true ||
-    request.headers.get("accept")?.includes("text/plain") === true
+  if (url.pathname.endsWith(".md")) return true;
+
+  const accept = request.headers.get("accept");
+  // Substring matching cannot see `q=0`, so `text/markdown;q=0` (an explicit
+  // refusal) used to be served Markdown anyway. Only an exact entry counts:
+  // `*/*` means "anything", not "Markdown over HTML".
+  const markdown = Math.max(
+    farmAcceptQuality(accept, "text/markdown"),
+    farmAcceptQuality(accept, "text/plain"),
   );
+  if (markdown <= 0) return false;
+
+  // A client listing text/plain as a low-quality fallback behind text/html
+  // wants the HTML page; serve Markdown only when it is at least as welcome.
+  return markdown >= farmAcceptQuality(accept, "text/html", { wildcards: true });
 }
 
 function escapeAttribute(value: string): string {
@@ -1052,15 +1050,24 @@ function highlightCodeBlock(code: string): string {
 }
 
 function renderCodeCopyButton(className = "code-copy"): string {
-  return `<button class="${className}" type="button" data-copied="false" aria-label="Copy code" title="Copy code" onclick="navigator.clipboard?.writeText(this.closest('figure').querySelector('code').innerText); this.dataset.copied='true'; this.setAttribute('aria-label','Copied'); this.title='Copied'; clearTimeout(this._copyTimer); this._copyTimer=setTimeout(() => { this.dataset.copied='false'; this.setAttribute('aria-label','Copy code'); this.title='Copy code'; }, 4500);"><svg class="code-copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="code-copy-check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg></button>`;
+  return `<button class="${className}" type="button" data-code-copy data-copied="false" aria-label="Copy code" title="Copy code"><svg class="code-copy-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="code-copy-check" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg></button>`;
 }
 
-function renderMarkdownHtml(body: string): string {
+function renderMarkdownDocument(
+  body: string,
+  depth: number,
+): { html: string; tocItems: TocItem[] } {
   const slug = createSlugger();
   const renderer = new Renderer();
+  const maxLevel = Math.max(2, Math.min(depth, 6));
+  const tocItems: TocItem[] = [];
 
   renderer.heading = (text, level, raw) => {
-    const id = slug(raw || stripHtml(text));
+    const title = raw || stripHtml(text);
+    const id = slug(title);
+    if (level >= 2 && level <= maxLevel) {
+      tocItems.push({ id, title, level });
+    }
     return `<h${level} id="${escapeAttribute(id)}"><a class="heading-anchor" href="#${escapeAttribute(id)}">${text}</a></h${level}>\n`;
   };
 
@@ -1106,29 +1113,13 @@ function renderMarkdownHtml(body: string): string {
     renderer,
   }) as string;
 
-  return html.trim();
+  return { html: html.trim(), tocItems };
 }
 
 interface TocItem {
   id: string;
   title: string;
   level: number;
-}
-
-function extractTocItems(body: string, depth: number): TocItem[] {
-  const slug = createSlugger();
-  const maxLevel = Math.max(2, Math.min(depth, 6));
-
-  return body
-    .split(/\r?\n/)
-    .map((line) => line.match(/^(#{2,6})\s+(.+)$/))
-    .filter((match): match is RegExpMatchArray => Boolean(match))
-    .map((match) => ({
-      id: slug(match[2].trim()),
-      title: match[2].trim(),
-      level: match[1].length,
-    }))
-    .filter((item) => item.level <= maxLevel);
 }
 
 function getThemeUI(docs: FarmDocsResolvedConfig): Record<string, any> {
@@ -1626,7 +1617,7 @@ function renderDocsRuntimeScript(docs: FarmDocsResolvedConfig): string {
 }
 
 function renderDocsPageActionsRuntimeScript(): string {
-  return `<script>(()=>{if(window.__farmDocsPageActionsRuntime)return;window.__farmDocsPageActionsRuntime=true;const readArticleText=()=>{const article=document.getElementById("nd-page");if(!article)return"";const clone=article.cloneNode(true);if(!(clone instanceof HTMLElement))return article.innerText||"";clone.querySelectorAll("[data-page-actions],.fd-page-footer,.fd-page-nav").forEach((node)=>node.remove());return clone.innerText||""};const withTitle=(content,format,includeTitle)=>{if(!includeTitle)return content;const title=document.querySelector("#nd-page h1")?.textContent?.trim()||document.title.trim();if(!title)return content;const trimmed=content.trimStart();if(trimmed.startsWith(title)||trimmed.startsWith("# "+title))return content;return format==="markdown"?"# "+title+"\\n\\n"+content:title+"\\n\\n"+content};const writeClipboard=async(text)=>{if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(text);return}catch{}}const textarea=document.createElement("textarea");textarea.value=text;textarea.setAttribute("readonly","");textarea.style.position="fixed";textarea.style.opacity="0";textarea.style.pointerEvents="none";document.body.appendChild(textarea);textarea.select();document.execCommand("copy");textarea.remove()};const markCopied=(button)=>{const label=button.querySelector("[data-page-action-label]");button.dataset.copied="true";button.setAttribute("aria-label",button.dataset.copiedLabel||"Copied!");button.title=button.dataset.copiedLabel||"Copied!";if(label)label.textContent=button.dataset.copiedLabel||"Copied!";const previous=Number(button.dataset.copyTimeout||0);if(previous)clearTimeout(previous);button.dataset.copyTimeout=String(setTimeout(()=>{button.dataset.copied="false";button.setAttribute("aria-label",button.dataset.copyLabel||"Copy page");button.title=button.dataset.copyLabel||"Copy page";if(label)label.textContent=button.dataset.copyLabel||"Copy page";button.dataset.copyTimeout="0"},4500))};document.addEventListener("click",async(event)=>{const target=event.target instanceof Element?event.target.closest('[data-page-action="copy-markdown"]'):null;if(!(target instanceof HTMLButtonElement))return;event.preventDefault();const format=target.dataset.copyMarkdownFormat==="text"?"text":"markdown";const includeTitle=target.dataset.copyMarkdownIncludeTitle==="true";let content="";target.disabled=true;try{if(format==="markdown"&&target.dataset.markdownUrl){try{const response=await fetch(target.dataset.markdownUrl,{headers:{Accept:"text/markdown"}});if(response.ok)content=await response.text()}catch{}}if(!content)content=readArticleText();content=withTitle(content,format,includeTitle);if(content.trim()){await writeClipboard(content);markCopied(target)}}finally{target.disabled=false}})})();</script>`;
+  return `<script>(()=>{if(window.__farmDocsPageActionsRuntime)return;window.__farmDocsPageActionsRuntime=true;const readArticleText=()=>{const article=document.getElementById("nd-page");if(!article)return"";const clone=article.cloneNode(true);if(!(clone instanceof HTMLElement))return article.innerText||"";clone.querySelectorAll("[data-page-actions],.fd-page-footer,.fd-page-nav").forEach((node)=>node.remove());return clone.innerText||""};const withTitle=(content,format,includeTitle)=>{if(!includeTitle)return content;const title=document.querySelector("#nd-page h1")?.textContent?.trim()||document.title.trim();if(!title)return content;const trimmed=content.trimStart();if(trimmed.startsWith(title)||trimmed.startsWith("# "+title))return content;return format==="markdown"?"# "+title+"\\n\\n"+content:title+"\\n\\n"+content};const writeClipboard=async(text)=>{if(navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(text);return}catch{}}const textarea=document.createElement("textarea");textarea.value=text;textarea.setAttribute("readonly","");textarea.style.position="fixed";textarea.style.opacity="0";textarea.style.pointerEvents="none";document.body.appendChild(textarea);textarea.select();document.execCommand("copy");textarea.remove()};const markCopied=(button)=>{const label=button.querySelector("[data-page-action-label]");button.dataset.copied="true";button.setAttribute("aria-label",button.dataset.copiedLabel||"Copied!");button.title=button.dataset.copiedLabel||"Copied!";if(label)label.textContent=button.dataset.copiedLabel||"Copied!";const previous=Number(button.dataset.copyTimeout||0);if(previous)clearTimeout(previous);button.dataset.copyTimeout=String(setTimeout(()=>{button.dataset.copied="false";button.setAttribute("aria-label",button.dataset.copyLabel||"Copy page");button.title=button.dataset.copyLabel||"Copy page";if(label)label.textContent=button.dataset.copyLabel||"Copy page";button.dataset.copyTimeout="0"},4500))};const markCodeCopied=(button)=>{button.dataset.copied="true";button.setAttribute("aria-label","Copied");button.title="Copied";const previous=Number(button.dataset.copyTimeout||0);if(previous)clearTimeout(previous);button.dataset.copyTimeout=String(setTimeout(()=>{button.dataset.copied="false";button.setAttribute("aria-label","Copy code");button.title="Copy code";button.dataset.copyTimeout="0"},4500))};document.addEventListener("click",async(event)=>{const source=event.target instanceof Element?event.target:null;const codeButton=source?.closest("[data-code-copy]");if(codeButton instanceof HTMLButtonElement){event.preventDefault();const code=codeButton.closest("figure")?.querySelector("code");if(!(code instanceof HTMLElement))return;const content=code.innerText||code.textContent||"";if(!content)return;await writeClipboard(content);markCodeCopied(codeButton);return}const target=source?.closest('[data-page-action="copy-markdown"]');if(!(target instanceof HTMLButtonElement))return;event.preventDefault();const format=target.dataset.copyMarkdownFormat==="text"?"text":"markdown";const includeTitle=target.dataset.copyMarkdownIncludeTitle==="true";let content="";target.disabled=true;try{if(format==="markdown"&&target.dataset.markdownUrl){try{const response=await fetch(target.dataset.markdownUrl,{headers:{Accept:"text/markdown"}});if(response.ok)content=await response.text()}catch{}}if(!content)content=readArticleText();content=withTitle(content,format,includeTitle);if(content.trim()){await writeClipboard(content);markCopied(target)}}finally{target.disabled=false}})})();</script>`;
 }
 
 function renderDocsHashRuntimeScript(): string {
@@ -1687,7 +1678,12 @@ function renderPixelDocsHtml(
       ? String((docs.config.nav as { title?: unknown }).title || "Docs")
       : "Docs";
   const description = page.description || docs.config.metadata?.description || "";
-  const tocItems = extractTocItems(page.body, getThemeTocDepth(docs));
+  // Rendering and TOC extraction share the same preprocessed Marked pass. This
+  // guarantees MDX lines removed before rendering, Setext/CommonMark edge
+  // cases, and duplicate-slug counters cannot diverge between the article and
+  // its navigation.
+  const renderedMarkdown = renderMarkdownDocument(page.body, getThemeTocDepth(docs));
+  const tocItems = renderedMarkdown.tocItems;
   const themeName = getThemeName(docs);
   const searchEnabled = isFarmDocsSearchEnabled(docs);
   const socialMetadata = isFarmDocsSocialImageEnabled(page, docs)
@@ -1737,7 +1733,7 @@ function renderPixelDocsHtml(
       <div class="fd-page">
       <article id="nd-page" class="prose fd-page-article fd-page-body fd-docs-content">
         ${renderPixelBreadcrumb(page, docs)}
-${renderMarkdownHtmlWithTitleMeta(page, docs)}
+${renderMarkdownHtmlWithTitleMeta(page, docs, renderedMarkdown.html)}
         ${renderPixelPageFooter(page, docs)}
         ${renderPixelPageNav(pages, page.href, docs)}
       </article>
@@ -1769,6 +1765,7 @@ export function createFarmDocsHandler(
 
   return async function handleFarmDocsRequest(request: Request): Promise<Response | null> {
     if (!docs?.enabled || (request.method !== "GET" && request.method !== "HEAD")) return null;
+    await loadFarmDocsEngine();
 
     const contentDir = resolveFarmDocsContentDir(docs, options);
     const requestUrl = new URL(request.url);
@@ -1812,12 +1809,15 @@ export function createFarmDocsHandler(
     const page = loadPage(contentDir, docs, request);
     if (!page) return null;
 
+    // A docs page URL serves Markdown or HTML depending on Accept, so shared caches
+    // must key it on Accept. An explicit .md URL always returns Markdown.
+    const negotiatesAccept = !requestUrl.pathname.endsWith(".md");
     if (shouldReturnMarkdown(request)) {
       const origin = new URL(request.url).origin;
       return omitFarmDocsHeadBody(
         request,
         new Response(
-          renderDocsMarkdownDocument(toFarmDocsMarkdownPage(page), {
+          docsEngine().renderDocsMarkdownDocument(toFarmDocsMarkdownPage(page), {
             origin,
             llms: docs.config.llmsTxt ?? true,
             sitemap: docs.config.sitemap,
@@ -1827,6 +1827,7 @@ export function createFarmDocsHandler(
             headers: {
               "Content-Type": "text/markdown; charset=utf-8",
               "Cache-Control": "public, max-age=60",
+              ...(negotiatesAccept ? { Vary: "Accept" } : {}),
             },
           },
         ),
@@ -1860,6 +1861,7 @@ export function createFarmDocsHandler(
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+            Vary: "Accept",
             ...(fontPreloadHeader ? { Link: fontPreloadHeader } : {}),
           },
         },

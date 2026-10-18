@@ -2,6 +2,7 @@ const FARM_SVELTE_ELEMENT = Symbol.for("farm.svelte.element");
 const FARM_SVELTE_FRAGMENT = Symbol.for("farm.svelte.fragment");
 const FARM_SVELTE_SUSPENSE = Symbol.for("farm.svelte.suspense");
 const FARM_SVELTE_ERROR_BOUNDARY = Symbol.for("farm.svelte.error-boundary");
+const FARM_SVELTE_FUNCTION_COMPONENT = Symbol.for("farm.svelte.function-component");
 
 export interface FarmSvelteElement {
   readonly [FARM_SVELTE_ELEMENT]: true;
@@ -39,11 +40,89 @@ export function isValidElement(value: unknown): boolean {
   return isFarmSvelteElement(value) || Array.isArray(value);
 }
 
+/**
+ * Marks a plain function component: one that takes props and returns a Farm
+ * element tree, rather than a component the Svelte compiler produced.
+ *
+ * Svelte 5 components are themselves functions, so the two shapes are
+ * indistinguishable at runtime. Farm marks the components it wires up from
+ * modules whose extension is not one the renderer declares (a .tsx provider
+ * under the Svelte renderer, say), and compat-root calls those directly
+ * instead of instantiating them as Svelte components.
+ *
+ * A frozen component stays unmarked and keeps the previous behavior rather
+ * than failing the render.
+ */
+export function markFunctionComponent<T>(component: T): T {
+  if (typeof component !== "function") return component;
+  try {
+    Object.defineProperty(component, FARM_SVELTE_FUNCTION_COMPONENT, {
+      value: true,
+      configurable: true,
+    });
+  } catch {
+    // Non-configurable or frozen: fall through unmarked.
+  }
+  return component;
+}
+
+export function isFarmFunctionComponent(
+  value: unknown,
+): value is (props: Record<string, unknown>) => unknown {
+  return (
+    typeof value === "function" &&
+    (value as { [FARM_SVELTE_FUNCTION_COMPONENT]?: boolean })[FARM_SVELTE_FUNCTION_COMPONENT] ===
+      true
+  );
+}
+
+/**
+ * Props for a marked function component. These stay in the element's own
+ * (React-shaped) form rather than going through normalizeFarmSvelteProps,
+ * which translates props for a DOM element or a Svelte component; a function
+ * component expects className/onClick/children as written.
+ */
+export function getFarmFunctionComponentProps(element: FarmSvelteElement): Record<string, unknown> {
+  const props: Record<string, unknown> = { ...element.props };
+  const children = getFarmSvelteChildren(element);
+  if (children.length === 1) props.children = children[0];
+  else if (children.length > 1) props.children = children;
+  return props;
+}
+
+export function renderFarmFunctionComponent(
+  component: (props: Record<string, unknown>) => unknown,
+  element: FarmSvelteElement,
+): unknown {
+  const rendered = component(getFarmFunctionComponentProps(element));
+  if (
+    rendered !== null &&
+    (typeof rendered === "object" || typeof rendered === "function") &&
+    typeof (rendered as { then?: unknown }).then === "function"
+  ) {
+    throw new TypeError(
+      "FARMJS Svelte renderer does not support async function components. Resolve async data before rendering the component.",
+    );
+  }
+  return rendered;
+}
+
 export function getFarmSvelteChildren(element: FarmSvelteElement): unknown[] {
   if (element.children.length > 0) return [...element.children];
   const propChildren = element.props?.children;
   if (propChildren === undefined || propChildren === null) return [];
   return Array.isArray(propChildren) ? [...propChildren] : [propChildren];
+}
+
+/**
+ * Raw HTML from a React-shaped `dangerouslySetInnerHTML`, for rendering as
+ * element content via `{@html}`. Returns undefined when the element does not
+ * set inner HTML, so the caller falls back to normal child rendering.
+ */
+export function getFarmSvelteInnerHtml(element: FarmSvelteElement): string | undefined {
+  const raw = element.props?.dangerouslySetInnerHTML as { __html?: unknown } | undefined;
+  if (!raw || typeof raw !== "object") return undefined;
+  return raw.__html == null ? "" : String(raw.__html);
 }
 
 // CSS properties whose numeric values are unitless in React's style objects.
@@ -73,6 +152,7 @@ const UNITLESS_STYLE_PROPERTIES = new Set([
   "opacity",
   "order",
   "orphans",
+  "scale",
   "stop-opacity",
   "stroke-dasharray",
   "stroke-dashoffset",
@@ -125,13 +205,29 @@ export function normalizeFarmSvelteProps(element: FarmSvelteElement): Record<str
     props.for = props.htmlFor;
     delete props.htmlFor;
   }
-  if ("dangerouslySetInnerHTML" in props) {
-    const html = props.dangerouslySetInnerHTML as { __html?: unknown } | undefined;
-    props.innerHTML = html?.__html == null ? "" : String(html.__html);
-    delete props.dangerouslySetInnerHTML;
-  }
+  // dangerouslySetInnerHTML sets element *content*, not an attribute. Spreading
+  // an `innerHTML` prop onto <svelte:element> would serialize it as a literal
+  // (escaped) `innerhtml="..."` attribute, so it is stripped here and rendered
+  // via `{@html}` in compat-root using getFarmSvelteInnerHtml().
+  delete props.dangerouslySetInnerHTML;
+  delete props.innerHTML;
   if (props.style && typeof props.style === "object" && !Array.isArray(props.style)) {
     props.style = farmStyleObjectToCss(props.style as Record<string, unknown>);
+  }
+
+  // React reconciliation metadata, never DOM attributes. Svelte would spread
+  // them onto <svelte:element> as literal key="..."/ref="[object Object]".
+  delete props.key;
+  delete props.ref;
+  // React seeds uncontrolled inputs by rendering defaultValue/defaultChecked as
+  // value/checked; a dead `defaultvalue` attribute would leak otherwise.
+  if ("defaultValue" in props && !("value" in props)) {
+    props.value = props.defaultValue;
+    delete props.defaultValue;
+  }
+  if ("defaultChecked" in props && !("checked" in props)) {
+    props.checked = props.defaultChecked;
+    delete props.defaultChecked;
   }
 
   for (const key of Object.keys(props)) {
@@ -152,6 +248,7 @@ const SvelteCompat = {
   ErrorBoundary,
   createElement,
   isValidElement,
+  markFunctionComponent,
 };
 
 export default SvelteCompat;

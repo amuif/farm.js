@@ -11,6 +11,7 @@ import { normalizeFarmRouteRuntimeConfig, type FarmRouteRuntimeConfig } from "./
 import type { ServerFn } from "./server-fn";
 import type { FarmServerRendererRuntime } from "./renderer";
 import { parseProgrammaticRoutePath as parseSharedProgrammaticRoutePath } from "./routes-shared";
+import { extractProgrammaticPageCallPathLiterals } from "./route-call-scanner";
 import type {
   FarmAppContext,
   LayoutProps,
@@ -924,7 +925,10 @@ export function createProgrammaticRouteModuleId(
   kind: "page" | "layout" | "api",
   routePath: string,
 ): string {
-  return `${filePath}?farm-route=${kind}:${encodeURIComponent(normalizeRoutePath(routePath))}`;
+  // The id ends in the route path, so a path like /feed.xml would make the
+  // production transform read the module as XML. The generated module is
+  // plain JavaScript; a trailing `lang.js` marker says so whatever the path.
+  return `${filePath}?farm-route=${kind}:${encodeURIComponent(normalizeRoutePath(routePath))}&lang.js`;
 }
 
 export function parseProgrammaticRouteModuleId(moduleId: string): {
@@ -970,7 +974,10 @@ export function parseProgrammaticRoutePath(
 
 export function createRouteModuleFromProgrammaticPage(
   route: ProgrammaticPageRoute,
-  rendererRuntime?: Pick<FarmServerRendererRuntime, "createElement" | "Suspense">,
+  rendererRuntime?: Pick<
+    FarmServerRendererRuntime,
+    "createElement" | "Suspense" | "markFunctionComponent"
+  >,
 ): RouteModule {
   const mod: RouteModule = {
     default: createProgrammaticPageComponent(route, rendererRuntime),
@@ -1044,11 +1051,10 @@ export function createLayoutModuleFromProgrammaticLayout(route: ProgrammaticLayo
 
 export function scanProgrammaticPagePaths(source: string): string[] {
   const paths = new Set<string>();
-  const callRe = /\b(?:page|createRoute)\s*\(\s*(["'`])([^"'`]+)\1/g;
 
-  for (const match of source.matchAll(callRe)) {
-    if (match[2]) {
-      paths.add(normalizeRoutePath(match[2]));
+  for (const routePath of extractProgrammaticPageCallPathLiterals(source)) {
+    if (routePath) {
+      paths.add(normalizeRoutePath(routePath));
     }
   }
 
@@ -1057,7 +1063,10 @@ export function scanProgrammaticPagePaths(source: string): string[] {
 
 function createProgrammaticPageComponent(
   route: ProgrammaticPageRoute,
-  rendererRuntime?: Pick<FarmServerRendererRuntime, "createElement" | "Suspense">,
+  rendererRuntime?: Pick<
+    FarmServerRendererRuntime,
+    "createElement" | "Suspense" | "markFunctionComponent"
+  >,
 ): ComponentType<PageProps> {
   if (
     !route.params &&
@@ -1079,6 +1088,10 @@ function createProgrammaticPageComponent(
     }
     return rendererRuntime.createElement(...args);
   };
+  // These wrappers return a Farm element tree, so a renderer that cannot tell
+  // them from its own function components needs them marked.
+  const markFunctionComponent = <T>(component: T): T =>
+    rendererRuntime?.markFunctionComponent?.(component) ?? component;
   const Component = route.component;
 
   if (route.pending) {
@@ -1104,7 +1117,9 @@ function createProgrammaticPageComponent(
         throw error;
       }
     };
-    const PageContent = FarmProgrammaticPageContent as unknown as ComponentType<PageProps>;
+    const PageContent = markFunctionComponent(
+      FarmProgrammaticPageContent,
+    ) as unknown as ComponentType<PageProps>;
     const FarmProgrammaticPage = function FarmProgrammaticPage(props: PageProps) {
       return createElement(
         rendererRuntime!.Suspense,
@@ -1115,7 +1130,7 @@ function createProgrammaticPageComponent(
       );
     };
 
-    return FarmProgrammaticPage as unknown as ComponentType<PageProps>;
+    return markFunctionComponent(FarmProgrammaticPage) as unknown as ComponentType<PageProps>;
   }
 
   const FarmProgrammaticPageContent = async function FarmProgrammaticPageContent(props: PageProps) {
@@ -1142,7 +1157,7 @@ function createProgrammaticPageComponent(
     }
   };
 
-  return FarmProgrammaticPageContent as unknown as ComponentType<PageProps>;
+  return markFunctionComponent(FarmProgrammaticPageContent) as unknown as ComponentType<PageProps>;
 }
 
 type ProgrammaticRoutePropsResource =

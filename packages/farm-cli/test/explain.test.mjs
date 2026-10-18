@@ -49,6 +49,37 @@ test("explains a dynamic page and its inherited route behavior", async () => {
   }
 });
 
+test("reports a page PPR declaration as ignored when experimental.ppr is disabled", async () => {
+  const root = await createExplainProject();
+
+  try {
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      [
+        "export default {",
+        "  deploy: { target: 'vercel', preset: 'vercel' },",
+        "  routeRules: {",
+        "    '/products/**': { swr: 30, runtime: 'node' },",
+        "    '/products/[id]': { runtime: 'edge', regions: ['iad1'] },",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    const explanation = await explainFarmRoute("/products/42", { root });
+
+    assert.equal(explanation.rendering.mode, "dynamic");
+    assert.equal(explanation.rendering.ppr, false);
+    assert.equal(
+      explanation.rendering.reason,
+      "page PPR declaration ignored (experimental.ppr disabled)",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("keeps malformed percent-encoded route parameters raw", async () => {
   const root = await createExplainProject();
 
@@ -177,6 +208,24 @@ test("does not select a route-slot page as the canonical URL", async () => {
   }
 });
 
+test("explains routes from --root even when farm.config sets another root", async () => {
+  const root = await createExplainProject();
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), "farm-cli-explain-elsewhere-"));
+
+  try {
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      `export default { root: ${JSON.stringify(elsewhere)} };\n`,
+    );
+    const explanation = await explainFarmRoute("/products/42", { root });
+    assert.equal(explanation.pattern, "/products/[id]");
+    assert.equal(explanation.filePath, "src/app/products/[id]/page.tsx");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(elsewhere, { recursive: true, force: true });
+  }
+});
+
 async function createExplainProject() {
   const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-explain-"));
   const productDirectory = path.join(root, "src/app/products/[id]");
@@ -185,6 +234,7 @@ async function createExplainProject() {
     path.join(root, "farm.config.mjs"),
     [
       "export default {",
+      "  experimental: { ppr: true },",
       "  deploy: { target: 'vercel', preset: 'vercel' },",
       "  routeRules: {",
       "    '/products/**': { swr: 30, runtime: 'node' },",
