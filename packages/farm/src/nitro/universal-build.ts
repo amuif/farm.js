@@ -9959,10 +9959,21 @@ export default async function farmNitroEventHandler(event) {
     imageRuntime === "node"
       ? stageSharpRuntime(config, root, distDir, fs, preset)
       : Promise.resolve<StagedSharpRuntime | null>(null);
-  const [nitroBuildResult, sharpRuntimeStageResult] = await Promise.allSettled([
-    nitroBuilder.build(nitroInstance),
-    sharpRuntimeStagePromise,
-  ]);
+  // Minifying the prebuilt SSR bundle does not depend on Nitro's output, so do it
+  // alongside the Nitro build; the files are written once Nitro has finished
+  // preparing the server directory.
+  const prebuiltSSRFilesPromise = canReusePrebuiltSSR
+    ? prepareSSRBundleFiles(
+        ssrBundle,
+        shouldMinify ? { keepNames: keepServerNames, target: "node18" } : null,
+      )
+    : Promise.resolve(null);
+  const [nitroBuildResult, sharpRuntimeStageResult, prebuiltSSRFilesResult] =
+    await Promise.allSettled([
+      nitroBuilder.build(nitroInstance),
+      sharpRuntimeStagePromise,
+      prebuiltSSRFilesPromise,
+    ]);
   await nitroInstance.close();
   if (nitroBuildResult.status === "rejected") {
     if (sharpRuntimeStageResult.status === "fulfilled" && sharpRuntimeStageResult.value) {
@@ -9975,6 +9986,9 @@ export default async function farmNitroEventHandler(event) {
   }
   if (sharpRuntimeStageResult.status === "rejected") {
     throw sharpRuntimeStageResult.reason;
+  }
+  if (prebuiltSSRFilesResult.status === "rejected") {
+    throw prebuiltSSRFilesResult.reason;
   }
   const stagedSharpRuntime =
     sharpRuntimeStageResult.value ??
@@ -9989,11 +10003,10 @@ export default async function farmNitroEventHandler(event) {
     }
   })();
   const copyResults = await Promise.allSettled([
-    canReusePrebuiltSSR
-      ? copyPrebuiltSSRBundle(
-          ssrBundle,
+    prebuiltSSRFilesResult.value
+      ? writeSSRBundleFiles(
+          prebuiltSSRFilesResult.value,
           path.join(outputDir, "server", FARM_SSR_OUTPUT_DIR),
-          shouldMinify ? { keepNames: keepServerNames, target: "node18" } : null,
           fs,
         )
       : Promise.resolve(),
@@ -10059,29 +10072,51 @@ export function resolveFarmNitroOutputConfig(
   };
 }
 
+interface PreparedSSRBundleFile {
+  fileName: string;
+  contents: string | Uint8Array;
+}
+
+/** Produce the prebuilt SSR bundle's output files in memory, minified when requested. */
+function prepareSSRBundleFiles(
+  ssrBundle: OutputBundle,
+  minifyOptions: FarmServerChunkMinifyOptions | null,
+): Promise<PreparedSSRBundleFile[]> {
+  return Promise.all(
+    Object.entries(ssrBundle).map(async ([fileName, output]) => ({
+      fileName,
+      contents:
+        output.type === "asset"
+          ? output.source
+          : minifyOptions
+            ? await minifyFarmServerChunk(output.code, fileName, minifyOptions)
+            : output.code,
+    })),
+  );
+}
+
+async function writeSSRBundleFiles(
+  files: readonly PreparedSSRBundleFile[],
+  targetDir: string,
+  fs: typeof import("fs/promises"),
+): Promise<void> {
+  await fs.rm(targetDir, { recursive: true, force: true });
+  await Promise.all(
+    files.map(async ({ fileName, contents }) => {
+      const targetPath = path.join(targetDir, fileName);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, contents);
+    }),
+  );
+}
+
 async function copyPrebuiltSSRBundle(
   ssrBundle: OutputBundle,
   targetDir: string,
   minifyOptions: FarmServerChunkMinifyOptions | null,
   fs: typeof import("fs/promises"),
 ): Promise<void> {
-  await fs.rm(targetDir, { recursive: true, force: true });
-  await Promise.all(
-    Object.entries(ssrBundle).map(async ([fileName, output]) => {
-      const targetPath = path.join(targetDir, fileName);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-
-      if (output.type === "asset") {
-        await fs.writeFile(targetPath, output.source);
-        return;
-      }
-
-      const code = minifyOptions
-        ? await minifyFarmServerChunk(output.code, fileName, minifyOptions)
-        : output.code;
-      await fs.writeFile(targetPath, code);
-    }),
-  );
+  await writeSSRBundleFiles(await prepareSSRBundleFiles(ssrBundle, minifyOptions), targetDir, fs);
 }
 
 async function registerPrebuiltSSRPackageImport(
