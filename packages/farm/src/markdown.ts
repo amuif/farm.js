@@ -597,7 +597,13 @@ function extractHtmlBody(html: string): string {
   );
   const bodyMatch = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
   const body = rootMatch ? rootMatch[1] : bodyMatch ? bodyMatch[1] : html;
-  return extractFirstElementContent(body, ["main", "article"]) ?? body;
+  const main = extractFirstElementContent(body, ["main"]);
+  if (main !== undefined) return main;
+  // One <article> is the page's content (a blog post inside site chrome). Several are
+  // the items of an index page, so keep the whole body: the heading, the intro, and
+  // every item rather than only the first card.
+  const articles = body.match(/<article\b/gi)?.length ?? 0;
+  return articles === 1 ? (extractFirstElementContent(body, ["article"]) ?? body) : body;
 }
 
 function extractFirstElementContent(html: string, tagNames: string[]): string | undefined {

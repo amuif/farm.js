@@ -701,3 +701,22 @@ describe("Markdown mirror indexing headers", () => {
     expect(response?.headers.get("link")).toBeNull();
   });
 });
+
+describe("htmlToMarkdown page content", () => {
+  it("keeps every item of an index page that has several articles and no main", () => {
+    const markdown = htmlToMarkdown(
+      "<html><body><h1>Blog</h1><p>Latest posts.</p><article><h2>First</h2><p>One</p></article><article><h2>Second</h2><p>Two</p></article></body></html>",
+      { includeMetadata: false },
+    );
+    expect(markdown).toBe("# Blog\n\nLatest posts.\n\n## First\n\nOne\n\n## Second\n\nTwo\n");
+  });
+
+  it("still reads a single article as the page content", () => {
+    expect(
+      htmlToMarkdown(
+        "<html><body><nav><a href='/'>Home</a></nav><article><h1>Post</h1><p>Body.</p></article></body></html>",
+        { includeMetadata: false },
+      ),
+    ).toBe("# Post\n\nBody.\n");
+  });
+});
