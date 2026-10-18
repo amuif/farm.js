@@ -9,10 +9,12 @@
 
 const CONTENTS_WRAPPER = /^<div\b[^>]*style="display\s*:\s*contents"[^>]*>/i;
 
-// React 19 hoists `<meta charSet>`, the viewport, preloads, and titles. When the layout's
-// `<html>` is not the render root, as when Farm's boundary divs wrap it, React writes them
-// ahead of that markup instead of inside the layout's `<head>`.
-const HOISTED_HEAD_ELEMENT = /^(?:<(?:meta|link|base)\b[^>]*>|<title\b[^>]*>[\s\S]*?<\/title>)/i;
+// React 19 hoists `<meta charSet>`, the viewport, preloads, titles, `<script async src>`, and
+// `<style precedence>` (written as `data-precedence`). When the layout's `<html>` is not the
+// render root, as when Farm's boundary divs wrap it, React writes them ahead of that markup
+// instead of inside the layout's `<head>`. The production build embeds this same pattern.
+export const HOISTED_HEAD_ELEMENT =
+  /^(?:<(?:meta|link|base)\b[^>]*>|<title\b[^>]*>[\s\S]*?<\/title>|<script\b[^>]*\basync\b[^>]*><\/script>|<style\b[^>]*\bdata-precedence\b[^>]*>[\s\S]*?<\/style>)/i;
 
 /** Peel Farm's leading `display:contents` wrapper divs (the stream root and any layout-boundary
  * divs) and the head elements React hoisted in front of them, so the layout's own markup is

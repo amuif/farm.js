@@ -66,6 +66,7 @@ import {
 } from "../cron";
 import { routeRulesToNitroRouteRules } from "../route-rules";
 import { getFarmAppDirectories } from "../layers";
+import { HOISTED_HEAD_ELEMENT } from "../server/full-document";
 import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import {
   createFarmDocsLastModifiedManifest,
@@ -6562,12 +6563,13 @@ function stripFarmDocumentWrappers(markup) {
 }
 
 // Farm's display:contents wrappers, and the head elements React 19 hoists in front of them
-// (charset, viewport, preloads, titles) when the layout's <html> is not the render root.
+// (charset, viewport, preloads, titles, async scripts, precedence styles) when the layout's
+// <html> is not the render root. The hoistable pattern is shared with the dev renderer.
 function peelFarmDocumentPrefix(markup) {
   let inner = markup.replace(/^\\s+/, "");
   let hoisted = "";
   const wrapper = /^<div\\b[^>]*style=["']display\\s*:\\s*contents["'][^>]*>/i;
-  const hoistable = /^(?:<(?:meta|link|base)\\b[^>]*>|<title\\b[^>]*>[\\s\\S]*?<\\/title>)/i;
+  const hoistable = /${HOISTED_HEAD_ELEMENT.source}/i;
   let match;
   while ((match = wrapper.exec(inner) || hoistable.exec(inner))) {
     if (!/^<div/i.test(match[0])) hoisted += match[0];
