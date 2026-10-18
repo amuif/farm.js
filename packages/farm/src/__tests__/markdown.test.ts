@@ -674,3 +674,30 @@ describe("htmlToMarkdown images", () => {
     ).toBe("Before Placeholder after\n");
   });
 });
+
+describe("Markdown mirror indexing headers", () => {
+  const mirror = (head: string, pageHeaders: Record<string, string> = {}) =>
+    createMarkdownMirrorResponse({
+      request: new Request("https://acme.test/drafts.md"),
+      config: resolveMarkdownConfig({ expose: ["/drafts"] }),
+      renderPage: async () =>
+        new Response(`<html><head>${head}</head><body><main><p>Draft</p></main></body></html>`, {
+          headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders },
+        }),
+    });
+
+  it("keeps the page's robots rules and points at its canonical URL", async () => {
+    const response = await mirror(
+      '<meta content="noindex, nofollow" name="robots"><link href="/drafts" rel="canonical">',
+      { "X-Robots-Tag": "noarchive" },
+    );
+    expect(response?.headers.get("x-robots-tag")).toBe("noarchive, noindex, nofollow");
+    expect(response?.headers.get("link")).toBe('<https://acme.test/drafts>; rel="canonical"');
+  });
+
+  it("adds neither header for a page without robots rules or a canonical link", async () => {
+    const response = await mirror("<title>Drafts</title>");
+    expect(response?.headers.get("x-robots-tag")).toBeNull();
+    expect(response?.headers.get("link")).toBeNull();
+  });
+});

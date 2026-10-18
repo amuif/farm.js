@@ -168,6 +168,20 @@ describe("collectFarmLlmsTxtPages", () => {
     { pattern: "/admin/users" },
   ];
 
+  it("leaves out pages whose metadata says noindex", () => {
+    const paths = collectFarmLlmsTxtPages(
+      [
+        { pattern: "/pricing", metadata: { title: "Pricing" } },
+        { pattern: "/drafts", metadata: { title: "Drafts", robots: "noindex, follow" } },
+        { pattern: "/internal", metadata: { title: "Internal", robots: "none" } },
+        { pattern: "/account", metadata: { title: "Account", robots: { index: false } } },
+        { pattern: "/changelog", metadata: { title: "Changelog", robots: { index: true } } },
+      ],
+      { origin, basePath: "" },
+    ).map((page) => page.path);
+    expect(paths).toEqual(["/changelog", "/pricing"]);
+  });
+
   it("lists static pages in path order, linking to Markdown mirrors", () => {
     expect(
       collectFarmLlmsTxtPages(sources, {

@@ -214,6 +214,21 @@ export async function createMarkdownMirrorResponse(
       : createMarkdownCacheHeader(cache),
   );
 
+  // The mirror is the same document in another format, so it keeps the page's
+  // indexing rules and points search engines at the page as the canonical copy.
+  const robots = [pageResponse.headers.get("x-robots-tag"), readHtmlMetaContent(html, "robots")]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(", ");
+  if (robots) headersOut.set("X-Robots-Tag", robots);
+  const canonical = readHtmlCanonicalHref(html);
+  if (canonical) {
+    try {
+      headersOut.append("Link", `<${new URL(canonical, pageUrl).href}>; rel="canonical"`);
+    } catch {
+      // A malformed canonical in the page is not repeated on the mirror.
+    }
+  }
+
   return createFarmMarkdownViewResponse({
     request: options.request,
     requestUrl,
@@ -593,6 +608,25 @@ function extractFirstElementContent(html: string, tagNames: string[]): string | 
     }
   }
 
+  return undefined;
+}
+
+/** `content` of the first `<meta name="…">` with this name. */
+function readHtmlMetaContent(html: string, name: string): string | undefined {
+  for (const match of html.matchAll(/<meta\b([^>]*)>/gi)) {
+    if (readHtmlAttribute(match[1], "name")?.toLowerCase() === name) {
+      return readHtmlAttribute(match[1], "content");
+    }
+  }
+  return undefined;
+}
+
+/** `href` of the page's `<link rel="canonical">`. */
+function readHtmlCanonicalHref(html: string): string | undefined {
+  for (const match of html.matchAll(/<link\b([^>]*)>/gi)) {
+    const rel = readHtmlAttribute(match[1], "rel")?.toLowerCase().split(/\s+/);
+    if (rel?.includes("canonical")) return readHtmlAttribute(match[1], "href");
+  }
   return undefined;
 }
 
