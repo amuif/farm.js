@@ -590,6 +590,15 @@ function extractFirstElementContent(html: string, tagNames: string[]): string | 
   return undefined;
 }
 
+/** Value of one attribute in a tag's attribute text, or undefined when absent. */
+function readHtmlAttribute(attributes: string, name: string): string | undefined {
+  const match = new RegExp(
+    `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\`]+))`,
+    "i",
+  ).exec(attributes);
+  return match ? (match[1] ?? match[2] ?? match[3]) : undefined;
+}
+
 /**
  * Converts inline HTML to Markdown. The result keeps its HTML entities:
  * htmlToMarkdown decodes once, after every tag is gone.
@@ -600,12 +609,15 @@ function toInlineMarkdown(html: string): string {
       const label: string = toInlineMarkdown(text).trim() || href;
       return `[${label}](${href})`;
     })
-    .replace(
-      /<img\b[^>]*src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*\/?>/gi,
-      (_, src, alt) => {
-        return `![${alt}](${src})`;
-      },
-    )
+    .replace(/<img\b([^>]*)>/gi, (_, attributes: string) => {
+      // Attributes can come in any order: Farm's <Image> renders alt before src.
+      const src = readHtmlAttribute(attributes, "src");
+      const alt = readHtmlAttribute(attributes, "alt") ?? "";
+      if (!src) return alt;
+      // An inline data URL would flood the mirror; keep only its description.
+      if (/^data:/i.test(src.trim())) return alt;
+      return `![${alt}](${src})`;
+    })
     .replace(/<strong\b[^>]*>([\s\S]*?)<\/strong>/gi, (_, content) => {
       return `**${toInlineMarkdown(content).trim()}**`;
     })

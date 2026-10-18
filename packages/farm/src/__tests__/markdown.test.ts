@@ -647,3 +647,30 @@ describe("resolveConfig markdown mirrors", () => {
     });
   });
 });
+
+describe("htmlToMarkdown images", () => {
+  const convert = (body: string) =>
+    htmlToMarkdown(`<html><body><main>${body}</main></body></html>`, { includeMetadata: false });
+
+  it("keeps images whatever order alt and src come in", () => {
+    // Farm's <Image> renders alt before src.
+    expect(convert('<p><img alt="Revenue chart" src="/chart.png" width="640"></p>')).toBe(
+      "![Revenue chart](/chart.png)\n",
+    );
+    expect(convert("<p><img src='/logo.svg' alt='Farm logo' /></p>")).toBe(
+      "![Farm logo](/logo.svg)\n",
+    );
+  });
+
+  it("keeps an image without alt text and ignores srcset and data-src", () => {
+    expect(
+      convert('<p><img data-src="/lazy.png" srcset="/a.png 1x, /b.png 2x" src="/photo.jpg"></p>'),
+    ).toBe("![](/photo.jpg)\n");
+  });
+
+  it("keeps only the description of an inline data URL", () => {
+    expect(
+      convert('<p>Before <img alt="Placeholder" src="data:image/png;base64,AAAA"> after</p>'),
+    ).toBe("Before Placeholder after\n");
+  });
+});
