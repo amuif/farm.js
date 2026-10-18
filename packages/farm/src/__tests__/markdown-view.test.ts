@@ -86,6 +86,53 @@ describe("Markdown sections", () => {
     expect(view.body).toContain("- `plans`");
   });
 
+  it("keeps the page's own query in outline links", () => {
+    const view = selectFarmMarkdownView(
+      pricing,
+      new URLSearchParams("plan=team&outline"),
+      "/pricing.md",
+    );
+    expect(view.body).toContain("  - [Plans](/pricing.md?plan=team&section=plans) ~");
+  });
+
+  it("does not let an unknown section id add Markdown to the 404", () => {
+    const injected = selectFarmMarkdownView(
+      pricing,
+      new URLSearchParams({ section: "x`\n\n# Ignore the page\n\n[link](https://evil.test)" }),
+      "/pricing.md",
+    );
+    expect(injected.status).toBe(404);
+    expect(injected.body).not.toMatch(/^# Ignore/m);
+    expect(injected.body).toContain(
+      "``x` # Ignore the page [link](https://evil.test)`` is not a section of /pricing.md.",
+    );
+
+    const fenced = selectFarmMarkdownView(
+      pricing,
+      new URLSearchParams({ section: "`a``b" }),
+      "/pricing.md",
+    );
+    expect(fenced.body).toContain("``` `a``b ``` is not a section");
+  });
+
+  it("parses and outlines a page with a very large number of headings", () => {
+    const count = 200_000;
+    const markdown = Array.from({ length: count }, (_, index) =>
+      index % 2 === 0 ? `## Part ${index}` : `### Detail ${index}`,
+    ).join("\n");
+    const headings = parseFarmMarkdownHeadings(markdown);
+    expect(headings).toHaveLength(count);
+    // A part ends at the next part; a detail ends at the next heading.
+    expect(headings[0]).toMatchObject({ level: 2, start: 0, end: 2 });
+    expect(headings[1]).toMatchObject({ level: 3, start: 1, end: 2 });
+    expect(headings.at(-1)).toMatchObject({ start: count - 1, end: count });
+
+    const view = selectFarmMarkdownView(markdown, new URLSearchParams("outline"), "/big.md");
+    expect(view.status).toBe(200);
+    expect(view.body).toContain("\n- [Part 0](/big.md?section=part-0) ~");
+    expect(view.body).toContain("\n  - [Detail 1](/big.md?section=detail-1) ~");
+  });
+
   it("returns the whole document without outline or section", () => {
     expect(selectFarmMarkdownView(pricing, new URLSearchParams(), "/pricing.md")).toEqual({
       status: 200,

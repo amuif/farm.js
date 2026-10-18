@@ -261,6 +261,10 @@ and the last part has neither. A part never splits a code block unless the block
 than the budget; then the part closes the block and the next one reopens it with the same language,
 so every part is valid Markdown. Token counts are estimates of about four characters per token.
 
+Continuation, restart, and outline links keep the page's own query, so
+`/products.md?category=shoes&max_tokens=2000` keeps reading the shoes listing. The view parameters
+(`outline`, `section`, `actions`, `max_tokens`, `cursor`) are never passed to the page itself.
+
 The cursor names where to continue and which version of the page it belongs to. If the page changes
 between requests, the next part answers `409` with a link to start again, rather than continuing
 from a position that no longer lines up. A malformed cursor or a budget under 100 answers `400`.

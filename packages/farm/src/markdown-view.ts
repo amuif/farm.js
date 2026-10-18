@@ -61,12 +61,13 @@ export function parseFarmMarkdownHeadings(markdown: string): FarmMarkdownHeading
     });
   }
 
-  for (let headingIndex = 0; headingIndex < headings.length; headingIndex++) {
-    const heading = headings[headingIndex];
-    const next = headings
-      .slice(headingIndex + 1)
-      .find((candidate) => candidate.level <= heading.level);
-    if (next) heading.end = next.start;
+  // One pass: a heading closes every open section at the same or a deeper level.
+  const open: FarmMarkdownHeading[] = [];
+  for (const heading of headings) {
+    while (open.length > 0 && open[open.length - 1]!.level >= heading.level) {
+      open.pop()!.end = heading.start;
+    }
+    open.push(heading);
   }
 
   return headings;
@@ -98,6 +99,15 @@ export interface FarmMarkdownView {
 /** The smallest `?max_tokens` budget, so reading a page never takes hundreds of requests. */
 export const FARM_MARKDOWN_MIN_TOKEN_BUDGET = 100;
 
+/** Query parameters that choose a view of the mirror rather than belonging to the page. */
+export const FARM_MARKDOWN_VIEW_PARAMS = [
+  "outline",
+  "section",
+  "actions",
+  "max_tokens",
+  "cursor",
+] as const;
+
 /**
  * Select the part of a Markdown document a request asks for. Returns the whole
  * document when the request has neither `outline` nor `section`.
@@ -113,22 +123,30 @@ export function selectFarmMarkdownView(
   if (!wantsOutline && sectionId === null && budget === null)
     return { status: 200, body: markdown };
 
+  // Links to other views keep the page's own query (`?category=shoes`), so they
+  // read the same page this request rendered.
+  const viewUrl = (view: Record<string, string | null | undefined>) => {
+    const query = new URLSearchParams(searchParams);
+    for (const name of FARM_MARKDOWN_VIEW_PARAMS) query.delete(name);
+    for (const [name, value] of Object.entries(view)) {
+      if (value !== null && value !== undefined) query.set(name, value);
+    }
+    const search = query.toString();
+    return search ? `${markdownPath}?${search}` : markdownPath;
+  };
+  const withinBudget = (document: string): FarmMarkdownView =>
+    budget === null
+      ? { status: 200, body: document }
+      : selectFarmMarkdownPart(document, budget, searchParams.get("cursor"), (cursor) =>
+          viewUrl({ section: sectionId, max_tokens: budget, cursor }),
+        );
+
+  if (!wantsOutline && sectionId === null) return withinBudget(markdown);
+
   const lines = markdown.split("\n");
   const headings = parseFarmMarkdownHeadings(markdown);
   const sectionText = (heading: FarmMarkdownHeading) =>
     lines.slice(heading.start, heading.end).join("\n").trim();
-  const withinBudget = (document: string): FarmMarkdownView =>
-    budget === null
-      ? { status: 200, body: document }
-      : selectFarmMarkdownPart(document, budget, searchParams.get("cursor"), (cursor) => {
-          const next = new URLSearchParams();
-          if (sectionId !== null) next.set("section", sectionId);
-          next.set("max_tokens", budget);
-          if (cursor) next.set("cursor", cursor);
-          return `${markdownPath}?${next.toString()}`;
-        });
-
-  if (!wantsOutline && sectionId === null) return withinBudget(markdown);
 
   if (sectionId !== null) {
     const heading = headings.find((candidate) => candidate.id === sectionId);
@@ -137,16 +155,16 @@ export function selectFarmMarkdownView(
     return {
       status: 404,
       body:
-        `# Section not found\n\n\`${sectionId}\` is not a section of ${markdownPath}.\n\n` +
+        `# Section not found\n\n${markdownCodeSpan(sectionId)} is not a section of ${markdownPath}.\n\n` +
         (available ? `Available sections:\n\n${available}\n` : "This page has no sections.\n"),
     };
   }
 
-  const minLevel = Math.min(...headings.map((heading) => heading.level));
+  const minLevel = headings.reduce((min, heading) => Math.min(min, heading.level), 6);
   const entries = headings.map((heading) => {
     const indent = "  ".repeat(heading.level - minLevel);
     const tokens = estimateFarmMarkdownTokens(sectionText(heading));
-    return `${indent}- [${heading.text}](${markdownPath}?section=${encodeURIComponent(heading.id)}) ~${tokens} tokens`;
+    return `${indent}- [${heading.text}](${viewUrl({ section: heading.id })}) ~${tokens} tokens`;
   });
   return {
     status: 200,
@@ -155,6 +173,18 @@ export function selectFarmMarkdownView(
       `About ${estimateFarmMarkdownTokens(markdown)} tokens in total. Request one section with \`?section=<id>\`, or read in parts with \`?max_tokens=<n>\`.\n\n` +
       (entries.length > 0 ? `${entries.join("\n")}\n` : "This page has no headings.\n"),
   };
+}
+
+/**
+ * Untrusted text as an inline code span: one line, fenced by more backticks than
+ * it contains, so it cannot start a heading, a link, or HTML in the response.
+ */
+function markdownCodeSpan(value: string): string {
+  const text = value.replace(/[\p{Cc}\u2028\u2029]+/gu, " ");
+  const longestRun = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = "`".repeat(longestRun + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 /** The page's forms as JSON, linked back to the page and its Markdown. */

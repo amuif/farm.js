@@ -1,4 +1,4 @@
-import { createFarmMarkdownViewResponse } from "./markdown-view";
+import { createFarmMarkdownViewResponse, FARM_MARKDOWN_VIEW_PARAMS } from "./markdown-view";
 
 /** Content type for Markdown responses, including agent-facing error bodies. */
 export const FARM_MARKDOWN_CONTENT_TYPE = "text/markdown; charset=utf-8";
@@ -171,7 +171,7 @@ export async function createMarkdownMirrorResponse(
   const pageUrl = new URL(options.request.url);
   pageUrl.pathname = target.pathname;
   // The agent's view parameters select part of the mirror; they are not the page's own.
-  for (const name of ["outline", "section", "actions"]) pageUrl.searchParams.delete(name);
+  for (const name of FARM_MARKDOWN_VIEW_PARAMS) pageUrl.searchParams.delete(name);
   const headers = new Headers(options.request.headers);
   headers.set("accept", "text/html");
 

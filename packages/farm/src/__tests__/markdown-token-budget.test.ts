@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
+import { createMarkdownMirrorResponse, resolveMarkdownConfig } from "../markdown";
 import {
   createFarmMarkdownViewResponse,
   estimateFarmMarkdownTokens,
@@ -123,5 +124,65 @@ describe("Markdown token budgets", () => {
 
   it("points the outline at budgeted reads", () => {
     expect(view(guide, "outline").body).toContain("or read in parts with `?max_tokens=<n>`");
+  });
+
+  it("keeps the page's own query in continuation and restart links", () => {
+    const first = view(guide, "category=shoes&max_tokens=100");
+    expect(first.headers?.Link).toMatch(
+      /^<\/guide\.md\?category=shoes&max_tokens=100&cursor=\d+\.[0-9a-z]+>; rel="next"$/,
+    );
+    expect(readAll(guide, "category=shoes&max_tokens=100").join("\n\n")).toBe(
+      guide.replace(/\n+$/, ""),
+    );
+
+    const cursor = /cursor=([^>]+)>/.exec(first.headers!.Link!)![1]!;
+    const changed = view(
+      guide.replace("Paragraph 3", "Paragraph three"),
+      `category=shoes&max_tokens=100&cursor=${cursor}`,
+    );
+    expect(changed.status).toBe(409);
+    expect(changed.body).toContain("Start again at /guide.md?category=shoes&max_tokens=100.");
+  });
+
+  it("answers 400 to a budget of zero or less, which agent checks probe for", () => {
+    for (const query of ["max_tokens=0", "max_tokens=-1", "max_tokens=-100"]) {
+      expect(view(guide, query).status).toBe(400);
+    }
+  });
+
+  it("renders the page without the budget and cursor, so every part reads the same page", async () => {
+    const rendered: string[] = [];
+    const mirror = (url: string) =>
+      createMarkdownMirrorResponse({
+        request: new Request(url),
+        config: resolveMarkdownConfig({ expose: ["/products"] }),
+        renderPage: async (request) => {
+          rendered.push(request.url);
+          const body = Array.from({ length: 24 }, (_, index) => `<p>${paragraph(index)}</p>`);
+          // A page that reflects its own URL, as a search or listing page does.
+          return new Response(
+            `<html><body><main><h1>Products</h1><p>Showing ${request.url}</p>${body.join("")}<form><button>Filter</button></form></main></body></html>`,
+            { headers: { "Content-Type": "text/html; charset=utf-8" } },
+          );
+        },
+      });
+
+    let next: string | undefined = "/products.md?category=shoes&max_tokens=100";
+    let parts = 0;
+    while (next) {
+      const response = await mirror(`http://farm.test${next}`);
+      expect(response?.status).toBe(200);
+      const body = await response!.text();
+      next = /Continue: (\S+) /.exec(body)?.[1];
+      if (next) expect(next).toMatch(/^\/products\.md\?category=shoes&max_tokens=100&cursor=/);
+      expect(++parts).toBeLessThan(50);
+    }
+    expect(parts).toBeGreaterThan(1);
+    expect(new Set(rendered)).toEqual(new Set(["http://farm.test/products?category=shoes"]));
+
+    const actions = await mirror(
+      "http://farm.test/products.md?category=shoes&actions&max_tokens=100&cursor=x",
+    );
+    expect(JSON.parse(await actions!.text()).actions[0].action).toBe("/products?category=shoes");
   });
 });
