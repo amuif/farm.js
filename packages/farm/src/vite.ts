@@ -1884,6 +1884,7 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                 openapi: options.openapi,
               },
               workflows: discoveredWorkflows,
+              plugins: pm?.getSortedPlugins(),
             });
 
             res.statusCode = 200;
