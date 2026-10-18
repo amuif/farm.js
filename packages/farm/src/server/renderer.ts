@@ -2231,6 +2231,7 @@ export class ServerRenderer {
           : value;
       const response = createFarmMetadataRouteResponse(match.metadata.kind, body, routeModule, {
         method,
+        request,
       });
       await sendWebResponse(res as any, response);
     } catch (error) {
@@ -2277,7 +2278,7 @@ export class ServerRenderer {
           kind,
           body,
           { revalidate: config.revalidate },
-          { method: req.method },
+          { method: req.method, request },
         ),
       );
     } catch (error) {

@@ -7093,7 +7093,7 @@ async function handleApplicationMetadataRouteRequest(request, routePathname) {
     const body = isLlmsFull && !(value instanceof Response)
       ? await renderFarmLlmsFullTxt(value, { origin: url.origin, readMarkdown: llmsContext.markdown })
       : value;
-    return createFarmMetadataRouteResponse(match.metadata.kind, body, routeModule, { method });
+    return createFarmMetadataRouteResponse(match.metadata.kind, body, routeModule, { method, request });
   } catch (error) {
     console.error("Metadata route render failed:", error);
     return new Response("Internal Server Error", {
@@ -7970,7 +7970,7 @@ async function handleFarmRequestInContext(
   // agent.apiCatalog: list the OpenAPI and MCP surfaces at the RFC 9727 path.
   if (normalizeRuntimePath(routePathname) === ${JSON.stringify(FARM_API_CATALOG_PATH)}) {
     return applyProductionMiddlewareHeaders(
-      createFarmApiCatalogResponse(request.method, farmApiCatalogInput),
+      createFarmApiCatalogResponse(request.method, farmApiCatalogInput, request),
       middlewareHeaders,
     );
   }
@@ -8024,7 +8024,7 @@ async function handleFarmRequestInContext(
       farmGeneratedLlmsKind,
       llmsBody,
       { revalidate: llmsComplete ? farmLlmsTxtConfig.revalidate : 0 },
-      { method: request.method },
+      { method: request.method, request },
     );
     if (!llmsComplete) llmsResponse.headers.set("cache-control", "no-store");
     return applyProductionMiddlewareHeaders(llmsResponse, middlewareHeaders);

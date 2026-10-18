@@ -1972,6 +1972,9 @@ window.__FARM_MANIFEST__ = ${inlineValue({
               createFarmApiCatalogResponse(
                 requestMethod,
                 resolveFarmApiCatalogInput({ ...options, api: farmConfig.api }),
+                new Request(parsedRequestUrl, {
+                  headers: { "user-agent": String(req.headers["user-agent"] ?? "") },
+                }),
               ),
             );
             return;

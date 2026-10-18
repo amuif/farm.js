@@ -9,6 +9,7 @@
  * renderer and the generated production server both call into this module, so
  * the two serve the same file.
  */
+import { FARM_INTERNAL_READ_HEADER } from "./agent-identity";
 import { applyFarmBasePath } from "./base-path";
 import {
   getFarmMarkdownMirrorPath,
@@ -296,7 +297,9 @@ export function createFarmLlmsMarkdownReader(
   return async (url) => {
     try {
       const response = await fetchMarkdown(
-        new Request(url, { headers: { accept: "text/markdown" } }),
+        new Request(url, {
+          headers: { accept: "text/markdown", [FARM_INTERNAL_READ_HEADER]: "llms-full" },
+        }),
       );
       const type = response.headers.get("content-type") ?? "";
       if (!response.ok || !type.toLowerCase().startsWith("text/markdown")) {

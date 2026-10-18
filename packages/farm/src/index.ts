@@ -176,6 +176,7 @@ export * from "./docs";
 export * from "./markdown";
 export * from "./app-markdown";
 export * from "./observability";
+export { classifyFarmAgent, type FarmAgentIdentity } from "./agent-identity";
 export * from "./devtools-config";
 export type { FarmDevtoolsSnapshot, FarmDevtoolsDiagnostic, FarmDevtoolsRuntime } from "./devtools";
 export * from "./dev-indicators";

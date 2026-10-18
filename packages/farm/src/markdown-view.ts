@@ -6,6 +6,7 @@
  * carries an ETag so an agent can re-check a page with `If-None-Match`.
  */
 
+import { emitFarmAgentRead } from "./agent-identity";
 import type { FarmPageFormAction } from "./markdown";
 
 export interface FarmMarkdownHeading {
@@ -307,6 +308,15 @@ function isPartBreak(lines: string[], fences: (OpenFence | undefined)[], index: 
   return lines[index - 1]!.trim() === "" || ATX_HEADING.test(lines[index]!);
 }
 
+function readMarkdownViewName(
+  searchParams: URLSearchParams,
+): "outline" | "section" | "parts" | "actions" | undefined {
+  if (searchParams.has("actions")) return "actions";
+  if (searchParams.has("outline")) return "outline";
+  if (searchParams.has("max_tokens")) return "parts";
+  return searchParams.has("section") ? "section" : undefined;
+}
+
 /** Weak ETag over the body, synchronous so it works on every runtime. */
 export function createFarmMarkdownETag(body: string): string {
   return `W/"${hashFarmMarkdown(body)}-${body.length.toString(36)}"`;
@@ -354,6 +364,7 @@ export function createFarmMarkdownViewResponse(options: {
     ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
     : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
   const status = view.status === 200 ? options.status : view.status;
+  emitFarmAgentRead(options.request, "markdown", status, readMarkdownViewName(url.searchParams));
   for (const [name, value] of Object.entries(view.headers ?? {}))
     options.headers.append(name, value);
   const etag = createFarmMarkdownETag(view.body);

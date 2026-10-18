@@ -10,6 +10,7 @@
  * category. No URLs, query strings, headers, cookies, bodies, IPs or errors.
  */
 import type { FarmPlugin, FarmPluginRuntimeAfterEvent } from "../plugin";
+import { classifyFarmAgent, type FarmAgentIdentity } from "../agent-identity";
 import { onFarmEvent } from "../observability";
 import { getCurrentRequestOrNull } from "../server/request";
 
@@ -31,11 +32,8 @@ export interface FarmInfraAnalyticsExporterOptions {
   onDiagnostic?: (event: FarmInfraAnalyticsDiagnostic) => void | Promise<void>;
 }
 
-export interface FarmInfraAgentIdentity {
-  family: "unknown" | "openai" | "anthropic" | "google" | "microsoft" | "perplexity" | "other";
-  category: "unknown" | "crawler" | "agent" | "harness";
-  identity: "unknown" | "self-reported";
-}
+/** @deprecated Use `FarmAgentIdentity` from `@farm.js/core`. */
+export type FarmInfraAgentIdentity = FarmAgentIdentity;
 
 interface EventBase {
   id: string;
@@ -137,34 +135,9 @@ export function resolveFarmInfraAnalytics(
   };
 }
 
-// These are declarations, NOT proof of identity. Keep raw headers out of the event.
-const AGENT_TOKENS: [
-  string,
-  FarmInfraAgentIdentity["family"],
-  FarmInfraAgentIdentity["category"],
-][] = [
-  ["ChatGPT-User", "openai", "agent"],
-  ["OAI-SearchBot", "openai", "crawler"],
-  ["GPTBot", "openai", "crawler"],
-  ["Claude-User", "anthropic", "agent"],
-  ["Claude-SearchBot", "anthropic", "crawler"],
-  ["ClaudeBot", "anthropic", "crawler"],
-];
-const AGENT_PATTERNS = AGENT_TOKENS.map(([token, family, category]) => ({
-  pattern: new RegExp(`(?:^|[\\s;(])${token}(?=[/\\s;)]|$)`, "i"),
-  family,
-  category,
-}));
-
+// A self-reported declaration, not proof of identity. Keep raw headers out of the event.
 export function classifyFarmInfraAgent(userAgent: string | null): FarmInfraAgentIdentity {
-  const value = (userAgent ?? "").slice(0, 2048);
-  const matches = AGENT_PATTERNS.filter(({ pattern }) => pattern.test(value));
-  // Conflicting tokens are ambiguous, rather than a reason to guess a vendor.
-  if (matches.length === 1) {
-    const { family, category } = matches[0]!;
-    return { family, category, identity: "self-reported" };
-  }
-  return { family: "unknown", category: "unknown", identity: "unknown" };
+  return classifyFarmAgent(userAgent);
 }
 
 function routeTemplate(pattern: unknown): string {

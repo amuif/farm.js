@@ -6,6 +6,7 @@
 
 import { resolveFarmAPIServerBasePath, resolveFarmAPIServerRoutePath } from "./api/server-path";
 import type { ResolvedFarmAPIConfig } from "./api/config";
+import { emitFarmAgentRead } from "./agent-identity";
 import { applyFarmBasePath } from "./base-path";
 
 export const FARM_API_CATALOG_PATH = "/.well-known/api-catalog";
@@ -97,7 +98,12 @@ export function createFarmApiCatalog(input: FarmApiCatalogInput): FarmApiCatalog
 }
 
 /** Serves the catalog: the document on GET, and the `api-catalog` Link on GET and HEAD. */
-export function createFarmApiCatalogResponse(method: string, input: FarmApiCatalogInput): Response {
+export function createFarmApiCatalogResponse(
+  method: string,
+  input: FarmApiCatalogInput,
+  /** The request being answered, so the read can be reported as agent traffic. */
+  request?: Request,
+): Response {
   const upperMethod = method.toUpperCase();
   if (upperMethod !== "GET" && upperMethod !== "HEAD") {
     return new Response("Method Not Allowed", {
@@ -105,6 +111,7 @@ export function createFarmApiCatalogResponse(method: string, input: FarmApiCatal
       headers: { Allow: "GET, HEAD", "Content-Type": "text/plain; charset=utf-8" },
     });
   }
+  if (request) emitFarmAgentRead(request, "api-catalog", 200);
   const catalog = createFarmApiCatalog(input);
   return new Response(upperMethod === "HEAD" ? null : JSON.stringify(catalog), {
     status: 200,
