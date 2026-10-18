@@ -51,6 +51,18 @@ describe("resolveFarmNotFoundMetadata", () => {
     });
     expect(title(generated)).toBe("Lost? | Acme");
   });
+
+  it("keeps an absolute not-found title out of the layout's template", async () => {
+    const layout = { metadata: { title: { template: "%s | Acme", default: "Acme" } } };
+    const metadata = await resolveFarmNotFoundMetadata([layout], {
+      metadata: { title: { absolute: "Acme" } },
+    });
+    expect(title(metadata)).toBe("Acme");
+    const generated = await resolveFarmNotFoundMetadata([layout], {
+      generateMetadata: async () => ({ title: { absolute: "Nothing here" } }),
+    });
+    expect(title(generated)).toBe("Nothing here");
+  });
 });
 
 async function startProject(notFound: string | null): Promise<string> {

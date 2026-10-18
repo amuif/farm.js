@@ -51,18 +51,21 @@ export async function resolveFarmNotFoundMetadata(
     }
   }
   // The page's own metadata is merged onto the layouts in one step, so a layout title
-  // template wraps whichever title applies: the page's, or the 404 default.
+  // template wraps whichever title applies: the page's, or the 404 default. Its title goes
+  // on as written: combining it into `own` first turns `{ absolute }` into `{ default }`,
+  // which the layouts' template then wraps.
   let own: MetadataRecord = {};
+  let ownTitle: Metadata["title"] | undefined;
   if (notFoundModule) {
     own = mergeMetadata(own, notFoundModule.metadata);
+    ownTitle = notFoundModule.metadata?.title;
     if (typeof notFoundModule.generateMetadata === "function") {
-      own = mergeMetadata(
-        own,
-        await notFoundModule.generateMetadata({ params: {}, searchParams: {} }),
-      );
+      const generated = await notFoundModule.generateMetadata({ params: {}, searchParams: {} });
+      own = mergeMetadata(own, generated);
+      if (generated?.title !== undefined) ownTitle = generated.title;
     }
   }
-  return mergeMetadata(metadata, { ...own, title: own.title ?? FARM_NOT_FOUND_TITLE });
+  return mergeMetadata(metadata, { ...own, title: ownTitle ?? FARM_NOT_FOUND_TITLE });
 }
 
 export function mergeMetadata(
