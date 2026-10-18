@@ -219,8 +219,10 @@ Returning nothing continues the request, like `NextResponse.next()`. See
 - Public environment values are declared under `env` in `farm.config.ts` instead of relying on
   the `NEXT_PUBLIC_` prefix. See [Configuration](/docs/configuration).
 - A root layout that renders its own `<html>` should include the viewport meta tag.
-- Delete `postcss.config.*` and Tailwind loaders from `next.config`. Farm enables Tailwind CSS v4
-  automatically when it is installed.
+- Tailwind CSS v4: run `pnpm add -D @tailwindcss/vite`, keep `tailwindcss` and
+  `@import "tailwindcss";`, then delete `postcss.config.*`, `@tailwindcss/postcss`, and any Tailwind
+  loader in `next.config`. Farm loads `@tailwindcss/vite` from the app; without it the build still
+  succeeds but styles are not processed by Tailwind.
 - Move `redirects`, `rewrites`, and `headers` from `next.config` into `farm.config.ts`. See
   [Configuration](/docs/configuration).
 - Next's `LayoutProps` and `PageProps` globals do not exist in Farm. Import `LayoutProps` and
