@@ -4,7 +4,8 @@ import { farmI18nClientBridgePlugin, farmPlugin, farmServerOnlyEntriesPlugin } f
 import { logger } from "../utils";
 import { readSchemaTables } from "../schema-owner";
 import { loadConfig, resolveConfig } from "../config";
-import { FarmRuntimeShutdownError, PluginManager } from "../plugin";
+import { PluginManager } from "../plugin";
+import { createFarmDevLifecyclePlugin } from "./dev-lifecycle";
 import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import fs from "fs";
 import path from "path";
@@ -37,46 +38,6 @@ import {
 import { loadFarmRendererVitePlugins, resolveFarmRenderer } from "../renderer";
 
 export const DEFAULT_FARM_DEV_SERVER_PORT = 3000;
-
-/**
- * Upper bound on waiting for Vite's own close. Vite 5.4 can strand its plugin
- * container's in-flight promises when closed after dependency discovery has
- * started (#1263); farm's shutdown must not inherit that hang.
- */
-const VITE_CLOSE_TIMEOUT_MS = 10_000;
-
-type VitePendingRequest = {
-  request: Promise<unknown>;
-};
-
-async function drainVitePendingWork(server: ViteDevServer): Promise<void> {
-  const environments = Object.values(server.environments ?? {});
-  // Vite 8 can cancel an optimizer without awaiting its active Rolldown write.
-  // Let discovery finish before collecting processing promises: the scan can
-  // add dependencies that have no pending transform in the registry below.
-  await Promise.allSettled(
-    environments.map(async ({ depsOptimizer }) => {
-      await depsOptimizer?.scanProcessing;
-      await Promise.allSettled(
-        Object.values(depsOptimizer?.metadata.discovered ?? {}).map((dep) => dep.processing),
-      );
-    }),
-  );
-  // Each Vite environment waits for this registry while it closes its plugin
-  // container and dependency optimizer. That order can strand
-  // optimized-dependency loads: the optimizer is gone, but the plugin hook
-  // still awaits its processing promise. Drain every registry first while the
-  // optimizers can finish; a request in one environment can start another.
-  const registries = environments.map(
-    (environment) =>
-      (environment as { _pendingRequests?: Map<string, VitePendingRequest> })._pendingRequests,
-  );
-  const pending = () => registries.flatMap((registry) => (registry ? [...registry.values()] : []));
-
-  for (let requests = pending(); requests.length > 0; requests = pending()) {
-    await Promise.allSettled(requests.map(({ request }) => request));
-  }
-}
 
 // Farm.js branding plugin for createServer
 function createBrandingPlugin() {
@@ -294,6 +255,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
             farmPlugin(finalConfig, pluginManager),
             farmEnvironmentFunctionsPlugin(),
             createBrandingPlugin(),
+            createFarmDevLifecyclePlugin(pluginManager, instrumentation),
           ],
           server: {
             middlewareMode: false,
@@ -352,108 +314,6 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     (server as any).__farmPluginManager = pluginManager;
     (server as any).__farmResolvedConfig = resolvedConfig;
     (server as any).__farmInstrumentation = instrumentation;
-    const closeViteServer = server.close.bind(server);
-
-    /**
-     * Tear the whole dev runtime down once, collecting every failure.
-     *
-     * Plugin disposers own real resources — database pools, queue consumers —
-     * so a caller awaiting close() has to be able to await them too, and a
-     * failure has to surface instead of disappearing into an event listener.
-     */
-    let shutdownPromise: Promise<void> | undefined;
-    const shutdownFarmDevRuntime = (): Promise<void> => {
-      shutdownPromise ??= (async () => {
-        const closingEnvironments = server.environments;
-        const closingHttpServer = server.httpServer;
-        const closingWatcher = server.watcher;
-        const closingWebSocket = server.ws;
-        const failures: Array<{ label: string; error: unknown }> = [];
-        const step = async (label: string, run: () => Promise<unknown> | undefined) => {
-          try {
-            await run();
-          } catch (error) {
-            failures.push({ label, error });
-          }
-        };
-
-        // Finish Vite's active optimizer and transforms, stop serving, release
-        // what the plugins hold, then flush telemetry last so shutdown problems
-        // are still reported.
-        // Vite's close() can deadlock after the client entry has been
-        // transformed: background pre-transforms of its bare imports wait in
-        // the optimized-deps load hook for a dependency run that
-        // depsOptimizer.close() cancels without settling, and the plugin
-        // container then awaits those promises forever (#1263). Draining
-        // Vite's pending transform registry before close preserves its normal
-        // optimizer and pre-transform behavior without triggering that order.
-        // Bound the whole operation so farm's own teardown — plugin disposers,
-        // instrumentation — still runs if Vite finds another shutdown failure.
-        await step("Vite server close", async () => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const timedOut = new Promise<"timeout">((resolve) => {
-            timer = setTimeout(() => resolve("timeout"), VITE_CLOSE_TIMEOUT_MS);
-            timer.unref?.();
-          });
-          try {
-            const outcome = await Promise.race([
-              (async () => {
-                await drainVitePendingWork(server);
-                // A restart closes the old HTTP server and replaces fields on
-                // this same object. Its close event must not close the new
-                // environments after our asynchronous drain finishes.
-                if (server.environments === closingEnvironments) await closeViteServer();
-                return "closed" as const;
-              })(),
-              timedOut,
-            ]);
-            if (outcome === "timeout") {
-              logger.error(
-                `Vite server close did not settle within ${VITE_CLOSE_TIMEOUT_MS}ms; ` +
-                  "continuing shutdown without it (https://github.com/farming-labs/farm.js/issues/1263)",
-              );
-              // Best effort, all idempotent: make sure nothing keeps serving
-              // even though the container promise is stranded.
-              await Promise.allSettled([
-                new Promise<void>((resolve) => {
-                  if (!closingHttpServer || !closingHttpServer.listening) return resolve();
-                  closingHttpServer.close(() => resolve());
-                }),
-                Promise.resolve(closingWatcher?.close?.()).catch(() => {}),
-                Promise.resolve(closingWebSocket?.close?.()).catch(() => {}),
-              ]);
-            }
-          } finally {
-            if (timer) clearTimeout(timer);
-          }
-        });
-        await step("Plugin runtime shutdown", () =>
-          pluginManager?.closeRuntime("dev-server-closed"),
-        );
-        await step("Instrumentation shutdown", () => instrumentation?.shutdown());
-
-        // A single failure propagates unchanged so existing callers keep the
-        // error they already handle; several are aggregated with their stage.
-        if (failures.length === 1) throw failures[0]!.error;
-        if (failures.length > 1) {
-          throw new FarmRuntimeShutdownError(
-            `Dev server shutdown failed during ${failures.map(({ label }) => label).join(", ")}`,
-            failures.map(({ error }) => error),
-          );
-        }
-      })();
-      return shutdownPromise;
-    };
-
-    server.close = shutdownFarmDevRuntime;
-    // A directly closed HTTP server still has to release the same resources.
-    // close() is memoized, so this cannot double-dispose.
-    server.httpServer?.once("close", () => {
-      shutdownFarmDevRuntime().catch((error) => {
-        logger.warn(`Dev server shutdown failed: ${error}`);
-      });
-    });
-
     // Update plugin manager with vite server
     pluginManager.updateContext({ config: finalConfig, viteServer: server });
     await pluginManager.setupPlugins();

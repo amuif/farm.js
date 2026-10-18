@@ -186,6 +186,12 @@ Only define the groups your plugin needs.
 
 Both hooks receive Farm's plugin context. `setup` additionally receives the resolved `env`. Its returned state is private to that plugin instance and is not serialized to the browser.
 
+In development, a native Vite restart keeps the same Farm plugin runtime and instrumentation
+alive; it does not rerun `setup` or dispose resources registered with `lifecycle.onShutdown()`.
+Awaiting the Farm dev server's `close()` waits for an in-progress restart, closes the current
+Vite server, and then awaits plugin cleanup and instrumentation shutdown exactly once. Cleanup
+errors reject `close()`. New restart requests are rejected once final shutdown begins.
+
 ### Runtime hooks
 
 | Hook                | Runs                                                         | May return                                                       |
