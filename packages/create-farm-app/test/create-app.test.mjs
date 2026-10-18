@@ -1135,75 +1135,85 @@ test("generates every official integration starter", async () => {
   }
 });
 
-test("installs dependencies with the invoking package manager", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-install-"));
-  const binDir = path.join(tempDir, "bin");
-  const markerPath = path.join(tempDir, "install.json");
-  const runnerPath = path.join(binDir, "fake-package-manager.cjs");
-  const executablePath = path.join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm");
+for (const { name, userAgent, windowsExtension } of [
+  { name: "pnpm", userAgent: "pnpm/10.15.0 npm/? node/v22.0.0", windowsExtension: ".cmd" },
+  // Bun installs bun.exe on Windows, not a .cmd shim. A .bat launcher stands in
+  // for it: the installer must resolve the bare name rather than assume .cmd.
+  { name: "bun", userAgent: "bun/1.2.0 npm/? node/v22.0.0", windowsExtension: ".bat" },
+]) {
+  test(`installs dependencies with the invoking package manager (${name})`, async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-install-"));
+    const binDir = path.join(tempDir, "bin");
+    const markerPath = path.join(tempDir, "install.json");
+    const runnerPath = path.join(binDir, "fake-package-manager.cjs");
+    const executablePath = path.join(
+      binDir,
+      process.platform === "win32" ? `${name}${windowsExtension}` : name,
+    );
 
-  try {
-    await mkdir(binDir, { recursive: true });
-    await writeFile(
-      runnerPath,
-      `const { writeFileSync } = require("node:fs");
+    try {
+      await mkdir(binDir, { recursive: true });
+      await writeFile(
+        runnerPath,
+        `const { writeFileSync } = require("node:fs");
 writeFileSync(process.env.FARM_CREATE_APP_INSTALL_MARKER, JSON.stringify({
   args: process.argv.slice(2),
   cwd: process.cwd(),
 }));
 `,
-    );
-
-    if (process.platform === "win32") {
-      await writeFile(executablePath, `@"${process.execPath}" "${runnerPath}" %*\r\n`);
-    } else {
-      await writeFile(
-        executablePath,
-        `#!/bin/sh\nexec "${process.execPath}" "${runnerPath}" "$@"\n`,
       );
-      await chmod(executablePath, 0o755);
-    }
 
-    const output = execFileSync(
-      process.execPath,
-      [
-        path.join(packageDir, "bin/create-farm-app.js"),
-        "generated-app",
-        "--template",
-        "basic",
-        "--typescript",
-      ],
-      {
-        cwd: tempDir,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          FARM_CREATE_APP_INSTALL_MARKER: markerPath,
-          PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
-          npm_config_user_agent: "pnpm/10.15.0 npm/? node/v22.0.0",
+      if (process.platform === "win32") {
+        await writeFile(executablePath, `@"${process.execPath}" "${runnerPath}" %*\r\n`);
+      } else {
+        await writeFile(
+          executablePath,
+          `#!/bin/sh\nexec "${process.execPath}" "${runnerPath}" "$@"\n`,
+        );
+        await chmod(executablePath, 0o755);
+      }
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          "generated-app",
+          "--template",
+          "basic",
+          "--typescript",
+        ],
+        {
+          cwd: tempDir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            FARM_CREATE_APP_INSTALL_MARKER: markerPath,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+            npm_config_user_agent: userAgent,
+          },
         },
-      },
-    );
+      );
 
-    const invocation = JSON.parse(await readFile(markerPath, "utf8"));
-    const generatedPackage = JSON.parse(
-      await readFile(path.join(tempDir, "generated-app/package.json"), "utf8"),
-    );
+      const invocation = JSON.parse(await readFile(markerPath, "utf8"));
+      const generatedPackage = JSON.parse(
+        await readFile(path.join(tempDir, "generated-app/package.json"), "utf8"),
+      );
 
-    assert.deepEqual(invocation.args, ["install"]);
-    assert.equal(
-      await realpath(invocation.cwd),
-      await realpath(path.join(tempDir, "generated-app")),
-    );
-    assert.equal(generatedPackage.packageManager, "pnpm@10.15.0");
-    assert.match(output, /Installing dependencies with pnpm/);
-    assert.match(output, /Dependencies installed/);
-    assert.match(output, /pnpm dev/);
-    assert.doesNotMatch(output, /pnpm install/);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
+      assert.deepEqual(invocation.args, ["install"]);
+      assert.equal(
+        await realpath(invocation.cwd),
+        await realpath(path.join(tempDir, "generated-app")),
+      );
+      assert.equal(generatedPackage.packageManager, userAgent.split(" ")[0].replace("/", "@"));
+      assert.match(output, new RegExp(`Installing dependencies with ${name}`));
+      assert.match(output, /Dependencies installed/);
+      assert.match(output, new RegExp(`${name} (run )?dev`));
+      assert.doesNotMatch(output, new RegExp(`${name} install`));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("uses the invoking package manager throughout generated guidance", async () => {
   const tempDir = await mkdtemp(
