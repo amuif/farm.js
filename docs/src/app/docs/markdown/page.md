@@ -237,6 +237,57 @@ Headings inside fenced code blocks and front matter are ignored. Every Markdown 
 carries an `ETag`, so an agent can re-check a page with `If-None-Match` and receive `304 Not
 Modified` when it has not changed.
 
+## Describe a page's forms
+
+The mirror turns a form's labels and buttons into text, but not what the form submits. When a page
+has forms, its mirror lists one more line under `Source:`:
+
+```md
+Source: /contact
+
+Actions: /contact.md?actions
+```
+
+`?actions` answers with the page's forms as JSON, read from the same part of the page as the mirror
+and with the same hidden-element rules:
+
+```bash
+curl "http://localhost:3000/contact.md?actions"
+```
+
+```json
+{
+  "page": "/contact",
+  "markdown": "/contact.md",
+  "actions": [
+    {
+      "type": "form",
+      "method": "POST",
+      "action": "/api/contact",
+      "enctype": "application/x-www-form-urlencoded",
+      "fields": [{ "name": "email", "type": "email", "label": "Email", "required": true }],
+      "submit": [{ "label": "Send" }]
+    }
+  ]
+}
+```
+
+- `action` is resolved the way a browser resolves it: an empty or missing `action` submits to the
+  page itself. Same-origin targets are root-relative; a form that only submits through JavaScript
+  has no `action` and is marked `requiresJavaScript`.
+- `fields` carry each control's name, type, label, preset value, and constraints (`required`,
+  `pattern`, `min`, `max`, `minLength`, `maxLength`, `accept`). Radio buttons and checkboxes that
+  share a name become one field with `options`, as do a select's options. Disabled controls are left
+  out, since a browser would not submit them. Hidden fields keep their values, so a submission
+  without JavaScript can be repeated; password and file inputs never include a value.
+- `submit` lists the buttons, with a button's own `formaction` or `formmethod` when it has one.
+- A React server action form, rendered with React's hidden `$ACTION_` fields, includes
+  `serverAction.id`.
+
+A `page.md` source has no forms, so its `?actions` view is an empty list. The view carries an
+`ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's
+request, so it shows the forms that caller would see.
+
 ## Production notes
 
 - Restrict `md.expose` when authenticated or private pages should not have generated mirrors.

@@ -170,6 +170,8 @@ export async function createMarkdownMirrorResponse(
 
   const pageUrl = new URL(options.request.url);
   pageUrl.pathname = target.pathname;
+  // The agent's view parameters select part of the mirror; they are not the page's own.
+  for (const name of ["outline", "section", "actions"]) pageUrl.searchParams.delete(name);
   const headers = new Headers(options.request.headers);
   headers.set("accept", "text/html");
 
@@ -193,14 +195,17 @@ export async function createMarkdownMirrorResponse(
   }
 
   const html = await pageResponse.text();
+  const markdownPath = target.pathname === "/" ? "/index.md" : `${target.pathname}.md`;
+  const actions = extractFarmPageActions(html, pageUrl);
   const markdown = htmlToMarkdown(html, {
     title: target.route?.title,
     includeMetadata: options.config?.includeMetadata ?? true,
     sourcePath: target.pathname,
+    actionsPath: actions.length > 0 ? `${markdownPath}?actions` : undefined,
   });
   const headersOut = new Headers({
     "Content-Type": "text/markdown; charset=utf-8",
-    "Content-Location": target.pathname === "/" ? "/index.md" : `${target.pathname}.md`,
+    "Content-Location": markdownPath,
     "X-Farm-Markdown-Route": target.pathname,
   });
   if (!hasMarkdownExtension) {
@@ -243,7 +248,8 @@ export async function createMarkdownMirrorResponse(
     markdown,
     status: pageResponse.status,
     headers: headersOut,
-    markdownPath: headersOut.get("Content-Location")!,
+    markdownPath,
+    actions,
   });
 }
 
@@ -331,26 +337,12 @@ export function htmlToMarkdown(
     title?: string;
     sourcePath?: string;
     includeMetadata?: boolean;
+    /** Where the page's forms are described, listed when the page has any. */
+    actionsPath?: string;
   } = {},
 ): string {
   const title = options.title ?? extractHtmlTitle(html);
-  // Hidden elements go before the body is extracted, since extraction drops the
-  // <main> or <body> tag whose own attributes may hide it, and after scripts go,
-  // so markup quoted in a script string is never read as an element. Streamed
-  // Suspense content is moved into place first, while its hidden segments and
-  // boundary comments are still there.
-  const streamed = readStreamedBoundaryInstructions(html);
-  let source = extractHtmlBody(
-    removeHiddenElements(
-      resolveStreamedBoundaries(
-        html
-          .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-          .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-          .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ""),
-        streamed,
-      ).replace(/<!--[\s\S]*?-->/g, ""),
-    ),
-  );
+  let source = readHtmlContentRegion(html);
 
   // Code blocks are set aside behind placeholders so the tidying below never
   // touches them, and each gets a fence longer than any backtick run inside it,
@@ -466,6 +458,9 @@ export function htmlToMarkdown(
     }
     if (options.sourcePath) {
       metadata.push(`Source: ${options.sourcePath}`);
+    }
+    if (options.actionsPath) {
+      metadata.push(`Actions: ${options.actionsPath}`);
     }
     if (metadata.length) {
       markdown = `${metadata.join("\n\n")}${markdown ? `\n\n${markdown}` : ""}`;
@@ -669,6 +664,30 @@ function extractHtmlTitle(html: string): string | undefined {
   return match ? decodeHtml(stripTags(match[1])).trim() : undefined;
 }
 
+/**
+ * The part of a page the mirror reads, as HTML: scripts, styles, comments, and
+ * hidden elements removed, streamed Suspense content in place, and narrowed to
+ * the page's `<main>` (or its article, or body). Hidden elements go before the
+ * body is extracted, since extraction drops the <main> or <body> tag whose own
+ * attributes may hide it, and after scripts go, so markup quoted in a script
+ * string is never read as an element. Streamed content is moved into place
+ * first, while its hidden segments and boundary comments are still there.
+ */
+function readHtmlContentRegion(html: string): string {
+  const streamed = readStreamedBoundaryInstructions(html);
+  return extractHtmlBody(
+    removeHiddenElements(
+      resolveStreamedBoundaries(
+        html
+          .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, ""),
+        streamed,
+      ).replace(/<!--[\s\S]*?-->/g, ""),
+    ),
+  );
+}
+
 function extractHtmlBody(html: string): string {
   const rootMatch = html.match(
     /<div\b[^>]*id=["']root["'][^>]*>([\s\S]*?)<\/div>\s*(?:<script|<\/body>|$)/i,
@@ -712,6 +731,294 @@ function readHtmlCanonicalHref(html: string): string | undefined {
     if (rel?.includes("canonical")) return readHtmlAttribute(match[1], "href");
   }
   return undefined;
+}
+
+export interface FarmPageFormOption {
+  value: string;
+  label?: string;
+  selected?: true;
+}
+
+export interface FarmPageFormField {
+  name: string;
+  /** The input type, or `select`, `textarea`, `radio`, or `checkbox` for a group. */
+  type: string;
+  label?: string;
+  required?: true;
+  multiple?: true;
+  /** A preset value: always present for hidden fields. */
+  value?: string;
+  checked?: true;
+  /** Choices of a select, or of radio buttons and checkboxes sharing a name. */
+  options?: FarmPageFormOption[];
+  placeholder?: string;
+  pattern?: string;
+  min?: string;
+  max?: string;
+  step?: string;
+  minLength?: number;
+  maxLength?: number;
+  accept?: string;
+}
+
+export interface FarmPageFormSubmit {
+  label: string;
+  name?: string;
+  value?: string;
+  /** Set when the button submits somewhere other than its form (`formaction`). */
+  action?: string;
+  method?: string;
+}
+
+export interface FarmPageFormAction {
+  type: "form";
+  name?: string;
+  method: "GET" | "POST";
+  /**
+   * Where the form submits: a root-relative URL on the page's origin, or an
+   * absolute URL elsewhere. Absent when the form only submits with JavaScript.
+   */
+  action?: string;
+  /** Present for POST forms. */
+  enctype?: string;
+  requiresJavaScript?: true;
+  fields: FarmPageFormField[];
+  submit: FarmPageFormSubmit[];
+  /** A React server action form: the id React put in its hidden `$ACTION_` fields. */
+  serverAction?: { id: string };
+}
+
+const FORM_ENCTYPES = new Set([
+  "application/x-www-form-urlencoded",
+  "multipart/form-data",
+  "text/plain",
+]);
+
+/**
+ * Describes the forms in the part of the page the mirror reads, so an agent can
+ * see what it can submit: where, how, and with which fields. Controls that are
+ * disabled are left out, since a browser would not submit them; hidden fields
+ * keep their values, so a submission without JavaScript can be replayed.
+ */
+export function extractFarmPageActions(html: string, pageUrl: URL): FarmPageFormAction[] {
+  if (!/<form\b/i.test(html)) return [];
+  const region = readHtmlContentRegion(html);
+  const labelsFor = new Map<string, string>();
+  for (const match of region.matchAll(/<label\b([^>]*)>([\s\S]*?)<\/label>/gi)) {
+    const target = readDecodedAttribute(match[1]!, "for");
+    if (target && !labelsFor.has(target)) labelsFor.set(target, readLabelText(match[2]!));
+  }
+
+  const actions: FarmPageFormAction[] = [];
+  for (const form of region.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)) {
+    const action = readPageForm(form[1]!, form[2]!, pageUrl, labelsFor);
+    if (action) actions.push(action);
+  }
+  return actions;
+}
+
+function readPageForm(
+  attributes: string,
+  content: string,
+  pageUrl: URL,
+  labelsFor: Map<string, string>,
+): FarmPageFormAction | undefined {
+  const method = readDecodedAttribute(attributes, "method")?.trim().toLowerCase();
+  // A dialog form closes its dialog; it submits nothing.
+  if (method === "dialog") return undefined;
+  const target = resolveFormTarget(readDecodedAttribute(attributes, "action"), pageUrl);
+  const form: FarmPageFormAction = {
+    type: "form",
+    method: method === "post" ? "POST" : "GET",
+    fields: [],
+    submit: [],
+  };
+  const name =
+    readDecodedAttribute(attributes, "aria-label") ??
+    readDecodedAttribute(attributes, "name") ??
+    readDecodedAttribute(attributes, "id");
+  if (name?.trim()) form.name = name.trim();
+  if (target) form.action = target;
+  else form.requiresJavaScript = true;
+  if (form.method === "POST") {
+    const enctype = readDecodedAttribute(attributes, "enctype")?.trim().toLowerCase();
+    form.enctype =
+      enctype && FORM_ENCTYPES.has(enctype) ? enctype : "application/x-www-form-urlencoded";
+  }
+
+  const wrappingLabels = [...content.matchAll(/<label\b[^>]*>([\s\S]*?)<\/label>/gi)].map(
+    (match) => ({
+      start: match.index!,
+      end: match.index! + match[0].length,
+      text: readLabelText(match[1]!),
+    }),
+  );
+  const labelOf = (controlAttributes: string, index: number) => {
+    const aria = readDecodedAttribute(controlAttributes, "aria-label")?.trim();
+    if (aria) return aria;
+    const id = readDecodedAttribute(controlAttributes, "id");
+    const forLabel = id ? labelsFor.get(id) : undefined;
+    if (forLabel) return forLabel;
+    const wrapping = wrappingLabels.find((label) => label.start < index && index < label.end);
+    return wrapping?.text || undefined;
+  };
+  const groups = new Map<string, FarmPageFormField>();
+
+  const controls = /<(input)\b([^>]*)>|<(select|textarea|button)\b([^>]*)>([\s\S]*?)<\/\3>/gi;
+  for (const match of content.matchAll(controls)) {
+    const tag = (match[1] ?? match[3]!).toLowerCase();
+    const controlAttributes = match[2] ?? match[4]!;
+    const inner = match[5] ?? "";
+    if (hasHtmlAttribute(controlAttributes, "disabled")) continue;
+    const label = labelOf(controlAttributes, match.index!);
+    const fieldName = readDecodedAttribute(controlAttributes, "name");
+    // A button with no type submits its form.
+    const typeAttribute = readDecodedAttribute(controlAttributes, "type")?.trim().toLowerCase();
+    const type =
+      tag === "input"
+        ? (typeAttribute ?? "text")
+        : tag === "button"
+          ? (typeAttribute ?? "submit")
+          : tag;
+
+    if (
+      (tag === "button" && !["button", "reset"].includes(type)) ||
+      (tag === "input" && (type === "submit" || type === "image"))
+    ) {
+      const submit: FarmPageFormSubmit = {
+        label:
+          (tag === "button" ? readLabelText(inner) : "") ||
+          readDecodedAttribute(controlAttributes, "value") ||
+          readDecodedAttribute(controlAttributes, "alt") ||
+          label ||
+          "Submit",
+      };
+      if (fieldName) submit.name = fieldName;
+      const value = readDecodedAttribute(controlAttributes, "value");
+      if (fieldName && value !== undefined) submit.value = value;
+      const formAction = readDecodedAttribute(controlAttributes, "formaction");
+      if (formAction !== undefined) {
+        const resolved = resolveFormTarget(formAction, pageUrl);
+        if (resolved) submit.action = resolved;
+      }
+      const formMethod = readDecodedAttribute(controlAttributes, "formmethod")?.toLowerCase();
+      if (formMethod === "get" || formMethod === "post") submit.method = formMethod.toUpperCase();
+      form.submit.push(submit);
+      continue;
+    }
+    if (tag === "button" || type === "button" || type === "reset" || !fieldName) continue;
+
+    if (type === "hidden") {
+      const value = readDecodedAttribute(controlAttributes, "value") ?? "";
+      form.fields.push({ name: fieldName, type, value });
+      // React renders a server action as hidden fields: `$ACTION_ID_<id>`, or a
+      // `$ACTION_<prefix>:0` field whose JSON value names the action.
+      if (fieldName.startsWith("$ACTION_ID_")) {
+        form.serverAction ??= { id: fieldName.slice("$ACTION_ID_".length) };
+      } else if (/^\$ACTION_[^:]*:0$/.test(fieldName)) {
+        try {
+          const id = (JSON.parse(value) as { id?: unknown }).id;
+          if (typeof id === "string") form.serverAction ??= { id };
+        } catch {
+          // Not a React action reference.
+        }
+      }
+      continue;
+    }
+
+    if (type === "radio" || type === "checkbox") {
+      const value = readDecodedAttribute(controlAttributes, "value") ?? "on";
+      const option: FarmPageFormOption = { value };
+      if (label) option.label = label;
+      if (hasHtmlAttribute(controlAttributes, "checked")) option.selected = true;
+      const group = groups.get(fieldName);
+      if (group) {
+        group.options!.push(option);
+        if (hasHtmlAttribute(controlAttributes, "required")) group.required = true;
+        continue;
+      }
+      const field: FarmPageFormField = { name: fieldName, type, options: [option] };
+      if (hasHtmlAttribute(controlAttributes, "required")) field.required = true;
+      groups.set(fieldName, field);
+      form.fields.push(field);
+      continue;
+    }
+
+    const field: FarmPageFormField = { name: fieldName, type };
+    if (label) field.label = label;
+    if (hasHtmlAttribute(controlAttributes, "required")) field.required = true;
+    if (hasHtmlAttribute(controlAttributes, "multiple")) field.multiple = true;
+    if (tag === "select") {
+      field.options = [...inner.matchAll(/<option\b([^>]*)>([\s\S]*?)(?=<\/option>|<option\b|$)/gi)]
+        .filter((option) => !hasHtmlAttribute(option[1]!, "disabled"))
+        .map((option) => {
+          const text = readLabelText(option[2]!);
+          const entry: FarmPageFormOption = {
+            value: readDecodedAttribute(option[1]!, "value") ?? text,
+          };
+          if (text && text !== entry.value) entry.label = text;
+          if (hasHtmlAttribute(option[1]!, "selected")) entry.selected = true;
+          return entry;
+        });
+    } else if (tag === "textarea") {
+      const value = decodeHtml(inner);
+      if (value) field.value = value;
+    } else {
+      const value = readDecodedAttribute(controlAttributes, "value");
+      if (value !== undefined && type !== "password" && type !== "file") field.value = value;
+    }
+    for (const key of ["placeholder", "pattern", "min", "max", "step", "accept"] as const) {
+      const value = readDecodedAttribute(controlAttributes, key);
+      if (value !== undefined) field[key] = value;
+    }
+    for (const [attribute, key] of [
+      ["minlength", "minLength"],
+      ["maxlength", "maxLength"],
+    ] as const) {
+      const value = Number.parseInt(readDecodedAttribute(controlAttributes, attribute) ?? "", 10);
+      if (Number.isFinite(value) && value >= 0) field[key] = value;
+    }
+    form.fields.push(field);
+  }
+
+  // A form with nothing to submit, such as a lone toggle, is not an action.
+  if (form.fields.length === 0 && form.submit.length === 0) return undefined;
+  if (form.submit.length === 0) form.submit.push({ label: "Submit" });
+  return form;
+}
+
+/**
+ * Resolves a form's `action` against the page, as a browser does: absent or
+ * empty submits to the page itself. Same-origin targets are root-relative, so
+ * the description never echoes a Host header; `javascript:` targets need a
+ * script, so they have none.
+ */
+function resolveFormTarget(action: string | undefined, pageUrl: URL): string | undefined {
+  let target: URL;
+  try {
+    target = new URL(action?.trim() || pageUrl.href, pageUrl);
+  } catch {
+    return undefined;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") return undefined;
+  target.hash = "";
+  return target.origin === pageUrl.origin ? `${target.pathname}${target.search}` : target.href;
+}
+
+function readLabelText(html: string): string {
+  return decodeHtml(stripTags(html.replace(/<(select|textarea|button)\b[\s\S]*?<\/\1>/gi, " ")))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function readDecodedAttribute(attributes: string, name: string): string | undefined {
+  const value = readHtmlAttribute(attributes, name);
+  return value === undefined ? undefined : decodeHtml(value);
+}
+
+/** Whether a tag has an attribute, including a boolean one written without a value. */
+function hasHtmlAttribute(attributes: string, name: string): boolean {
+  return new RegExp(`(?:^|\\s)${name}(?=\\s|=|/|$)`, "i").test(attributes);
 }
 
 /** Value of one attribute in a tag's attribute text, or undefined when absent. */

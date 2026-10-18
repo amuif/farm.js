@@ -1,8 +1,11 @@
 /**
  * Partial reads of a Markdown representation for agents: `?outline` returns the
- * heading tree, `?section=<id>` returns one section. Every Markdown response also
+ * heading tree, `?section=<id>` returns one section, `?actions` lists the page's
+ * forms as JSON. Every Markdown response also
  * carries an ETag so an agent can re-check a page with `If-None-Match`.
  */
+
+import type { FarmPageFormAction } from "./markdown";
 
 export interface FarmMarkdownHeading {
   /** GitHub-style slug, unique within the document. */
@@ -134,6 +137,20 @@ export function selectFarmMarkdownView(
   };
 }
 
+/** The page's forms as JSON, linked back to the page and its Markdown. */
+function selectFarmPageActionsView(
+  markdownPath: string,
+  actions: readonly FarmPageFormAction[],
+  headers: Headers,
+): FarmMarkdownView {
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  const page = markdownPath === "/index.md" ? "/" : markdownPath.replace(/\.md$/, "");
+  return {
+    status: 200,
+    body: `${JSON.stringify({ page, markdown: markdownPath, actions }, null, 2)}\n`,
+  };
+}
+
 /** Weak ETag over the body, synchronous so it works on every runtime. */
 export function createFarmMarkdownETag(body: string): string {
   // cyrb53: fast, well-distributed, and no dependency on node:crypto.
@@ -161,7 +178,8 @@ function ifNoneMatchIncludes(header: string | null, etag: string): boolean {
 
 /**
  * Build the final Markdown response: apply `?outline` / `?section`, add an
- * ETag, and answer a matching `If-None-Match` with 304.
+ * ETag, and answer a matching `If-None-Match` with 304. `?actions` answers with
+ * the page's forms as JSON instead; a Markdown source has none.
  */
 export function createFarmMarkdownViewResponse(options: {
   request: Request;
@@ -170,9 +188,12 @@ export function createFarmMarkdownViewResponse(options: {
   status: number;
   headers: Headers;
   markdownPath: string;
+  actions?: readonly FarmPageFormAction[];
 }): Response {
   const url = options.requestUrl ?? new URL(options.request.url);
-  const view = selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
+  const view = url.searchParams.has("actions")
+    ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
+    : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
   const status = view.status === 200 ? options.status : view.status;
   const etag = createFarmMarkdownETag(view.body);
   options.headers.set("ETag", etag);

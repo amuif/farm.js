@@ -1201,6 +1201,66 @@ export default function Account() {
     }
   }, 120_000);
 
+  it("describes a page's forms at its Markdown mirror's ?actions view", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "contact"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "contact", "page.tsx"),
+        `export default function Contact() {
+  return (
+    <main>
+      <h1>Contact</h1>
+      <form method="post" action="/api/contact">
+        <label htmlFor="email">Email</label>
+        <input id="email" name="email" type="email" required />
+        <button>Send</button>
+      </form>
+    </main>
+  );
+}`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-markdown-actions-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("Actions: /contact.md?actions");
+
+          const actions = await fetch(new URL("/contact.md?actions", response.url));
+          expect(actions.status).toBe(200);
+          expect(actions.headers.get("content-type")).toBe("application/json; charset=utf-8");
+          expect((await actions.json()).actions).toEqual([
+            {
+              type: "form",
+              method: "POST",
+              action: "/api/contact",
+              enctype: "application/x-www-form-urlencoded",
+              fields: [{ name: "email", type: "email", label: "Email", required: true }],
+              submit: [{ label: "Send" }],
+            },
+          ]);
+        },
+        "/contact.md",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("advertises the Markdown mirror of a prerendered page", async () => {
     const root = await createProductionFixture();
 
