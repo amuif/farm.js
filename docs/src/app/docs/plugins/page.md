@@ -192,6 +192,11 @@ Awaiting the Farm dev server's `close()` waits for an in-progress restart, close
 Vite server, and then awaits plugin cleanup and instrumentation shutdown exactly once. Cleanup
 errors reject `close()`. New restart requests are rejected once final shutdown begins.
 
+If initial development-server creation fails, Farm awaits cleanup of the resources it has
+created before rejecting: the returned Vite server (if available), registered plugin shutdown
+hooks and disposers, and instrumentation. A failing `onError` hook or cleanup step is reported
+separately and does not replace the original startup error or skip the remaining cleanup.
+
 ### Runtime hooks
 
 | Hook                | Runs                                                         | May return                                                       |

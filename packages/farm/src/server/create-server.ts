@@ -139,6 +139,7 @@ function withPortFlag(vite: FarmConfig["vite"], port: number | undefined): FarmC
 export async function createServer(config: FarmConfig = {}, options: { port?: number } = {}) {
   let pluginManager: PluginManager | null = null;
   let instrumentation: FarmInstrumentationLifecycle | null = null;
+  let server: ViteDevServer | undefined;
   try {
     const root = config.root || process.cwd();
 
@@ -240,7 +241,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
       tailwindVitePlugin = await loadTailwindVitePlugin();
     }
 
-    const server = await createViteServer(
+    server = await createViteServer(
       mergeFarmViteConfig(
         {
           root: projectRoot,
@@ -327,13 +328,32 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
 
     return server;
   } catch (error) {
-    if (pluginManager) {
-      await pluginManager.runHookParallel("onError", {
+    // The caller never receives a server on failure, so creation owns cleanup.
+    // Report secondary failures without replacing the original startup error or
+    // preventing the remaining resources from being released.
+    const attempt = async (operation: string, run: () => unknown) => {
+      try {
+        await run();
+      } catch (cleanupError) {
+        console.error(`Failed to ${operation} after a server creation failure:`, cleanupError);
+      }
+    };
+    await attempt("run plugin error hooks", () =>
+      pluginManager?.runHookParallel("onError", {
         phase: "createServer",
         error,
-      });
+      }),
+    );
+    if (server) {
+      // The existing close owner drains Vite, plugins, and instrumentation,
+      // even when an individual shutdown step rejects.
+      await attempt("close the dev server", server.close.bind(server));
+    } else {
+      await attempt("close the plugin runtime", () =>
+        pluginManager?.closeRuntime("dev-server-creation-failed"),
+      );
+      await attempt("shut down instrumentation", () => instrumentation?.shutdown());
     }
-    await instrumentation?.shutdown().catch(() => {});
     logger.error(`Failed to create server: ${error}`);
     throw error;
   }
