@@ -399,6 +399,16 @@ describe("resolveConfig", () => {
     ).rejects.toThrow("agent.noindexPreviews must be a boolean.");
   });
 
+  it("keeps the API catalog off by default", async () => {
+    expect((await resolveConfig({}, "production")).agent.apiCatalog).toBe(false);
+    expect(
+      (await resolveConfig({ agent: { apiCatalog: true } }, "production")).agent.apiCatalog,
+    ).toBe(true);
+    await expect(
+      resolveConfig({ agent: { apiCatalog: "yes" as never } }, "production"),
+    ).rejects.toThrow("agent.apiCatalog must be a boolean.");
+  });
+
   it("resolves the agent config with JSON-LD and llms.txt off by default", async () => {
     const defaults = await resolveConfig({}, "production");
     expect(defaults.agent.jsonLd).toBe(false);

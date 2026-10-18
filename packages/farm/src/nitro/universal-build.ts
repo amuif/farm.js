@@ -1,5 +1,6 @@
 import { createBundledEnv } from "../env";
 import { getFarmMarkdownAlternatePath } from "../markdown";
+import { FARM_API_CATALOG_PATH, resolveFarmApiCatalogInput } from "../api-catalog";
 import type { RedirectConfig, ResolvedFarmConfig, RewriteConfig } from "../config";
 import { hasCustomFarmRouteContext, resolveDeployOutputPath } from "../config";
 import {
@@ -5505,6 +5506,7 @@ function isolateFarmRouteServerPage(element) { return element; }`;
   createFarmCacheKey,
   createFarmMetadataRouteResponse,
   createFarmAgentRobots,
+  createFarmApiCatalogResponse,
   collectFarmLlmsTxtPages,
   createFarmDefaultLlmsTxt,
   createFarmLlmsMarkdownReader,
@@ -6159,7 +6161,11 @@ const apiRoutes = ${apiRoutes.length > 0 ? "mergePluginAPIRoutes(" : ""}[${apiRe
   };
 const farmLocalAPIBasePath = ${JSON.stringify(resolveFarmAPIServerBasePath(config.api))};
 const farmOpenAPIReference = ${JSON.stringify(openAPIReference)};
-
+${
+  config.agent?.apiCatalog
+    ? `const farmApiCatalogInput = ${JSON.stringify(resolveFarmApiCatalogInput(config))};\n`
+    : ""
+}
 function isFarmLocalAPIPathname(pathname) {
   return farmLocalAPIBasePath !== "/" &&
     (pathname === farmLocalAPIBasePath ||
@@ -7947,6 +7953,19 @@ async function handleFarmRequestInContext(
   );
   if (applicationMetadataResponse) {
     return applyProductionMiddlewareHeaders(applicationMetadataResponse, middlewareHeaders);
+  }
+  `
+      : ""
+  }
+  ${
+    config.agent?.apiCatalog
+      ? `
+  // agent.apiCatalog: list the OpenAPI and MCP surfaces at the RFC 9727 path.
+  if (normalizeRuntimePath(routePathname) === ${JSON.stringify(FARM_API_CATALOG_PATH)}) {
+    return applyProductionMiddlewareHeaders(
+      createFarmApiCatalogResponse(request.method, farmApiCatalogInput),
+      middlewareHeaders,
+    );
   }
   `
       : ""

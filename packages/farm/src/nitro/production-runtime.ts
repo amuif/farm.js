@@ -51,6 +51,7 @@ export {
 } from "../metadata";
 export { createFarmMetadataRouteResponse } from "../metadata-route";
 export { createFarmAgentRobots } from "../agent-crawlers";
+export { createFarmApiCatalogResponse } from "../api-catalog";
 export {
   collectFarmLlmsTxtPages,
   createFarmDefaultLlmsTxt,

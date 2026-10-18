@@ -75,6 +75,15 @@ export interface FarmAgentUserConfig {
    * @default false
    */
   crawlers?: boolean | FarmAgentCrawlers;
+  /**
+   * Serve `/.well-known/api-catalog` (RFC 9727): a Linkset listing the app's
+   * OpenAPI description and reference (when `openapi` is enabled) and its MCP
+   * endpoint (when the top-level `mcp` is enabled), so agents can find them
+   * from the origin alone.
+   *
+   * @default false
+   */
+  apiCatalog?: boolean;
 }
 
 export interface ResolvedFarmAgentConfig {
@@ -82,6 +91,7 @@ export interface ResolvedFarmAgentConfig {
   noindexPreviews: boolean;
   llmsTxt: ResolvedFarmLlmsTxtConfig;
   crawlers: ResolvedFarmAgentCrawlers;
+  apiCatalog: boolean;
 }
 
 export function resolveFarmAgentConfig(
@@ -93,7 +103,14 @@ export function resolveFarmAgentConfig(
     noindexPreviews: resolveFarmNoindexPreviews(input?.noindexPreviews),
     llmsTxt: resolveFarmLlmsTxtConfig(input?.llmsTxt),
     crawlers: resolveFarmAgentCrawlers(input?.crawlers),
+    apiCatalog: resolveFarmApiCatalogEnabled(input?.apiCatalog),
   };
+}
+
+function resolveFarmApiCatalogEnabled(input: unknown): boolean {
+  if (input === undefined) return false;
+  if (typeof input !== "boolean") throw new TypeError("agent.apiCatalog must be a boolean.");
+  return input;
 }
 
 // Keep the existing internal imports compatible while browser metadata consumes

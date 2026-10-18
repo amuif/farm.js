@@ -1069,6 +1069,7 @@ export default function Page() {
           images: { provider: "none" },
           telemetry: false,
           openapi: { enabled: true, title: "Base Path API" },
+          agent: { apiCatalog: true },
           generateBuildId: () => "production-base-path-openapi-test",
         },
         "production",
@@ -1085,6 +1086,21 @@ export default function Page() {
           const spec = await fetch(new URL("/workspace/openapi.json", response.url));
           expect(spec.status).toBe(200);
           expect((await spec.json()).paths["/health"].get.operationId).toBe("get_health");
+
+          const catalog = await fetch(new URL("/workspace/.well-known/api-catalog", response.url));
+          expect(catalog.status).toBe(200);
+          expect(catalog.headers.get("content-type")).toContain("application/linkset+json");
+          expect(catalog.headers.get("link")).toBe(
+            '</workspace/.well-known/api-catalog>; rel="api-catalog"',
+          );
+          const [, catalogApi] = (await catalog.json()).linkset;
+          // The links resolve on the production server, as in development.
+          expect((await fetch(new URL(`${catalogApi.anchor}/health`, response.url))).status).toBe(
+            200,
+          );
+          expect(
+            (await fetch(new URL(catalogApi["service-desc"][0].href, response.url))).status,
+          ).toBe(200);
 
           const page = await fetch(new URL("/workspace/admin", response.url), {
             headers: { accept: "text/html" },

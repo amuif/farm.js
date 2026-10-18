@@ -254,7 +254,7 @@ mount, and shortcut together.
 | integrations  | Registering built-in or custom integrations.                                           |
 | auth          | Enabling Farm's built-in email/password auth, sessions, helpers, and hooks.            |
 | mcp           | Composing API routes and standalone tools in one authenticated MCP server.             |
-| agent         | Opt-in agent readiness: llms.txt, schema.org JSON-LD, and AI crawler rules.            |
+| agent         | Opt-in agent readiness: llms.txt, JSON-LD, AI crawler rules, and an API catalog.       |
 | theme         | Enabling light, dark, and system modes with client and server APIs.                    |
 | storage       | Configuring KV drivers/mounts and, in the current beta, an integration DB client.      |
 | migrations    | Running one-shot schema/provider commands with `farm migrate`.                         |
@@ -425,6 +425,7 @@ export default defineConfig({
     noindexPreviews: true,
     jsonLd: true,
     crawlers: { search: "allow", training: "block" },
+    apiCatalog: true,
   },
 });
 ```
@@ -554,6 +555,34 @@ The app's own file wins. Farm serves `/robots.txt` from, in order:
 2. A root [`robots.ts` metadata route](/docs/routing#application-metadata-routes) in `src/app`.
 3. The generated file from `agent.crawlers`.
 4. The [docs engine](/docs/docs-engine)'s robots.txt, when the docs engine is enabled.
+
+### API catalog
+
+`apiCatalog: true` serves `/.well-known/api-catalog` ([RFC 9727](https://www.rfc-editor.org/rfc/rfc9727)),
+so an agent that knows only your origin can find your APIs. It is a Linkset
+(`application/linkset+json`) listing:
+
+- the HTTP API, with its OpenAPI spec as `service-desc` and the API reference as `service-doc`,
+  when [`openapi`](/docs/openapi) is enabled;
+- the MCP endpoint, when the top-level [`mcp`](/docs/plugins/mcp) config is enabled.
+
+```json title="/.well-known/api-catalog"
+{
+  "linkset": [
+    { "anchor": "/.well-known/api-catalog", "item": [{ "href": "/api" }, { "href": "/api/mcp" }] },
+    {
+      "anchor": "/api",
+      "service-desc": [{ "href": "/openapi.json", "type": "application/vnd.oai.openapi+json" }],
+      "service-doc": [{ "href": "/docs/reference", "type": "text/html" }]
+    }
+  ]
+}
+```
+
+Links are root-relative, so they resolve against the catalog URL and follow the `basePath`. A `HEAD`
+request returns the `Link: </.well-known/api-catalog>; rel="api-catalog"` header the RFC requires.
+Listing the MCP endpoint does not open it: its `authorize` check still applies. An MCP server added
+through `apiMcp()` in `plugins` is not listed; use the top-level `mcp` config.
 
 ## Isolated client hydration
 

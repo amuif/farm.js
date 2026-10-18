@@ -66,6 +66,11 @@ import {
   normalizeFarmMarkdownRoutePath,
 } from "./app-markdown";
 import { applyWebResponseHeaders, sendWebResponse } from "./server/response";
+import {
+  createFarmApiCatalogResponse,
+  FARM_API_CATALOG_PATH,
+  resolveFarmApiCatalogInput,
+} from "./api-catalog";
 import { resolveDevGlobalStylesheetHref } from "./server/dev-styles";
 import { FARM_LAYOUT_ELEMENT_CLIENT_SOURCE } from "./document-layout-client";
 import {
@@ -1954,6 +1959,22 @@ window.__FARM_MANIFEST__ = ${inlineValue({
             if (await runAppMiddlewareForContentRoute()) return;
             const docsHandler = openAPIManager.getDocsRouteHandler(parsedRequestUrl.origin);
             return docsHandler(req, res);
+          }
+
+          // agent.apiCatalog: list the OpenAPI and MCP surfaces at the RFC 9727 path.
+          if (
+            options.agent?.apiCatalog &&
+            stripFarmBasePath(requestPathname, farmConfig.basePath) === FARM_API_CATALOG_PATH
+          ) {
+            if (await runAppMiddlewareForContentRoute()) return;
+            await sendWebResponse(
+              res,
+              createFarmApiCatalogResponse(
+                requestMethod,
+                resolveFarmApiCatalogInput({ ...options, api: farmConfig.api }),
+              ),
+            );
+            return;
           }
 
           const docsHeaders = new Headers();

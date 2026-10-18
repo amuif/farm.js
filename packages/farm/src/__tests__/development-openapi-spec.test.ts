@@ -102,4 +102,25 @@ describe("development OpenAPI spec route", () => {
     expect(reference.status).toBe(200);
     expect(await reference.text()).toContain("<title>Dev API</title>");
   }, 30_000);
+
+  it("lists the OpenAPI surfaces at /.well-known/api-catalog", async () => {
+    const origin = await startApp(`basePath: "/app", agent: { apiCatalog: true },`);
+
+    const response = await fetch(`${origin}/app/.well-known/api-catalog`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/linkset+json");
+    expect(response.headers.get("link")).toBe('</app/.well-known/api-catalog>; rel="api-catalog"');
+    const { linkset } = await response.json();
+    const api = linkset[1];
+    expect(linkset[0].item).toEqual([{ href: api.anchor }]);
+    // Every listed link resolves on this server.
+    expect((await fetch(`${origin}${api.anchor}/health`)).status).toBe(200);
+    expect((await fetch(`${origin}${api["service-desc"][0].href}`)).status).toBe(200);
+    expect((await fetch(`${origin}${api["service-doc"][0].href}`)).status).toBe(200);
+  }, 30_000);
+
+  it("does not serve /.well-known/api-catalog unless agent.apiCatalog is on", async () => {
+    const origin = await startApp();
+    expect((await fetch(`${origin}/.well-known/api-catalog`)).status).toBe(404);
+  }, 30_000);
 });
