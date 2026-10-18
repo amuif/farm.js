@@ -220,11 +220,12 @@ production, so they answer every request with HTML. They still send the `Link` h
 ## Read part of a page
 
 Agents can fetch less than the whole page. Every Markdown response, from a mirror or a `page.md`,
-accepts two query parameters:
+accepts these query parameters:
 
 ```bash
 curl "http://localhost:3000/pricing.md?outline"
 curl "http://localhost:3000/pricing.md?section=plans"
+curl "http://localhost:3000/pricing.md?max_tokens=2000"
 ```
 
 - `?outline` returns the heading tree. Each entry links to its section and estimates its size in
@@ -232,10 +233,37 @@ curl "http://localhost:3000/pricing.md?section=plans"
 - `?section=<id>` returns one heading and everything under it, up to the next heading at the same
   or a higher level. Ids follow GitHub's heading anchors (`## Team plans` is `team-plans`; a
   repeated heading gets `-1`, `-2`). An unknown id answers `404` with the list of valid ids.
+- `?max_tokens=<n>` returns the page, or the section with `?section`, in parts of about `n` tokens
+  (at least 100). See [Read a long page in parts](#read-a-long-page-in-parts).
 
 Headings inside fenced code blocks and front matter are ignored. Every Markdown response also
 carries an `ETag`, so an agent can re-check a page with `If-None-Match` and receive `304 Not
 Modified` when it has not changed.
+
+### Read a long page in parts
+
+`?max_tokens=<n>` keeps each response within an agent's budget. A page that fits comes back whole.
+A longer one comes back in parts, each cut where a reader would pause, before a heading or after a
+paragraph, and ending with a link to the next part:
+
+```md
+## Install
+
+...
+
+---
+
+Continue: /guide.md?max_tokens=2000&cursor=48.k3j9x2a1 (about 3100 more tokens)
+```
+
+The same link is in a `Link: </guide.md?max_tokens=2000&cursor=48.k3j9x2a1>; rel="next"` header,
+and the last part has neither. A part never splits a code block unless the block alone is larger
+than the budget; then the part closes the block and the next one reopens it with the same language,
+so every part is valid Markdown. Token counts are estimates of about four characters per token.
+
+The cursor names where to continue and which version of the page it belongs to. If the page changes
+between requests, the next part answers `409` with a link to start again, rather than continuing
+from a position that no longer lines up. A malformed cursor or a budget under 100 answers `400`.
 
 ## Describe a page's forms
 

@@ -1,7 +1,8 @@
 /**
  * Partial reads of a Markdown representation for agents: `?outline` returns the
- * heading tree, `?section=<id>` returns one section, `?actions` lists the page's
- * forms as JSON. Every Markdown response also
+ * heading tree, `?section=<id>` returns one section, `?max_tokens=<n>` returns the
+ * document (or section) in parts that fit a token budget, `?actions` lists the
+ * page's forms as JSON. Every Markdown response also
  * carries an ETag so an agent can re-check a page with `If-None-Match`.
  */
 
@@ -90,7 +91,12 @@ export function estimateFarmMarkdownTokens(text: string): number {
 export interface FarmMarkdownView {
   status: number;
   body: string;
+  /** Extra response headers, such as the `Link` to the next part. */
+  headers?: Record<string, string>;
 }
+
+/** The smallest `?max_tokens` budget, so reading a page never takes hundreds of requests. */
+export const FARM_MARKDOWN_MIN_TOKEN_BUDGET = 100;
 
 /**
  * Select the part of a Markdown document a request asks for. Returns the whole
@@ -103,16 +109,30 @@ export function selectFarmMarkdownView(
 ): FarmMarkdownView {
   const wantsOutline = searchParams.has("outline");
   const sectionId = searchParams.get("section");
-  if (!wantsOutline && sectionId === null) return { status: 200, body: markdown };
+  const budget = searchParams.get("max_tokens");
+  if (!wantsOutline && sectionId === null && budget === null)
+    return { status: 200, body: markdown };
 
   const lines = markdown.split("\n");
   const headings = parseFarmMarkdownHeadings(markdown);
   const sectionText = (heading: FarmMarkdownHeading) =>
     lines.slice(heading.start, heading.end).join("\n").trim();
+  const withinBudget = (document: string): FarmMarkdownView =>
+    budget === null
+      ? { status: 200, body: document }
+      : selectFarmMarkdownPart(document, budget, searchParams.get("cursor"), (cursor) => {
+          const next = new URLSearchParams();
+          if (sectionId !== null) next.set("section", sectionId);
+          next.set("max_tokens", budget);
+          if (cursor) next.set("cursor", cursor);
+          return `${markdownPath}?${next.toString()}`;
+        });
+
+  if (!wantsOutline && sectionId === null) return withinBudget(markdown);
 
   if (sectionId !== null) {
     const heading = headings.find((candidate) => candidate.id === sectionId);
-    if (heading) return { status: 200, body: `${sectionText(heading)}\n` };
+    if (heading) return withinBudget(`${sectionText(heading)}\n`);
     const available = headings.map((candidate) => `- \`${candidate.id}\``).join("\n");
     return {
       status: 404,
@@ -132,7 +152,7 @@ export function selectFarmMarkdownView(
     status: 200,
     body:
       `# Outline of ${markdownPath}\n\n` +
-      `About ${estimateFarmMarkdownTokens(markdown)} tokens in total. Request one section with \`?section=<id>\`.\n\n` +
+      `About ${estimateFarmMarkdownTokens(markdown)} tokens in total. Request one section with \`?section=<id>\`, or read in parts with \`?max_tokens=<n>\`.\n\n` +
       (entries.length > 0 ? `${entries.join("\n")}\n` : "This page has no headings.\n"),
   };
 }
@@ -151,9 +171,119 @@ function selectFarmPageActionsView(
   };
 }
 
+/**
+ * One part of a document that fits `?max_tokens`, cut where a reader would
+ * pause: before a heading or after a blank line, never inside a code block
+ * unless a single block is larger than the budget. A block cut that way is
+ * closed at the end of this part and reopened at the start of the next. The
+ * cursor names the line to continue from and the document it belongs to, so a
+ * page that changes between requests is reported instead of read misaligned.
+ */
+function selectFarmMarkdownPart(
+  document: string,
+  rawBudget: string,
+  rawCursor: string | null,
+  partUrl: (cursor?: string) => string,
+): FarmMarkdownView {
+  const budget = /^\d{1,9}$/.test(rawBudget) ? Number(rawBudget) : Number.NaN;
+  if (!(budget >= FARM_MARKDOWN_MIN_TOKEN_BUDGET)) {
+    return {
+      status: 400,
+      body: `# Invalid max_tokens\n\n\`max_tokens\` must be a whole number of at least ${FARM_MARKDOWN_MIN_TOKEN_BUDGET}.\n`,
+    };
+  }
+
+  const lines = document.replace(/\n$/, "").split("\n");
+  const version = hashFarmMarkdown(document).slice(0, 8);
+  let start = 0;
+  if (rawCursor !== null) {
+    const match = /^(\d{1,9})\.([0-9a-z]+)$/.exec(rawCursor);
+    if (!match || Number(match[1]) <= 0 || Number(match[1]) >= lines.length) {
+      return {
+        status: 400,
+        body: `# Invalid cursor\n\nStart again at ${partUrl()}.\n`,
+      };
+    }
+    if (match[2] !== version) {
+      return {
+        status: 409,
+        body: `# Page changed\n\nThe page changed after this cursor was issued. Start again at ${partUrl()}.\n`,
+      };
+    }
+    start = Number(match[1]);
+  }
+
+  const fences = readOpenFences(lines);
+  const reopen = fences[start];
+  // Room for the reopened fence and the continuation line, at about four characters a token.
+  const room = budget * 4 - 200;
+  let size = reopen ? reopen.opener.length + 1 : 0;
+  let end = start;
+  let lastBreak = -1;
+  while (end < lines.length) {
+    const length = lines[end]!.length + 1;
+    if (end > start && size + length > room) break;
+    size += length;
+    end++;
+    if (end < lines.length && isPartBreak(lines, fences, end)) lastBreak = end;
+  }
+
+  const head = reopen ? `${reopen.opener}\n` : "";
+  if (end >= lines.length) {
+    return { status: 200, body: `${head}${lines.slice(start).join("\n")}\n` };
+  }
+  if (lastBreak > start) end = lastBreak;
+  const open = fences[end];
+  const part = `${head}${lines.slice(start, end).join("\n").replace(/\n+$/, "")}${open ? `\n${open.closer}` : ""}`;
+  const next = partUrl(`${end}.${version}`);
+  const remaining = estimateFarmMarkdownTokens(lines.slice(end).join("\n"));
+  return {
+    status: 200,
+    body: `${part}\n\n---\n\nContinue: ${next} (about ${remaining} more tokens)\n`,
+    headers: { Link: `<${next}>; rel="next"` },
+  };
+}
+
+interface OpenFence {
+  opener: string;
+  closer: string;
+}
+
+/** For each line, the code fence still open where that line begins, if any. */
+function readOpenFences(lines: string[]): (OpenFence | undefined)[] {
+  const open: (OpenFence | undefined)[] = [];
+  let fence: (OpenFence & { marker: string }) | undefined;
+  let frontMatter = lines[0]?.trim() === "---";
+  for (let index = 0; index < lines.length; index++) {
+    // Front matter is never cut, so it counts as an open block with nothing to reopen.
+    open.push(frontMatter && index > 0 ? { opener: "", closer: "" } : fence);
+    const line = lines[index]!;
+    if (frontMatter) {
+      if (index > 0 && line.trim() === "---") frontMatter = false;
+      continue;
+    }
+    const match = FENCE.exec(line);
+    if (!match) continue;
+    const marker = match[1]!;
+    if (!fence) fence = { opener: line.trim(), closer: marker, marker };
+    else if (marker[0] === fence.marker[0] && marker.length >= fence.marker.length)
+      fence = undefined;
+  }
+  return open;
+}
+
+function isPartBreak(lines: string[], fences: (OpenFence | undefined)[], index: number): boolean {
+  if (fences[index]) return false;
+  return lines[index - 1]!.trim() === "" || ATX_HEADING.test(lines[index]!);
+}
+
 /** Weak ETag over the body, synchronous so it works on every runtime. */
 export function createFarmMarkdownETag(body: string): string {
-  // cyrb53: fast, well-distributed, and no dependency on node:crypto.
+  return `W/"${hashFarmMarkdown(body)}-${body.length.toString(36)}"`;
+}
+
+/** cyrb53 in base 36: fast, well-distributed, and no dependency on node:crypto. */
+function hashFarmMarkdown(body: string): string {
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
   for (let index = 0; index < body.length; index++) {
@@ -163,8 +293,7 @@ export function createFarmMarkdownETag(body: string): string {
   }
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  const hash = (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
-  return `W/"${hash}-${body.length.toString(36)}"`;
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
 function ifNoneMatchIncludes(header: string | null, etag: string): boolean {
@@ -195,6 +324,8 @@ export function createFarmMarkdownViewResponse(options: {
     ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
     : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
   const status = view.status === 200 ? options.status : view.status;
+  for (const [name, value] of Object.entries(view.headers ?? {}))
+    options.headers.append(name, value);
   const etag = createFarmMarkdownETag(view.body);
   options.headers.set("ETag", etag);
 

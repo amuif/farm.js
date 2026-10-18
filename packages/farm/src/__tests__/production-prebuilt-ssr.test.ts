@@ -1269,6 +1269,19 @@ export default function Account() {
               submit: [{ label: "Send" }],
             },
           ]);
+
+          // The other views reach the production mirror too: a page that fits a
+          // budget comes back whole, and a bad cursor is reported, not ignored.
+          const outline = await fetch(new URL("/contact.md?outline", response.url));
+          expect(await outline.text()).toContain("- [Contact](/contact.md?section=contact)");
+          const budgeted = await fetch(new URL("/contact.md?max_tokens=100", response.url));
+          expect(budgeted.status).toBe(200);
+          expect(budgeted.headers.get("link") ?? "").not.toContain('rel="next"');
+          expect(await budgeted.text()).toContain("# Contact");
+          const stale = await fetch(
+            new URL("/contact.md?max_tokens=100&cursor=1.stale", response.url),
+          );
+          expect(stale.status).toBe(409);
         },
         "/contact.md",
       );
