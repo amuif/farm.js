@@ -449,7 +449,8 @@ or credentials, so a page behind auth is left out rather than copied into a file
 still serves that path). Rendering llms-full.txt renders every listed page. The production server shares one
 render between concurrent requests and runs one at a time, so a burst of requests does not multiply
 page renders. Set `revalidate` (seconds) to reuse a render on the server for that long and let a CDN
-cache both generated files.
+cache both generated files. A page whose Markdown takes longer than 30 seconds keeps its block
+without a body, and that render is not reused, so the next request reads the page again.
 
 Each file can be overridden on its own. A static `public/llms.txt` or `public/llms-full.txt` is
 served as-is. An [`llms.ts` or `llms-full.ts` metadata route](/docs/routing#application-metadata-routes)

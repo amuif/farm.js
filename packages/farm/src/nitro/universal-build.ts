@@ -7998,10 +7998,12 @@ async function handleFarmRequestInContext(
   if (farmGeneratedLlmsKind) {
     const llmsContext = createFarmLlmsTxtContext(request, farmGeneratedLlmsKind === "llms-full");
     const llmsOrigin = new URL(request.url).origin;
-    const renderLlmsFull = () =>
+    // A page that times out is left out, and the shared render is not reused.
+    const renderLlmsFull = (shared) =>
       renderFarmLlmsFullTxt(llmsContext.defaults, {
         origin: llmsOrigin,
         readMarkdown: llmsContext.markdown,
+        onIncomplete: shared && shared.incomplete,
       });
     // HEAD reads no pages, so it neither waits for nor fills the shared render.
     const llmsBody = farmGeneratedLlmsKind !== "llms-full"
