@@ -22,6 +22,8 @@ import type {
   FarmMCPStandaloneTool,
   FarmMCPExecuteContext,
   FarmMCPServerFunction,
+  FarmMCPPrompt,
+  FarmMCPResource,
 } from "@farm.js/core";
 import { isEndpointFailure, parseRouteSchema } from "@farm.js/core/api/runtime";
 import {
@@ -31,6 +33,12 @@ import {
   type ServerFunctionDescriptor,
 } from "@farm.js/core/server-fn";
 import { emitFarmEvent } from "@farm.js/core/observability";
+import {
+  bindPrompts,
+  registerResourcesAndPrompts,
+  validateResources,
+  type BoundPrompt,
+} from "./resources.js";
 import { toJSONSchema } from "zod";
 
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -74,6 +82,27 @@ type BoundTool = BoundToolBase &
 
 export type { FarmMCPStandaloneTool, FarmMCPExecuteContext } from "@farm.js/core";
 
+export type {
+  FarmMCPPrompt,
+  FarmMCPPromptMessage,
+  FarmMCPResource,
+  FarmMCPResourceContent,
+  FarmMCPResourceContext,
+  FarmMCPResourceListing,
+} from "@farm.js/core";
+
+/** Define a server-only MCP resource: read-only context at a fixed URI or a URI template. */
+export function defineResource(definition: FarmMCPResource): FarmMCPResource {
+  return definition;
+}
+
+/** Define a server-only MCP prompt with schema-inferred render arguments. */
+export function definePrompt<Schema extends RouteSchema | undefined = undefined>(
+  definition: FarmMCPPrompt<Schema>,
+): FarmMCPPrompt<Schema> {
+  return definition;
+}
+
 /** Define a server-only MCP tool with schema-inferred execute arguments. */
 export function defineTool<
   Schema extends RouteSchema,
@@ -91,12 +120,14 @@ export function defineTool<
  */
 export function apiMcp(options: APIMCPOptions): FarmPlugin {
   const normalized = validateOptions(options);
+  const resources = validateResources(normalized.resources);
+  const prompts = bindPrompts(normalized.prompts);
 
   return {
     name: "farm:api-mcp",
     routes: ({ route, api }) => {
       const tools = api.available ? bindTools(api, normalized) : [];
-      const handler = createHandler(normalized, tools);
+      const handler = createHandler(normalized, tools, resources, prompts);
       const serve = (request: Request, body: unknown) => handler(request, body);
 
       return [
@@ -118,7 +149,12 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
   };
 }
 
-function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) {
+function createHandler(
+  options: NormalizedOptions,
+  tools: readonly BoundTool[],
+  resources: readonly FarmMCPResource[],
+  prompts: readonly BoundPrompt[],
+) {
   const catalog: readonly FarmMCPTool[] = Object.freeze(
     tools.map((tool) =>
       Object.freeze({
@@ -138,6 +174,8 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
     path: options.path,
   });
   const toolNames = new Set(catalog.map(({ name }) => name));
+  const resourceNames = new Set(resources.map(({ name }) => name));
+  const promptNames = new Set(prompts.map(({ definition }) => definition.name));
   const mcp = createMcpHandler(({ requestInfo, authInfo }) => {
     const server = new McpServer(
       { name: options.name, version: options.version },
@@ -200,6 +238,12 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
         },
       );
     }
+    registerResourcesAndPrompts(server, resources, prompts, {
+      request: requestInfo,
+      authorization: authInfo?.extra?.farmAuthorization as FarmMCPAuthorization | undefined,
+      allowedResources: toNameSet(authInfo?.extra?.farmAllowedResources),
+      allowedPrompts: toNameSet(authInfo?.extra?.farmAllowedPrompts),
+    });
     return server;
   });
 
@@ -212,9 +256,12 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
       let denied = false;
       let inconsistent = false;
       for (const message of messages) {
+        const target = getRequestedTarget(message);
         const result = await options.authorize({
           request,
-          tool: getCalledTool(message),
+          tool: target.tool,
+          resource: target.resource,
+          prompt: target.prompt,
           tools: catalog,
           server: serverIdentity,
         });
@@ -240,7 +287,11 @@ function createHandler(options: NormalizedOptions, tools: readonly BoundTool[]) 
 
     return mcp.fetch(request, {
       parsedBody,
-      authInfo: toMCPAuthInfo(authorization, resolveAllowedTools(authorization, toolNames)),
+      authInfo: toMCPAuthInfo(authorization, {
+        tools: resolveAllowedNames(authorization.tools, toolNames, "tool"),
+        resources: resolveAllowedNames(authorization.resources, resourceNames, "resource"),
+        prompts: resolveAllowedNames(authorization.prompts, promptNames, "prompt"),
+      }),
     });
   };
 }
@@ -563,9 +614,9 @@ function bindTools(api: PluginLocalAPI, options: NormalizedOptions): BoundTool[]
     }
   }
 
-  if (selected.length === 0) {
+  if (selected.length === 0 && !options.resources?.length && !options.prompts?.length) {
     throw new TypeError(
-      "apiMcp needs at least one endpoint or standalone tool selected in tools, or route-owned MCP metadata.",
+      "apiMcp needs at least one endpoint or standalone tool selected in tools, route-owned MCP metadata, or a resource or prompt.",
     );
   }
 
@@ -863,19 +914,33 @@ function createAnnotations(
   };
 }
 
-function getCalledTool(body: unknown): string | undefined {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
-  const request = body as { method?: unknown; params?: { name?: unknown } };
-  return request.method === "tools/call" && typeof request.params?.name === "string"
-    ? request.params.name
-    : undefined;
+/** The untrusted tool, resource, or prompt a JSON-RPC message asks for. */
+function getRequestedTarget(body: unknown): { tool?: string; resource?: string; prompt?: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const request = body as { method?: unknown; params?: { name?: unknown; uri?: unknown } };
+  if (request.method === "tools/call" && typeof request.params?.name === "string") {
+    return { tool: request.params.name };
+  }
+  if (request.method === "resources/read" && typeof request.params?.uri === "string") {
+    return { resource: request.params.uri };
+  }
+  if (request.method === "prompts/get" && typeof request.params?.name === "string") {
+    return { prompt: request.params.name };
+  }
+  return {};
+}
+
+function toNameSet(value: unknown): ReadonlySet<string> | undefined {
+  return Array.isArray(value) ? new Set(value as string[]) : undefined;
 }
 
 function sameAuthorizationIdentity(left: APIMCPAuthorization, right: APIMCPAuthorization): boolean {
   return (
     left.subject === right.subject &&
     sameAuthorizationList(left.scopes, right.scopes) &&
-    sameAuthorizationList(left.tools, right.tools)
+    sameAuthorizationList(left.tools, right.tools) &&
+    sameAuthorizationList(left.resources, right.resources) &&
+    sameAuthorizationList(left.prompts, right.prompts)
   );
 }
 
@@ -889,29 +954,39 @@ function sameAuthorizationList(left: unknown, right: unknown): boolean {
   );
 }
 
-function resolveAllowedTools(
-  authorization: APIMCPAuthorization,
+function resolveAllowedNames(
+  allowed: unknown,
   names: ReadonlySet<string>,
+  kind: "tool" | "resource" | "prompt",
 ): string[] | undefined {
-  if (authorization.tools === undefined) return undefined;
+  if (allowed === undefined) return undefined;
   if (
-    !Array.isArray(authorization.tools) ||
-    authorization.tools.some((name) => typeof name !== "string" || !names.has(name))
+    !Array.isArray(allowed) ||
+    allowed.some((name) => typeof name !== "string" || !names.has(name))
   ) {
-    throw new TypeError("apiMcp authorize tools must be an array of configured tool names.");
+    throw new TypeError(`apiMcp authorize ${kind}s must be an array of configured ${kind} names.`);
   }
-  return [...authorization.tools];
+  return [...allowed];
 }
 
 function toMCPAuthInfo(
   authorization: APIMCPAuthorization,
-  allowedTools?: readonly string[],
+  allowed: {
+    tools?: readonly string[];
+    resources?: readonly string[];
+    prompts?: readonly string[];
+  },
 ): AuthInfo {
   return {
     token: "farm-authorized",
     clientId: authorization.subject,
     scopes: Array.isArray(authorization.scopes) ? authorization.scopes : [],
-    extra: { farmAuthorization: authorization, farmAllowedTools: allowedTools },
+    extra: {
+      farmAuthorization: authorization,
+      farmAllowedTools: allowed.tools,
+      farmAllowedResources: allowed.resources,
+      farmAllowedPrompts: allowed.prompts,
+    },
   };
 }
 

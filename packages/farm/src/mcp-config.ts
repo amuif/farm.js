@@ -62,6 +62,84 @@ export type FarmMCPTool = Readonly<EndpointMCPMetadata> & {
     | { readonly kind: "serverFunction"; readonly method?: never; readonly path?: never }
   );
 
+/** What a resource's `read` receives: the URI asked for, its template variables, and the caller. */
+export interface FarmMCPResourceContext extends FarmMCPExecuteContext {
+  readonly uri: URL;
+  /** Values matched by `uriTemplate`; empty for a fixed `uri`. */
+  readonly variables: Readonly<Record<string, string | string[]>>;
+}
+
+/**
+ * One piece of resource content: a string (sent as `mimeType`, or text/plain),
+ * text with its own type, JSON data, or binary data.
+ */
+export type FarmMCPResourceContent =
+  | string
+  | { text: string; mimeType?: string }
+  | { json: unknown }
+  | { blob: Uint8Array | ArrayBuffer; mimeType?: string };
+
+/** One concrete URI a templated resource lists. */
+export interface FarmMCPResourceListing {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/**
+ * A server-only MCP resource: read-only context an agent can load, at a fixed
+ * `uri` or at every URI matching an RFC 6570 `uriTemplate`.
+ */
+export interface FarmMCPResource {
+  /** Stable name, used in authorization and in `authorize`'s `resources` allowlist. */
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  /** A fixed absolute URI, such as `docs://handbook`. Set this or `uriTemplate`. */
+  uri?: string;
+  /** An RFC 6570 template, such as `notes://{id}`. Set this or `uri`. */
+  uriTemplate?: string;
+  /** For a template: the concrete resources to list. Omit to list none. */
+  list?(
+    context: FarmMCPExecuteContext,
+  ): readonly FarmMCPResourceListing[] | Promise<readonly FarmMCPResourceListing[]>;
+  /** Return the content, or null when the URI names nothing. */
+  read(
+    context: FarmMCPResourceContext,
+  ):
+    | FarmMCPResourceContent
+    | readonly FarmMCPResourceContent[]
+    | null
+    | Promise<FarmMCPResourceContent | readonly FarmMCPResourceContent[] | null>;
+}
+
+export interface FarmMCPPromptMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/**
+ * A server-only MCP prompt: a reusable message template a client offers its
+ * user. Arguments arrive as strings, as MCP sends them, and are validated by
+ * `arguments` before `render` runs.
+ */
+export interface FarmMCPPrompt<Schema extends RouteSchema | undefined = RouteSchema | undefined> {
+  /** Stable name: 1-128 letters, numbers, dots, underscores, or hyphens. */
+  name: string;
+  title?: string;
+  description?: string;
+  /** An object schema of string arguments. */
+  arguments?: Schema;
+  /** Return the prompt text, sent as one user message, or a list of messages. */
+  render(
+    args: Schema extends RouteSchema ? RouteSchemaOutput<Schema> : Record<string, never>,
+    context: FarmMCPExecuteContext,
+  ): string | readonly FarmMCPPromptMessage[] | Promise<string | readonly FarmMCPPromptMessage[]>;
+}
+
 export interface FarmMCPServer {
   readonly name: string;
   readonly version: string;
@@ -74,12 +152,20 @@ export interface FarmMCPAuthorization extends Record<string, unknown> {
   scopes?: string[];
   /** Allowed tool names for this request. Omit for all configured tools; [] denies all tools. */
   tools?: readonly string[];
+  /** Allowed resource names. Omit for all configured resources; [] denies all resources. */
+  resources?: readonly string[];
+  /** Allowed prompt names. Omit for all configured prompts; [] denies all prompts. */
+  prompts?: readonly string[];
 }
 
 export interface FarmMCPAuthorizeContext {
   request: Request;
   /** Untrusted requested name for a tools/call; authorization runs separately for every JSON-RPC batch item. */
   tool?: string;
+  /** Untrusted requested URI for a resources/read. */
+  resource?: string;
+  /** Untrusted requested name for a prompts/get. */
+  prompt?: string;
   /** Complete configured catalog, before applying this caller's permissions. */
   tools: readonly FarmMCPTool[];
   /** Resolved transport identity, for policies shared by multiple MCP endpoints. */
@@ -97,6 +183,10 @@ export interface FarmMCPConfig {
   version?: string;
   /** Explicit endpoint/standalone tool allowlist. Omit to discover route-owned MCP metadata. */
   tools?: readonly FarmMCPToolDefinition[];
+  /** Read-only context for agents, from `defineResource()`. */
+  resources?: readonly FarmMCPResource[];
+  /** Reusable prompt templates, from `definePrompt()`. */
+  prompts?: readonly FarmMCPPrompt<any>[];
   /** Authorize every MCP request. Returning false responds with 401 before protocol handling. */
   authorize?: (
     context: FarmMCPAuthorizeContext,

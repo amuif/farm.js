@@ -220,6 +220,74 @@ true`). Set the hints in `mcp` when the function is safe to repeat or only reads
 Only functions listed in `mcp.tools` are exposed, and only through `authorize`. Adding `mcp` metadata
 alone publishes nothing, and functions keep working for your UI either way.
 
+## Resources and prompts
+
+Tools let an agent act. Resources give it read-only context to load, and prompts are reusable
+message templates a client can offer its user. Declare both next to `tools`:
+
+```ts title="farm.config.ts"
+import { defineConfig } from "@farm.js/core";
+import { definePrompt, defineResource } from "@farm.js/mcp";
+import { z } from "zod";
+import { getNote, listNotes } from "./src/lib/notes";
+
+export default defineConfig({
+  mcp: {
+    authorize: authorizeAgent,
+    resources: [
+      defineResource({
+        name: "handbook",
+        uri: "docs://handbook",
+        mimeType: "text/markdown",
+        read: () => "# Handbook\n\nHow the team works.",
+      }),
+      defineResource({
+        name: "note",
+        uriTemplate: "notes://{id}",
+        list: async ({ authorization }) =>
+          (await listNotes(authorization.subject)).map((note) => ({
+            uri: `notes://${note.id}`,
+            name: note.title,
+          })),
+        read: async ({ variables, authorization }) => {
+          const note = await getNote(String(variables.id), authorization.subject);
+          return note ? { json: note } : null;
+        },
+      }),
+    ],
+    prompts: [
+      definePrompt({
+        name: "summarize_note",
+        description: "Summarize one note.",
+        arguments: z.object({ id: z.string(), tone: z.string().default("plain") }),
+        render: ({ id, tone }) => `Summarize note ${id} in a ${tone} tone.`,
+      }),
+    ],
+  },
+});
+```
+
+A resource has a fixed absolute `uri` or an RFC 6570 `uriTemplate`. A template's `list` returns the
+concrete URIs to show in `resources/list`; leave it out to list none. `read` receives the requested
+`uri`, the template `variables`, and the same `authorization`, `request`, and `signal` as a standalone
+tool. It returns content in one of these shapes:
+
+- A string, sent with the resource's `mimeType` (default `text/plain`).
+- `{ text, mimeType }`.
+- `{ json }`, sent as `application/json`.
+- `{ blob, mimeType }` with a `Uint8Array` or `ArrayBuffer`, sent base64-encoded.
+
+`read` can also return a list of these, or `null` to answer "resource not found".
+
+A prompt's `arguments` is an object schema of strings, since MCP sends prompt arguments as strings.
+Its JSON Schema lists the arguments to clients, and the schema itself validates them before
+`render` runs, with its defaults and transforms. `render` returns the prompt text, sent as one user
+message, or a list of `{ role, text }` messages.
+
+Resources and prompts run behind the same `authorize` as tools. An error thrown inside `read`,
+`list`, or `render` is logged on the server and answered with a generic message, so private details
+never reach the client. A server can offer only resources and prompts, with no tools.
+
 ## Validate tool results
 
 Add `outputSchema` to a standalone tool to check its returned data before sending it to the
@@ -290,11 +358,15 @@ Every `authorize` call receives:
   initialization and listing. For a JSON-RPC batch, Farm calls `authorize` for every item with
   that item's tool name and rejects the entire batch before dispatch when any item is denied;
   compare it against the catalog rather than trusting it.
+- `resource` and `prompt`: the untrusted requested URI for a `resources/read` and name for a
+  `prompts/get`, the same way.
 
 Return `false` to reject the entire request with HTTP 401. Otherwise return a `subject` and,
 optionally, `tools`, an array of allowed **tool names**. Omit this return field to retain access to
 all configured tools; return `tools: []` to allow the MCP connection but no tools. Unknown names
 or malformed permission lists fail closed with a server error.
+`resources` and `prompts` work the same way for resource and prompt names: omit them to allow all,
+or return `[]` to allow none.
 
 Every allowed item in a batch must resolve to the same subject, scopes, and allowed tool names
 because one HTTP batch has one authenticated identity.
@@ -504,6 +576,8 @@ bounded post-response work where the host requires it.
 | `tools`                | route opt-ins | Compose endpoint references, server functions, and standalone `defineTool()` definitions.       |
 | `allowUnauthenticated` | `false`       | Deliberately permit a public MCP endpoint instead of `authorize`.                               |
 | `oauth`                | none          | Advertise OAuth authorization servers and scopes through RFC 9728 metadata and the 401.         |
+| `resources`            | none          | Read-only context from `defineResource()`, at a fixed URI or a URI template.                    |
+| `prompts`              | none          | Reusable prompt templates from `definePrompt()`.                                                |
 | `path`                 | `/api/mcp`    | Canonical Farm API path for the Streamable HTTP endpoint.                                       |
 | `name`                 | `farm-api`    | MCP server name returned during initialization.                                                 |
 | `version`              | `1.0.0`       | Application server version returned during initialization.                                      |

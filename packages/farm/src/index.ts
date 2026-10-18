@@ -229,6 +229,12 @@ export type {
   FarmMCPAuthorizeContext,
   FarmMCPConfig,
   FarmMCPOAuthConfig,
+  FarmMCPPrompt,
+  FarmMCPPromptMessage,
+  FarmMCPResource,
+  FarmMCPResourceContent,
+  FarmMCPResourceContext,
+  FarmMCPResourceListing,
   FarmMCPUserConfig,
   ResolvedFarmMCPConfig,
 } from "./mcp-config";
