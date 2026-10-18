@@ -9730,7 +9730,12 @@ export default async function farmNitroEventHandler(event) {
     preset,
     ...(farmNodeServerEntryPath ? { entry: farmNodeServerEntryPath } : {}),
     rootDir: root,
-    serverDir: root,
+    // Farm registers every handler, task, and plugin explicitly. Scanning the
+    // project root would bundle an app's own `middleware/`, `api/`, `routes/`,
+    // `plugins/`, or `tasks/` folder, or a root `server.ts` (common without a
+    // `src` directory), as Nitro handlers outside Farm's aliases.
+    serverDir: false,
+    serverEntry: false,
     buildDir: path.join(root, distDir, ".nitro"),
     alias: resolveNitroInternalRuntimeAliases(root),
     compatibilityDate: "2024-12-01",
