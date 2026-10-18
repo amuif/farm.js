@@ -2,6 +2,7 @@ import { pathToFileURL } from "url";
 import type { ComponentType } from "react";
 import type { Metadata, RouteModule } from "./types";
 import { requestAcceptsMarkdown } from "./markdown";
+import { createFarmMarkdownViewResponse } from "./markdown-view";
 import type { FarmMdxComponents, FarmMdxResolvedConfig } from "./app-markdown-config";
 
 // Preserve the existing entry points while keeping response-only imports
@@ -185,8 +186,12 @@ export async function createFarmMarkdownSourceResponse(options: {
     headers.set("Vary", "Accept");
   }
 
-  return new Response(options.request.method === "HEAD" ? null : source.source, {
+  return createFarmMarkdownViewResponse({
+    request: options.request,
+    requestUrl: url,
+    markdown: source.source,
     status: 200,
     headers,
+    markdownPath: headers.get("Content-Location")!,
   });
 }

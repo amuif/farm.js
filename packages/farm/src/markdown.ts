@@ -1,3 +1,5 @@
+import { createFarmMarkdownViewResponse } from "./markdown-view";
+
 /** Content type for Markdown responses, including agent-facing error bodies. */
 export const FARM_MARKDOWN_CONTENT_TYPE = "text/markdown; charset=utf-8";
 
@@ -212,9 +214,13 @@ export async function createMarkdownMirrorResponse(
       : createMarkdownCacheHeader(cache),
   );
 
-  return new Response(options.request.method === "HEAD" ? null : markdown, {
+  return createFarmMarkdownViewResponse({
+    request: options.request,
+    requestUrl,
+    markdown,
     status: pageResponse.status,
     headers: headersOut,
+    markdownPath: headersOut.get("Content-Location")!,
   });
 }
 

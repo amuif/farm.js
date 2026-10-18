@@ -213,6 +213,26 @@ Farm returns the same markdown representation with `Content-Type: text/markdown`
 document head, while ordinary browser requests continue to receive HTML. Set
 `metadata.alternates.types["text/markdown"]` to point the head link somewhere else.
 
+## Read part of a page
+
+Agents can fetch less than the whole page. Every Markdown response, from a mirror or a `page.md`,
+accepts two query parameters:
+
+```bash
+curl "http://localhost:3000/pricing.md?outline"
+curl "http://localhost:3000/pricing.md?section=plans"
+```
+
+- `?outline` returns the heading tree. Each entry links to its section and estimates its size in
+  tokens, so an agent can decide what to read.
+- `?section=<id>` returns one heading and everything under it, up to the next heading at the same
+  or a higher level. Ids follow GitHub's heading anchors (`## Team plans` is `team-plans`; a
+  repeated heading gets `-1`, `-2`). An unknown id answers `404` with the list of valid ids.
+
+Headings inside fenced code blocks and front matter are ignored. Every Markdown response also
+carries an `ETag`, so an agent can re-check a page with `If-None-Match` and receive `304 Not
+Modified` when it has not changed.
+
 ## Production notes
 
 - Restrict `md.expose` when authenticated or private pages should not have generated mirrors.
