@@ -39,6 +39,38 @@ export default defineConfig({
 
 `defineConfig` is the canonical Farm helper. `defineFarmConfig` remains available as a deprecated exact alias for existing applications.
 
+### Programmatic development servers
+
+Without a config file, `createServer` and `startDevServer` from `@farm.js/core/server`
+resolve the supplied config, including plugins, integrations, layers, environment/API
+resolvers, redirects, headers, and rewrites:
+
+```ts
+import { defineConfig } from "@farm.js/core";
+import { startDevServer } from "@farm.js/core/server";
+
+const server = await startDevServer(
+  defineConfig({
+    root: process.cwd(),
+    redirects: () => [{ source: "/old", destination: "/" }],
+  }),
+  3000,
+);
+
+// When the owning process is finished with the server:
+await server.close();
+```
+
+If Farm finds a config file under `root`, that file remains authoritative; the inline
+object is not merged over it. An explicit port passed to `startDevServer(config, port)`
+or `createServer(config, { port })` still wins. `createServer` returns an unlistened
+Vite server; `startDevServer` also listens and starts Farm's runtime lifecycle.
+
+You can pass an already-resolved config without rerunning its environment parsers or
+generating its integration/layer plugins again. Runtime-form config fields remain
+supported. Config callbacks resolve during creation, not on each Vite restart. The
+same plugin runtime survives a restart; final `server.close()` owns cleanup.
+
 ## TypeScript
 
 Farm transpiles TypeScript through the selected renderer and Vite. It reads the project's normal
