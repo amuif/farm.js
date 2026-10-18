@@ -213,6 +213,10 @@ Farm returns the same markdown representation with `Content-Type: text/markdown`
 document head, while ordinary browser requests continue to receive HTML. Set
 `metadata.alternates.types["text/markdown"]` to point the head link somewhere else.
 
+Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
+production, so they answer every request with HTML. They still send the `Link` header, and their
+`.md` URL works, so agents should follow the header or request the `.md` URL directly.
+
 ## Read part of a page
 
 Agents can fetch less than the whole page. Every Markdown response, from a mirror or a `page.md`,

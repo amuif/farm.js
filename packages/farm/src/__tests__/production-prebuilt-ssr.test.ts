@@ -1156,6 +1156,59 @@ export default function Page() {
     }
   }, 120_000);
 
+  it("advertises the Markdown mirror of a prerendered page", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "pricing"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "pricing", "page.tsx"),
+        `export const dynamic = "force-static";\nexport default function Pricing() { return <main><h1>Pricing</h1><p>Plans.</p></main>; }`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-prerender-markdown-link-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+      // The page is served as a static file, so it cannot negotiate Accept; the
+      // Link header is how agents find its mirror.
+      expect(
+        await fs
+          .stat(path.join(root, ".farm", ".output", "public", "pricing", "index.html"))
+          .then(() => true),
+      ).toBe(true);
+
+      const serverDir = path.join(root, ".farm", ".output", "server");
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toContain("text/html");
+          expect(response.headers.get("link")).toBe(
+            '</pricing.md>; rel="alternate"; type="text/markdown"',
+          );
+        },
+        "/pricing",
+      );
+      await runProductionRequest(
+        serverDir,
+        async (response) => {
+          expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+          expect(await response.text()).toContain("# Pricing");
+        },
+        "/pricing.md",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("keeps production slot params request-local beneath a basePath", async () => {
     const root = await createProductionFixture();
     const writeRoute = async (name: string, source: string) => {

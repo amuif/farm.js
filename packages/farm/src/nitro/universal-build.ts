@@ -1,4 +1,5 @@
 import { createBundledEnv } from "../env";
+import { getFarmMarkdownAlternatePath } from "../markdown";
 import type { RedirectConfig, ResolvedFarmConfig, RewriteConfig } from "../config";
 import { hasCustomFarmRouteContext, resolveDeployOutputPath } from "../config";
 import {
@@ -9835,6 +9836,27 @@ export default async function farmNitroEventHandler(event) {
 
   // Build with Nitro
   const nitroInstance = await nitroBuilder.createNitro(nitroConfig);
+  if (config.md?.enabled) {
+    // A prerendered page is served as a static file, so it cannot negotiate
+    // `Accept: text/markdown`. Send the same Link header dynamic pages send, so
+    // agents still find its .md mirror.
+    nitroInstance.hooks.hook("prerender:generate", (route) => {
+      if (!route.contents || !route.contentType?.toLowerCase().includes("html")) return;
+      const alternatePath = getFarmMarkdownAlternatePath(config.md, route.route);
+      if (!alternatePath) return;
+      const routeRule = nitroInstance.options.routeRules[route.route] || {};
+      nitroInstance.options.routeRules[route.route] = {
+        ...routeRule,
+        headers: {
+          ...routeRule.headers,
+          Link: `<${alternatePath}>; rel="alternate"; type="text/markdown"`,
+        },
+      };
+    });
+    nitroInstance.hooks.hook("prerender:done", () => {
+      nitroInstance.routing.sync();
+    });
+  }
   if (config.security.csp && config.security.csp.nonce) {
     nitroInstance.hooks.hook("prerender:generate", async (route) => {
       if (!route.contents || !route.contentType?.toLowerCase().includes("html")) return;
