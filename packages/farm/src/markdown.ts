@@ -181,7 +181,15 @@ export async function createMarkdownMirrorResponse(
   );
 
   if (!isHtmlResponse(pageResponse)) {
-    return null;
+    // A page behind sign-in redirects or answers 401/403 without HTML. Say so in
+    // Markdown with the same status, rather than falling through to a 404 that
+    // tells the agent the page does not exist.
+    return createMarkdownAccessResponse(
+      pageResponse,
+      target.pathname,
+      pageUrl,
+      options.request.method === "HEAD",
+    );
   }
 
   const html = await pageResponse.text();
@@ -237,6 +245,44 @@ export async function createMarkdownMirrorResponse(
     headers: headersOut,
     markdownPath: headersOut.get("Content-Location")!,
   });
+}
+
+function createMarkdownAccessResponse(
+  pageResponse: Response,
+  pathname: string,
+  pageUrl: URL,
+  head: boolean,
+): Response | null {
+  const location = pageResponse.headers.get("location");
+  const redirect = pageResponse.status >= 300 && pageResponse.status < 400 && location;
+  if (!redirect && pageResponse.status !== 401 && pageResponse.status !== 403) return null;
+
+  const headers = new Headers({
+    "Content-Type": "text/markdown; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Farm-Markdown-Route": pathname,
+  });
+  let body: string;
+  if (redirect) {
+    let target: string;
+    try {
+      target = new URL(location, pageUrl).href;
+    } catch {
+      return null;
+    }
+    headers.set("Location", location);
+    body =
+      `# Redirected\n\n\`${pathname}\` redirects to [${target}](${target}). ` +
+      "The page may require signing in.\n";
+  } else {
+    const authenticate = pageResponse.headers.get("www-authenticate");
+    if (authenticate) headers.set("WWW-Authenticate", authenticate);
+    body =
+      pageResponse.status === 401
+        ? `# Sign-in required\n\n\`${pathname}\` requires signing in.\n`
+        : `# Access denied\n\nThis account cannot read \`${pathname}\`.\n`;
+  }
+  return new Response(head ? null : body, { status: pageResponse.status, headers });
 }
 
 export function applyMarkdownNegotiationHeaders(

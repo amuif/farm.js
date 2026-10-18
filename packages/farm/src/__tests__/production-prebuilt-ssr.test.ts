@@ -1156,6 +1156,51 @@ export default function Page() {
     }
   }, 120_000);
 
+  it("answers the Markdown mirror of a sign-in-protected page with its redirect", async () => {
+    const root = await createProductionFixture();
+
+    try {
+      await fs.mkdir(path.join(root, "src", "app", "account"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "app", "account", "page.tsx"),
+        `
+import { redirect } from "@farm.js/core/navigation";
+
+export default function Account() {
+  redirect("/login?next=%2Faccount");
+}
+`.trim(),
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          telemetry: false,
+          generateBuildId: () => "production-markdown-redirect-test",
+        },
+        "production",
+      );
+
+      await build(config, { root, preset: "node-server" });
+
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          // Before, the mirror gave up on the bodiless redirect and the request fell
+          // through to a 404 saying the page had not been published.
+          expect(response.status).toBe(307);
+          expect(response.headers.get("location")).toBe("/login?next=%2Faccount");
+          expect(await response.text()).toContain("redirects to");
+        },
+        "/account.md",
+        { redirect: "manual" },
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("advertises the Markdown mirror of a prerendered page", async () => {
     const root = await createProductionFixture();
 

@@ -796,3 +796,50 @@ describe("htmlToMarkdown page content", () => {
     ).toBe("# Post\n\nBody.\n");
   });
 });
+
+describe("Markdown mirrors of protected pages", () => {
+  const mirror = (page: Response, method = "GET") =>
+    createMarkdownMirrorResponse({
+      request: new Request("https://acme.test/account.md", { method }),
+      config: resolveMarkdownConfig({ expose: ["/account"] }),
+      renderPage: async () => page,
+    });
+
+  it("answers a sign-in redirect with the same status and a Markdown link", async () => {
+    const response = await mirror(
+      new Response(null, { status: 307, headers: { Location: "/login?next=%2Faccount" } }),
+    );
+    expect(response?.status).toBe(307);
+    expect(response?.headers.get("location")).toBe("/login?next=%2Faccount");
+    expect(response?.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(response?.headers.get("cache-control")).toBe("no-store");
+    expect(await response?.text()).toBe(
+      "# Redirected\n\n`/account` redirects to [https://acme.test/login?next=%2Faccount](https://acme.test/login?next=%2Faccount). The page may require signing in.\n",
+    );
+  });
+
+  it("explains 401 and 403 without a page body", async () => {
+    const unauthorized = await mirror(
+      new Response(null, { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="acme"' } }),
+    );
+    expect(unauthorized?.status).toBe(401);
+    expect(unauthorized?.headers.get("www-authenticate")).toBe('Bearer realm="acme"');
+    expect(await unauthorized?.text()).toBe(
+      "# Sign-in required\n\n`/account` requires signing in.\n",
+    );
+
+    const forbidden = await mirror(new Response(null, { status: 403 }));
+    expect(forbidden?.status).toBe(403);
+    expect(await forbidden?.text()).toContain("# Access denied");
+  });
+
+  it("keeps HEAD bodiless and leaves other non-HTML responses alone", async () => {
+    const head = await mirror(
+      new Response(null, { status: 302, headers: { Location: "/login" } }),
+      "HEAD",
+    );
+    expect(head?.status).toBe(302);
+    expect(await head?.text()).toBe("");
+    expect(await mirror(new Response("oops", { status: 500 }))).toBeNull();
+  });
+});
