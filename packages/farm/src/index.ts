@@ -177,11 +177,7 @@ export * from "./markdown";
 export * from "./app-markdown";
 export * from "./observability";
 export { classifyFarmAgent, type FarmAgentIdentity } from "./agent-identity";
-export {
-  _findFarmMCPEndpointTool,
-  _publishFarmMCPCatalog,
-  type FarmMCPEndpointTool,
-} from "./mcp-catalog";
+export type { FarmMCPEndpointTool } from "./mcp-catalog";
 export * from "./devtools-config";
 export type { FarmDevtoolsSnapshot, FarmDevtoolsDiagnostic, FarmDevtoolsRuntime } from "./devtools";
 export * from "./dev-indicators";

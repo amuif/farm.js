@@ -26,7 +26,11 @@ import type {
   FarmMCPResource,
   FarmMCPServer,
 } from "@farm.js/core";
-import { isEndpointFailure, parseRouteSchema } from "@farm.js/core/api/runtime";
+import {
+  _publishFarmMCPCatalog,
+  isEndpointFailure,
+  parseRouteSchema,
+} from "@farm.js/core/api/runtime";
 import {
   _describeServerFunction,
   _invokeServerFunction,
@@ -34,7 +38,6 @@ import {
   type ServerFunctionDescriptor,
 } from "@farm.js/core/server-fn";
 import { emitFarmEvent } from "@farm.js/core/observability";
-import { _publishFarmMCPCatalog } from "@farm.js/core";
 import {
   bindPrompts,
   registerResourcesAndPrompts,

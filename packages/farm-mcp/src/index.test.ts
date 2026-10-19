@@ -234,7 +234,7 @@ describe("apiMcp", () => {
   });
 
   it("publishes its endpoint tools so core can name the tool behind a form, and removes them on close", async () => {
-    const { _findFarmMCPEndpointTool } = await import("@farm.js/core");
+    const { _findFarmMCPEndpointTool } = await import("@farm.js/core/api/runtime");
     const create = route.post("/api/notes", {
       mcp: { name: "create_note" },
       input: { body: z.object({ text: z.string() }) },
