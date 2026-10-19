@@ -213,15 +213,19 @@ Farm returns the same markdown representation with `Content-Type: text/markdown`
 document head, while ordinary browser requests continue to receive HTML. Set
 `metadata.alternates.types["text/markdown"]` to point the head link somewhere else.
 
-Mirrors preserve the page response's `Set-Cookie` headers, including on redirects, sign-in errors,
+Converted mirrors preserve the page response's `Set-Cookie` headers, including on redirects, sign-in errors,
 partial views, `HEAD`, and conditional `304` responses. A mirror that sets cookies uses
 `Cache-Control: private, no-store`, even when `md.cache` is enabled, so a shared cache cannot replay
 one reader's session cookies to another. Cookie-free mirrors keep their configured cache policy.
 
 If the page returns a non-HTML response, such as a JSON error or a `429` rate limit, Farm returns
 that response and its headers (including `Retry-After`) without dispatching the page again.
-`HEAD` keeps the status and headers but omits the body. Sign-in redirects and `401`/`403` responses
-continue to use the Markdown explanations with the original status.
+Bodyless `204`, `205`, and `304` responses also pass through, even if they declare an HTML content
+type; they are not converted or filtered by partial-view parameters. Pass-through responses keep
+the page's own content type and cache policy. `HEAD` keeps the status and
+headers but omits the body. Sign-in redirects and non-HTML `401`/`403` responses continue to use
+the Markdown explanations with the original status. Unused bodies from these explanations and
+terminal `HEAD` responses are cancelled without delaying the response.
 
 Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
 production, so they answer every request with HTML. They still send the `Link` header, and their

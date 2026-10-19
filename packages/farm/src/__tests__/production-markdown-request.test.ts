@@ -47,13 +47,22 @@ function runtime(config = resolveMarkdownConfig(undefined)) {
 describe("production Markdown request ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("returns a terminal page response instead of falling through to route dispatch", async () => {
-    const r = runtime();
-    const limited = new Response("Slow down", { status: 429, headers: { "retry-after": "60" } });
-    r.renderPage.mockReturnValue(limited);
-    expect(await r.run(new Request("https://farm.test/page.md"))).toBe(limited);
-    expect(r.renderPage).toHaveBeenCalledOnce();
-  });
+  it.each([204, 205, 304, 429])(
+    "returns terminal %s without falling through to route dispatch",
+    async (status) => {
+      const r = runtime();
+      const limited = new Response(status === 429 ? "Slow down" : null, {
+        status,
+        headers: {
+          "retry-after": "60",
+          "content-type": status === 429 ? "text/plain" : "text/html",
+        },
+      });
+      r.renderPage.mockReturnValue(limited);
+      expect(await r.run(new Request("https://farm.test/page.md"))).toBe(limited);
+      expect(r.renderPage).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([undefined, "text/html", "text/markdown;q=0", "*/*", "application/json"])(
     "reuses the caller's URL for ordinary HTML negotiation (%s)",

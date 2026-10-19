@@ -3,6 +3,84 @@ import { describe, expect, it, vi } from "vitest";
 import { createMarkdownMirrorResponse, resolveMarkdownConfig } from "../markdown";
 
 describe("Markdown terminal page responses", () => {
+  it.each([204, 205, 304])(
+    "preserves a bodyless %s response regardless of content type",
+    async (status) => {
+      for (const method of ["GET", "HEAD"]) {
+        for (const pathname of ["/account.md", "/account"]) {
+          for (const contentType of [undefined, "text/html", "application/json"]) {
+            const headers = new Headers({ etag: '"original"', "x-app-response": "kept" });
+            if (contentType) headers.set("content-type", contentType);
+            const page = new Response(null, { status, headers });
+            const renderPage = vi.fn(() => page);
+            const response = await createMarkdownMirrorResponse({
+              request: new Request(`https://farm.test${pathname}?outline`, {
+                method,
+                headers: { accept: "text/markdown" },
+              }),
+              config: resolveMarkdownConfig(true),
+              renderPage,
+            });
+            expect(response).toBe(page);
+            expect(response?.body).toBeNull();
+            expect(response?.headers.get("etag")).toBe('"original"');
+            expect(response?.headers.get("x-app-response")).toBe("kept");
+            expect(response?.headers.get("content-type")).toBe(contentType ?? null);
+            expect(renderPage).toHaveBeenCalledOnce();
+          }
+        }
+      }
+    },
+  );
+
+  it("does not treat a bodyless 304 with Location as a redirect", async () => {
+    const page = new Response(null, { status: 304, headers: { location: "/account" } });
+    expect(
+      await createMarkdownMirrorResponse({
+        request: new Request("https://farm.test/account.md"),
+        config: resolveMarkdownConfig(true),
+        renderPage: () => page,
+      }),
+    ).toBe(page);
+  });
+
+  it("leaves a terminal GET stream for the caller to consume", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("original stream"));
+        controller.close();
+      },
+      cancel,
+    });
+    const page = new Response(body, { status: 503, headers: { "retry-after": "60" } });
+    const response = await createMarkdownMirrorResponse({
+      request: new Request("https://farm.test/account.md"),
+      config: resolveMarkdownConfig(true),
+      renderPage: () => page,
+    });
+    expect(response).toBe(page);
+    expect(response?.body).toBe(body);
+    expect(body.locked).toBe(false);
+    expect(await response?.text()).toBe("original stream");
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("retains a redirect that cannot be described with an absolute URL", async () => {
+    const page = new Response("original redirect", {
+      status: 302,
+      headers: { location: "http://[" },
+    });
+    const response = await createMarkdownMirrorResponse({
+      request: new Request("https://farm.test/account.md"),
+      config: resolveMarkdownConfig(true),
+      renderPage: () => page,
+    });
+    expect(response).toBe(page);
+    expect(response?.headers.get("location")).toBe("http://[");
+    expect(await response?.text()).toBe("original redirect");
+  });
+
   it.each([307, 401, 403])(
     "cancels the unused body when explaining an access response (%s)",
     async (status) => {

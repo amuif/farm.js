@@ -186,6 +186,12 @@ export async function createMarkdownMirrorResponse(
     }),
   );
 
+  // These statuses cannot carry a representation, even with an HTML content
+  // type. Preserve the terminal response before conversion or view selection.
+  if (pageResponse.status === 204 || pageResponse.status === 205 || pageResponse.status === 304) {
+    return pageResponse;
+  }
+
   // A redirect is answered as a redirect even when it carries an HTML body, as
   // the development renderer's redirects do.
   const redirects =

@@ -31,6 +31,74 @@ async function writeModule(root: string, relativePath: string, source: string): 
 }
 
 describe("development markdown-source middleware ordering", () => {
+  it("preserves terminal page responses through the real Markdown fetch path", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-terminal-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "farm.config.ts",
+      `export default {
+  middleware: [204, 205, 304, 429].map(status => ({
+    matcher: "/terminal/" + status,
+    handler() {
+      return new Response(status === 429 ? "Slow down" : null, {
+        status,
+        headers: {
+          "content-type": status === 429 ? "text/plain" : "text/html",
+          "retry-after": "60",
+          "x-terminal-status": String(status),
+        },
+      });
+    },
+  })),
+};`,
+    );
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/terminal/[status]/page.tsx",
+      `import React from "react";
+export default function Page() { return <main>must not render</main>; }`,
+    );
+
+    const server = await createServer({ root, images: { provider: "none" } });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    for (const status of [204, 205, 304, 429]) {
+      for (const method of ["GET", "HEAD"]) {
+        for (const suffix of [".md", ""]) {
+          const response = await fetch(
+            `http://localhost:${address.port}/terminal/${status}${suffix}`,
+            {
+              method,
+              headers: { accept: "text/markdown" },
+            },
+          );
+          expect(response.status).toBe(status);
+          expect(response.headers.get("x-terminal-status")).toBe(String(status));
+          expect(response.headers.get("retry-after")).toBe("60");
+          expect(await response.text()).toBe(status === 429 && method === "GET" ? "Slow down" : "");
+        }
+      }
+    }
+  }, 30_000);
+
   it("runs app middleware before serving raw markdown page sources", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-middleware-"));
     temporaryRoots.add(root);
