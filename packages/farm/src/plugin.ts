@@ -1574,6 +1574,31 @@ export class PluginManager {
 
     const plugins = this.getSortedPlugins().filter(include);
 
+    if (hookName === "onError") {
+      // Reporters must not suppress each other or let cleanup race a pending
+      // report. Keep invocation order/concurrency, then surface the first
+      // observed reporter failure only after every started report has settled.
+      const failures: unknown[] = [];
+      const reports: Promise<void>[] = [];
+      for (const plugin of plugins) {
+        for (const hook of this.getPluginHooks(plugin, hookName)) {
+          reports.push(
+            (async () => {
+              try {
+                const hookContext = this.getHookContext(plugin, hookName, args);
+                await hook.apply(plugin, [...args, hookContext]);
+              } catch (error) {
+                failures.push(error);
+              }
+            })(),
+          );
+        }
+      }
+      await Promise.all(reports);
+      if (failures.length > 0) throw failures[0];
+      return false;
+    }
+
     // Run selected hooks sequentially for deterministic execution and short-circuiting.
     const sequentialHooks = new Set<keyof FarmPlugin>([
       "ready",

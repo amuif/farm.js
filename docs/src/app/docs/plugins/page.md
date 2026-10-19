@@ -186,6 +186,12 @@ Only define the groups your plugin needs.
 
 Both hooks receive Farm's plugin context. `setup` additionally receives the resolved `env`. Its returned state is private to that plugin instance and is not serialized to the browser.
 
+Framework `onError` dispatch invokes every selected reporter in plugin order and awaits
+all returned promises, even if another reporter throws or rejects. Reporters can run
+concurrently. After all settle, the first observed reporter failure is surfaced to the
+dispatch caller; startup and request handling report it separately from the original
+failure. Keep error reporters finite: they are awaited before the caller continues.
+
 In development, a native Vite restart keeps the same Farm plugin runtime and instrumentation
 alive; it does not rerun `setup` or dispose resources registered with `lifecycle.onShutdown()`.
 Awaiting the Farm dev server's `close()` waits for an in-progress restart, closes the current

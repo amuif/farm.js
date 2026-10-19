@@ -384,6 +384,63 @@ async function expectNitroFallback(root: string): Promise<void> {
 }
 
 describe("production prebuilt SSR output", () => {
+  it("finishes error reporting after another reporter fails in built Node output", async () => {
+    const root = await createProductionFixture();
+    const markerPath = path.join(root, "reported.json");
+    try {
+      await fs.writeFile(
+        path.join(root, "farm.config.ts"),
+        `import { writeFile } from "node:fs/promises";
+export default { plugins: [
+  {
+    name: "failing-reporter",
+    runtime: { before({ request }) {
+      if (new URL(request.url).pathname === "/failure") throw new Error("original request failure");
+    } },
+    onError() { throw new Error("reporter failure"); },
+  },
+  {
+    name: "remaining-reporter",
+    async onError({ error, phase }) {
+      await writeFile(${JSON.stringify(markerPath)}, JSON.stringify({ message: error.message, phase }));
+    },
+  },
+] };`,
+      );
+      const config = await resolveConfig(
+        {
+          root,
+          srcDir: "src",
+          images: { provider: "none" },
+          generateBuildId: () => "error-reporter-isolation-test",
+          plugins: [
+            definePlugin({ name: "failing-reporter", runtime: { before() {} }, onError() {} }),
+            definePlugin({ name: "remaining-reporter", onError() {} }),
+          ],
+        },
+        "production",
+      );
+      await build(config, { root, preset: "node-server" });
+      await runProductionRequest(
+        path.join(root, ".farm", ".output", "server"),
+        async (response) => {
+          expect(response.status).toBe(500);
+          await response.text();
+          expect(JSON.parse(await fs.readFile(markerPath, "utf8"))).toEqual({
+            message: "original request failure",
+            phase: "runtime",
+          });
+          const healthy = await fetch(new URL("/", response.url));
+          expect(healthy.status).toBe(200);
+          expect(await healthy.text()).toContain("prebuilt SSR output");
+        },
+        "/failure",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("preserves root-to-leaf layout order in a built nested dynamic route", async () => {
     const root = await createProductionFixture();
     try {

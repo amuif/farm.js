@@ -45,6 +45,9 @@ type ResourceState = {
   onViteClose?: () => void;
   viteCloseGate?: Promise<void>;
   onViteServer?: (server: ViteDevServer) => void;
+  secondaryReporter?: boolean;
+  secondaryGate?: Promise<void>;
+  onSecondaryReport?: () => void;
 };
 const projects: Array<{ root: string; state: ResourceState }> = [];
 
@@ -138,6 +141,15 @@ export default {
       if (state.reporterFailure === "async") return Promise.reject(new Error("error reporter failed"));
       return state.reportGate;
     },
+  }, {
+    name: "secondary-error-reporter",
+    async onError() {
+      if (!state.secondaryReporter) return;
+      state.events.push("secondary-report-start");
+      state.onSecondaryReport?.();
+      await state.secondaryGate;
+      state.events.push("secondary-report-finish");
+    },
   }],
   vite: { server: { strictPort: true, middlewareMode: state.phase === "vite-buildStart" }, plugins: [{
     name: "startup-vite-close",
@@ -199,6 +211,50 @@ const closedEvents = [
 ];
 
 describe("development server creation failure cleanup", () => {
+  it.each(["sync", "async"] as const)(
+    "finishes other error reporters before cleanup when one fails %s",
+    async (reporterFailure) => {
+      const { root, state } = await createProject("setup");
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      state.reporterFailure = reporterFailure;
+      state.secondaryReporter = true;
+      state.secondaryGate = release.promise;
+      state.onSecondaryReport = entered.resolve;
+      let settled = false;
+      const result = createServer({ root }).then(
+        () => {
+          settled = true;
+        },
+        (error) => {
+          settled = true;
+          return error;
+        },
+      );
+      try {
+        await Promise.race([entered.promise, result]);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(state.events).toEqual(["register", "onError", "secondary-report-start"]);
+        expect(state.server!.watcher.closed).toBe(false);
+        release.resolve();
+        expect(await result).toBe(state.originalError);
+        expect(state.events).toEqual([
+          "register",
+          "onError",
+          "secondary-report-start",
+          "secondary-report-finish",
+          ...closedEvents.slice(2),
+        ]);
+      } finally {
+        release.resolve();
+        await result;
+      }
+    },
+    60_000,
+  );
+
   it.each([
     "vite-configure",
     "vite-file-configure",
