@@ -8,6 +8,11 @@ import {
   resolveMarkdownConfig,
 } from "@farm.js/core/markdown";
 import type { EntryContext } from "../types.js";
+import {
+  createProductionMiddlewareRunner,
+  applyProductionMiddlewareHeaders,
+  type MiddlewareContext,
+} from "@farm.js/core/middleware";
 import { generateRscEntry } from "./rsc.js";
 
 const context: EntryContext = {
@@ -52,10 +57,47 @@ function createHandler(markdownConfig = resolveMarkdownConfig(undefined)) {
     handleFarmRequest,
     "/api",
   ) as (request: Request, context?: unknown) => Promise<Response>;
-  return { run, rendered };
+  return { run, rendered, handleFarmRequest };
 }
 
 describe("RSC Markdown mirrors", () => {
+  it("preserves middleware cookies in the published core runtime", async () => {
+    const runner = createProductionMiddlewareRunner({
+      modules: [
+        {
+          path: "/pricing",
+          module: {
+            default(ctx: MiddlewareContext) {
+              ctx.cookies.set("session", "renewed", { httpOnly: true });
+              ctx.cookies.set("old", "", { maxAge: 0 });
+            },
+          },
+        },
+      ],
+    });
+    for (const pathname of ["/pricing", "/pricing.md"]) {
+      const { run, handleFarmRequest } = createHandler(resolveMarkdownConfig({ cache: 300 }));
+      handleFarmRequest.mockImplementation(async (request: Request) => {
+        const result = await runner(request);
+        return applyProductionMiddlewareHeaders(
+          new Response("<h1>Pricing</h1>", { headers: { "content-type": "text/html" } }),
+          result.headers,
+        );
+      });
+      const response = await run(
+        new Request(`https://farm.test${pathname}`, {
+          headers: { accept: "text/markdown" },
+        }),
+      );
+      expect(response.headers.getSetCookie()).toEqual([
+        "session=renewed; Path=/; HttpOnly",
+        "old=; Max-Age=0; Path=/",
+      ]);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(handleFarmRequest).toHaveBeenCalledOnce();
+    }
+  });
+
   it("serves a page's mirror at .md, rendering the page through the normal request path", async () => {
     const { run, rendered } = createHandler();
     const response = await run(new Request("https://farm.test/pricing.md"));

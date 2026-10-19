@@ -213,6 +213,11 @@ Farm returns the same markdown representation with `Content-Type: text/markdown`
 document head, while ordinary browser requests continue to receive HTML. Set
 `metadata.alternates.types["text/markdown"]` to point the head link somewhere else.
 
+Mirrors preserve the page response's `Set-Cookie` headers, including on redirects, sign-in errors,
+partial views, `HEAD`, and conditional `304` responses. A mirror that sets cookies uses
+`Cache-Control: private, no-store`, even when `md.cache` is enabled, so a shared cache cannot replay
+one reader's session cookies to another. Cookie-free mirrors keep their configured cache policy.
+
 Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
 production, so they answer every request with HTML. They still send the `Link` header, and their
 `.md` URL works, so agents should follow the header or request the `.md` URL directly.

@@ -243,6 +243,7 @@ export async function createMarkdownMirrorResponse(
       ? pageCacheControl
       : createMarkdownCacheHeader(cache),
   );
+  preserveMarkdownResponseCookies(pageResponse.headers, headersOut);
 
   // The mirror is the same document in another format, so it keeps the page's
   // indexing rules and points search engines at the page as the canonical copy.
@@ -285,6 +286,7 @@ function createMarkdownAccessResponse(
     "Cache-Control": "no-store",
     "X-Farm-Markdown-Route": pathname,
   });
+  preserveMarkdownResponseCookies(pageResponse.headers, headers);
   let body: string;
   if (redirect) {
     let target: string;
@@ -306,6 +308,21 @@ function createMarkdownAccessResponse(
         : `# Access denied\n\nThis account cannot read \`${pathname}\`.\n`;
   }
   return new Response(head ? null : body, { status: pageResponse.status, headers });
+}
+
+function preserveMarkdownResponseCookies(source: Headers, target: Headers): void {
+  const getSetCookie = source.getSetCookie;
+  const cookies =
+    typeof getSetCookie === "function"
+      ? getSetCookie.call(source)
+      : source.has("set-cookie")
+        ? [source.get("set-cookie")!]
+        : [];
+  if (cookies.length === 0) return;
+  // Keep separate fields (including Expires commas and same-name scoped cookies).
+  for (const cookie of cookies) target.append("Set-Cookie", cookie);
+  // A cached mirror must never replay a caller's session cookie to another reader.
+  target.set("Cache-Control", "private, no-store");
 }
 
 export function applyMarkdownNegotiationHeaders(
