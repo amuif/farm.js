@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useMutation } from "@farm.js/core/client";
 import { useRouter, useSearchParams } from "@farm.js/core/navigation";
 import { agentCheckErrorMessage } from "../../lib/agents-check-messages";
+import { runAgentCheck, useAgentCheck } from "./check-store";
 
 // What the scan is doing, roughly in order, while the request runs.
 const STEPS = [
@@ -17,40 +17,26 @@ const STEPS = [
   "Scoring",
 ];
 
-/** Start a scan. The route answers a JSON request with JSON and a plain form post with a redirect. */
-async function startCheck(url: string): Promise<{ id: string } | { error?: string }> {
-  const response = await fetch("/api/agents/check", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  const result = (await response.json().catch(() => ({}))) as { id?: unknown; error?: unknown };
-  if (response.ok && typeof result.id === "string") return { id: result.id };
-  const error = typeof result.error === "string" ? result.error : undefined;
-  return { error: response.status === 429 ? (error ?? "rate_limited") : error };
-}
-
 /**
- * The agent-ready check form, in the waitlist's bar. Without JavaScript it posts to
- * /api/agents/check, which redirects to the report (or back here with `?error=`). Once hydrated
- * it shows progress and opens the report in place. `?url=` prefills it ("Scan again").
+ * The agent-ready check form, in the waitlist's bar. Once hydrated it runs the check in place:
+ * progress here, then the report replaces the page's intro (see AgentCheckIntro). Without
+ * JavaScript it posts to /api/agents/check, which redirects to the saved report (or back here
+ * with `?error=`). `?url=` prefills it.
  */
 export function AgentCheckForm() {
   const search = useSearchParams();
   const router = useRouter();
-  const prefill = (search.get("url") ?? "").slice(0, 2048);
-  const errorCode = search.get("error");
+  const check = useAgentCheck();
+  const prefill = (check.url || search.get("url") || "").slice(0, 2048);
+  const errorCode = check.runs === 0 ? search.get("error") : null;
   const [step, setStep] = useState(0);
-  const check = useMutation(startCheck, {
-    onSuccess: (result) => {
-      if ("id" in result) router.push(`/agents/check/${result.id}`);
-    },
-  });
-  const opening = check.data !== null && "id" in check.data;
+  // Set when the scan started but its report didn't come back, so the saved report opens.
+  const [opening, setOpening] = useState(false);
   const busy = check.pending || opening;
 
   useEffect(() => {
     if (!check.pending) return;
+    setStep(0);
     const ticker = setInterval(
       () => setStep((current) => Math.min(current + 1, STEPS.length - 1)),
       650,
@@ -59,12 +45,10 @@ export function AgentCheckForm() {
   }, [check.pending]);
 
   const failure = check.error
-    ? agentCheckErrorMessage("unavailable")
-    : check.data && "error" in check.data
-      ? agentCheckErrorMessage(check.data.error)
-      : !check.data && errorCode
-        ? agentCheckErrorMessage(errorCode)
-        : undefined;
+    ? agentCheckErrorMessage(check.error)
+    : errorCode
+      ? agentCheckErrorMessage(errorCode)
+      : undefined;
   const status = check.pending
     ? `${STEPS[step]}…`
     : opening
@@ -82,8 +66,12 @@ export function AgentCheckForm() {
       onSubmit={(event) => {
         event.preventDefault();
         if (busy) return;
-        setStep(0);
-        check.mutate(String(new FormData(event.currentTarget).get("url") ?? "").trim());
+        const url = String(new FormData(event.currentTarget).get("url") ?? "").trim();
+        void runAgentCheck(url).then((id) => {
+          if (!id) return;
+          setOpening(true);
+          router.push(`/agents/check/${id}`);
+        });
       }}
     >
       <label htmlFor="agent-check-url">Website address</label>

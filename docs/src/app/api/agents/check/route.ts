@@ -1,4 +1,4 @@
-import { agentCheckApi } from "../../../../lib/agents-check";
+import { agentCheckApi, fetchAgentCheck } from "../../../../lib/agents-check";
 
 const MAX_BODY_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 2048;
@@ -43,7 +43,7 @@ async function readCapped(request: Request): Promise<string | null> {
 /**
  * Start an agent-ready check. The form posts here without JavaScript and gets
  * a 303 to the report (or back to the form with the error); the enhanced form
- * sends JSON and gets JSON.
+ * sends JSON and gets the finished report as JSON.
  */
 export async function POST(request: Request) {
   const isForm = (request.headers.get("content-type") ?? "").includes(
@@ -107,5 +107,8 @@ export async function POST(request: Request) {
     );
   }
   if (isForm) return Response.redirect(new URL(`/agents/check/${result.id}`, request.url), 303);
-  return Response.json({ id: result.id });
+  // The check page shows the report in place, so send it along. Without it the page opens
+  // the saved report at /agents/check/[id] instead.
+  const scan = await fetchAgentCheck(result.id).catch(() => null);
+  return Response.json(scan ? { id: result.id, scan } : { id: result.id });
 }

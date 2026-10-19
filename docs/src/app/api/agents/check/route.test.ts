@@ -16,7 +16,12 @@ beforeEach(() => {
   process.env.FARMJS_API_URL = "https://infra.test/";
   process.env.FARMJS_API_KEY = "farmjs_test-key";
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue(Response.json({ id: "abc123def456" }, { status: 201 }));
+  // Starting a scan answers with its id; reading the saved report 404s unless a test stores one.
+  fetchMock.mockImplementation(async (input) =>
+    String(input).includes("/api/reports/")
+      ? Response.json({ error: "not_found" }, { status: 404 })
+      : Response.json({ id: "abc123def456" }, { status: 201 }),
+  );
   vi.stubGlobal("fetch", fetchMock);
 });
 
@@ -115,6 +120,28 @@ describe("agent-ready check proxy", () => {
     const [target, init] = fetchMock.mock.calls[0]!;
     expect(target).toBe("https://app.farmjs.dev/api/scans");
     expect(new Headers(init?.headers).has("authorization")).toBe(false);
+  });
+
+  it("returns the finished report so the page can show it in place", async () => {
+    const scan = {
+      id: "abc123def456",
+      createdAt: "2026-10-19T20:47:00.000Z",
+      report: { url: "https://vercel.com/", score: 83, checks: [] },
+    };
+    fetchMock.mockImplementation(async (input) =>
+      String(input).includes("/api/reports/")
+        ? Response.json(scan)
+        : Response.json({ id: "abc123def456" }, { status: 201 }),
+    );
+    const response = await POST(jsonRequest({ url: "vercel.com" }));
+    await expect(response.json()).resolves.toEqual({ id: "abc123def456", scan });
+    expect(fetchMock.mock.calls[1]![0]).toBe("https://infra.test/api/reports/abc123def456");
+  });
+
+  it("still answers with the id when the report can't be read yet", async () => {
+    const response = await POST(jsonRequest({ url: "vercel.com" }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ id: "abc123def456" });
   });
 
   it("answers 503 when the service is unreachable", async () => {
