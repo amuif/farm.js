@@ -134,6 +134,7 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
     routes: ({ route, api }) => {
       const tools = api.available ? bindTools(api, normalized) : [];
       // Lets core name the tool behind an endpoint, such as a form in the Markdown mirror.
+      // Rebuilding the routes (a dev restart) replaces this endpoint's catalog.
       const handler = createHandler(normalized, tools, resources, prompts, (server, catalog) => {
         unpublishCatalog?.();
         unpublishCatalog = _publishFarmMCPCatalog(server, catalog);
@@ -152,16 +153,11 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
         }),
       ] as const;
     },
-    runtime: {
-      close: () => {
-        unpublishCatalog?.();
-        unpublishCatalog = undefined;
-      },
-      // Only an oauth endpoint has metadata to serve, so others add no request hook.
-      ...(normalized.oauth
-        ? { before: ({ request }) => protectedResourceMetadata(request, normalized) }
-        : {}),
-    },
+    // Only an oauth endpoint has metadata to serve, so others add no runtime hooks:
+    // any runtime hook makes the production build bundle the plugin runtime.
+    ...(normalized.oauth
+      ? { runtime: { before: ({ request }) => protectedResourceMetadata(request, normalized) } }
+      : {}),
   };
 }
 
