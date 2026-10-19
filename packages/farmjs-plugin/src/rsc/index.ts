@@ -1072,7 +1072,14 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
                 copyPublicDir: false,
                 rollupOptions: { input: { index: entryRsc } },
               },
-              resolve: { conditions: ["react-server", "node", "import"] },
+              resolve: {
+                conditions: ["react-server", "node", "import"],
+                // Strata is a native CommonJS loader: Node must load it, not Vite's
+                // module runner. ssr.external does not reach this environment.
+                ...(optimizedBoundaryEnabled
+                  ? { external: [STRATA_PACKAGE, `${STRATA_PACKAGE}/react-server`] }
+                  : {}),
+              },
             },
             ssr: {
               build: {
@@ -1555,6 +1562,11 @@ if (document.readyState === 'loading') {
                 );
                 return;
               }
+              // Say so: a silent fallback renders a different page and hides the error.
+              console.error(
+                `[Farm.js] RSC render failed for ${method} ${pathname}; falling back to legacy SSR:`,
+                rscError,
+              );
             }
 
             try {
