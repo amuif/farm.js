@@ -475,15 +475,25 @@ export function noticeSchemaChangesInBackground(
  */
 export async function startDevServer(config: FarmConfig | FarmUserConfig = {}, port?: number) {
   const server = await createServer(config, { port });
+  const pluginManager = (server as any).__farmPluginManager as PluginManager | undefined;
 
   try {
     await server.listen(port);
-    const pluginManager = (server as any).__farmPluginManager as PluginManager | undefined;
     // Shutdown is owned by the close() installed in createServer, which awaits
     // the plugin runtime and reports failures rather than swallowing them.
     await pluginManager?.startRuntime();
     noticeSchemaChangesInBackground((server as any).__farmResolvedConfig);
   } catch (error) {
+    // Creation failures are reported by createServer above. Failures in listen
+    // or runtime.start need their own notification while plugin state is alive.
+    try {
+      await pluginManager?.runHookParallel("onError", { phase: "startDevServer", error });
+    } catch (reportError) {
+      console.error(
+        "Failed to run plugin error hooks after a dev server start failure:",
+        reportError,
+      );
+    }
     // createServer already opened watchers, instrumentation, and plugin
     // resources. A failure here — an occupied port is the common one — would
     // otherwise leave all of them running with no handle to close them, since

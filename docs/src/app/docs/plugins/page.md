@@ -199,6 +199,12 @@ instrumentation. This includes failures in `configureServer`, its returned post 
 middleware-mode `buildStart`. A failing `onError` hook or cleanup step is reported
 separately and does not replace the original startup error or skip the remaining cleanup.
 
+Development startup failures are sent to `onError` before cleanup: errors during creation
+use `phase: "createServer"`, while errors when listening (such as an occupied port) or
+running `runtime.start` use `phase: "startDevServer"`. A creation failure is not reported
+again by the startup wrapper. Async error hooks are awaited while plugin resources are
+still available; a failed error hook does not prevent cleanup or replace the startup error.
+
 ### Runtime hooks
 
 | Hook                | Runs                                                         | May return                                                       |
