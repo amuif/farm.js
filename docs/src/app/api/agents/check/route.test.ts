@@ -106,12 +106,18 @@ describe("agent-ready check proxy", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("answers 503 when the service is not configured or unreachable", async () => {
+  it("uses Farm.js Infrastructure when no API origin is set", async () => {
     delete process.env.FARMJS_API_URL;
-    expect((await POST(jsonRequest({ url: "vercel.com" }))).status).toBe(503);
-    expect(fetchMock).not.toHaveBeenCalled();
+    delete process.env.FARMJS_API_KEY;
+    const response = await POST(jsonRequest({ url: "vercel.com" }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ id: "abc123def456" });
+    const [target, init] = fetchMock.mock.calls[0]!;
+    expect(target).toBe("https://app.farmjs.dev/api/scans");
+    expect(new Headers(init?.headers).has("authorization")).toBe(false);
+  });
 
-    process.env.FARMJS_API_URL = "https://infra.test";
+  it("answers 503 when the service is unreachable", async () => {
     fetchMock.mockRejectedValue(new TypeError("fetch failed"));
     const response = await POST(jsonRequest({ url: "vercel.com" }));
     expect(response.status).toBe(503);

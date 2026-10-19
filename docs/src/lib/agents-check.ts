@@ -3,7 +3,8 @@
  * farmjs.dev renders the form and the reports and talks to that service only
  * from its server: the API origin and key never reach the browser.
  *
- * FARMJS_API_URL  origin of the agent infrastructure API
+ * FARMJS_API_URL  origin of the agent infrastructure API, if it isn't
+ *                 https://app.farmjs.dev
  * FARMJS_API_KEY  an API key from the console's Settings > API keys; lets the
  *                 API rate-limit by the visitor's address instead of this server's
  */
@@ -42,9 +43,10 @@ export function isAgentCheckId(id: string): boolean {
   return REPORT_ID.test(id);
 }
 
-export function agentCheckApi(): { origin: string; key: string | undefined } | null {
-  const origin = process.env.FARMJS_API_URL?.trim().replace(/\/+$/, "");
-  if (!origin) return null;
+const DEFAULT_API_ORIGIN = "https://app.farmjs.dev";
+
+export function agentCheckApi(): { origin: string; key: string | undefined } {
+  const origin = process.env.FARMJS_API_URL?.trim().replace(/\/+$/, "") || DEFAULT_API_ORIGIN;
   return { origin, key: process.env.FARMJS_API_KEY?.trim() || undefined };
 }
 
@@ -52,7 +54,6 @@ export function agentCheckApi(): { origin: string; key: string | undefined } | n
 export async function fetchAgentCheck(id: string): Promise<StoredAgentCheck | null> {
   if (!isAgentCheckId(id)) return null;
   const api = agentCheckApi();
-  if (!api) throw new Error("The agent-ready check is not configured.");
   const response = await fetch(`${api.origin}/api/reports/${id}`, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(8_000),
