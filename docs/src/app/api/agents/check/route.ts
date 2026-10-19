@@ -71,7 +71,6 @@ export async function POST(request: Request) {
     return fail(400, "invalid_url");
 
   const api = agentCheckApi();
-  if (!api) return fail(503, "unavailable", url);
 
   const headers: Record<string, string> = {
     "content-type": "application/json",

@@ -1,11 +1,22 @@
-import { createServer as createViteServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import type { FarmConfig } from "../types";
 import { farmI18nClientBridgePlugin, farmPlugin, farmServerOnlyEntriesPlugin } from "../vite";
 import { logger } from "../utils";
 import { readSchemaTables } from "../schema-owner";
-import { loadConfig, resolveConfig } from "../config";
+import {
+  isResolvedFarmConfig,
+  loadConfig,
+  resolveConfig,
+  type FarmUserConfig,
+  type ResolvedFarmConfig,
+} from "../config";
+import { setEnv, type EnvParser } from "../env";
 import { PluginManager } from "../plugin";
-import { createFarmDevLifecyclePlugin } from "./dev-lifecycle";
+import {
+  closeViteDevServer,
+  createFarmDevLifecyclePlugin,
+  createViteDevServer,
+} from "./dev-lifecycle";
 import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import fs from "fs";
 import path from "path";
@@ -133,13 +144,83 @@ function withPortFlag(vite: FarmConfig["vite"], port: number | undefined): FarmC
   return port === undefined ? vite : { ...vite, server: { ...vite?.server, port } };
 }
 
+function inlineEnvScope(scope: Record<string, unknown> | undefined) {
+  return Object.fromEntries(
+    Object.entries(scope || {}).map(([key, value]) => [
+      key,
+      typeof value === "function" ||
+      (value && typeof value === "object" && "parse" in value && typeof value.parse === "function")
+        ? (value as EnvParser)
+        : () => value,
+    ]),
+  );
+}
+
+async function resolveInlineConfig(
+  config: FarmConfig,
+  mode: "development" | "production",
+): Promise<ResolvedFarmConfig> {
+  // Programmatic callers can pass resolveConfig's output. Re-resolving it would
+  // parse environment values again and duplicate layer/integration plugins.
+  if (isResolvedFarmConfig(config)) {
+    setEnv(config.env);
+    return { ...config };
+  }
+
+  // The runtime config type also permits individually resolved fields. Keep
+  // their ownership and disabled state instead of treating them as user input.
+  const docs = config.docs;
+  const resolvedDocs =
+    docs && typeof docs === "object" && "enabled" in docs && "entry" in docs && "config" in docs
+      ? docs
+      : undefined;
+  const i18n = config.i18n;
+  const resolvedI18n = i18n && "enabled" in i18n ? i18n : undefined;
+  const auth = config.auth;
+  const resolvedAuth =
+    auth &&
+    typeof auth === "object" &&
+    typeof auth.emailAndPassword === "object" &&
+    "enabled" in auth.emailAndPassword
+      ? auth
+      : undefined;
+  const resolved = await resolveConfig(
+    {
+      ...config,
+      ...(resolvedDocs ? { docs: false } : {}),
+      ...(resolvedI18n ? { i18n: false } : {}),
+      ...(resolvedAuth ? { auth: false } : {}),
+      ...(config.layers ? { extends: [] } : {}),
+      // FarmConfig also accepts literal runtime env values. Adapt only inline
+      // input; file/layer config keeps the normal parser validation contract.
+      env: config.env && {
+        server: inlineEnvScope(config.env.server),
+        public: inlineEnvScope(config.env.public),
+      },
+    },
+    mode,
+  );
+  if (resolvedDocs) resolved.docs = resolvedDocs as ResolvedFarmConfig["docs"];
+  if (resolvedI18n) resolved.i18n = resolvedI18n;
+  if (resolvedAuth) resolved.auth = resolvedAuth as ResolvedFarmConfig["auth"];
+  if (config.layers) {
+    resolved.extends = config.extends || [];
+    resolved.layers = [...config.layers];
+  }
+  return resolved;
+}
+
 /**
  * Create a Vite development server with Farm.js integration
  */
-export async function createServer(config: FarmConfig = {}, options: { port?: number } = {}) {
+export async function createServer(
+  config: FarmConfig | FarmUserConfig = {},
+  options: { port?: number } = {},
+) {
   let pluginManager: PluginManager | null = null;
   let instrumentation: FarmInstrumentationLifecycle | null = null;
   let server: ViteDevServer | undefined;
+  let pendingViteServer: ViteDevServer | undefined;
   try {
     const root = config.root || process.cwd();
 
@@ -147,12 +228,13 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     const mode = process.env.NODE_ENV === "production" ? "production" : "development";
     const userConfig = await loadConfig(root, undefined, mode);
 
-    const resolvedConfig = userConfig ? await resolveConfig(userConfig, mode) : null;
-    const instrumentationConfig = resolvedConfig || config;
-    const instrumentationRoot = instrumentationConfig.root || root;
+    const resolvedConfig = userConfig
+      ? await resolveConfig(userConfig, mode)
+      : await resolveInlineConfig(config, mode);
+    const instrumentationRoot = resolvedConfig.root;
     const instrumentationFile = resolveFarmInstrumentationFile(
       instrumentationRoot,
-      instrumentationConfig.srcDir || "src",
+      resolvedConfig.srcDir,
     );
     const instrumentationModule = await loadFarmInstrumentation(
       instrumentationFile,
@@ -167,43 +249,39 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
 
     // Initialize plugin manager
     pluginManager = new PluginManager({
-      config: resolvedConfig || config,
+      config: resolvedConfig,
       isDev: mode === "development",
       isProd: mode === "production",
     });
 
-    // Add built-in plugins if config is available
-    if (resolvedConfig) {
-      const redirects = await resolvedConfig.redirects();
-      const headers = await resolvedConfig.headers();
-      const rewrites = await resolvedConfig.rewrites();
+    // File and inline config share the same plugin registration path.
+    const redirects = await resolvedConfig.redirects();
+    const headers = await resolvedConfig.headers();
+    const rewrites = await resolvedConfig.rewrites();
 
-      if (redirects.length > 0) {
-        pluginManager.addPlugin(createRedirectsPlugin(redirects, { i18n: resolvedConfig.i18n }));
-      }
-
-      if (headers.length > 0) {
-        pluginManager.addPlugin(createHeadersPlugin(headers, { i18n: resolvedConfig.i18n }));
-      }
-
-      if (rewrites.length > 0) {
-        pluginManager.addPlugin(createRewritesPlugin(rewrites, { i18n: resolvedConfig.i18n }));
-      }
-
-      // Compression is applied by production adapters. Its hook is a no-op in
-      // development, so do not put every dev response through that lifecycle.
-      if (resolvedConfig.compress && mode === "production") {
-        pluginManager.addPlugin(createCompressionPlugin());
-      }
-
-      if (resolvedConfig.plugins) {
-        pluginManager.addPlugins(resolvedConfig.plugins);
-      }
+    if (redirects.length > 0) {
+      pluginManager.addPlugin(createRedirectsPlugin(redirects, { i18n: resolvedConfig.i18n }));
     }
+
+    if (headers.length > 0) {
+      pluginManager.addPlugin(createHeadersPlugin(headers, { i18n: resolvedConfig.i18n }));
+    }
+
+    if (rewrites.length > 0) {
+      pluginManager.addPlugin(createRewritesPlugin(rewrites, { i18n: resolvedConfig.i18n }));
+    }
+
+    // Compression is applied by production adapters. Its hook is a no-op in
+    // development, so do not put every dev response through that lifecycle.
+    if (resolvedConfig.compress && mode === "production") {
+      pluginManager.addPlugin(createCompressionPlugin());
+    }
+
+    pluginManager.addPlugins(resolvedConfig.plugins);
 
     // Only an app whose environment links it to a Farm Infra project gets this plugin.
     const infraAnalytics =
-      (resolvedConfig || config).analytics !== false ? createFarmInfraAnalyticsPlugin() : null;
+      resolvedConfig.analytics !== false ? createFarmInfraAnalyticsPlugin() : null;
     if (infraAnalytics) pluginManager.addPlugin(infraAnalytics);
 
     if (mode === "development") {
@@ -216,7 +294,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
     // Run config hooks
     await pluginManager.runHookParallel("init");
 
-    let finalConfig = resolvedConfig || config;
+    let finalConfig: FarmConfig = resolvedConfig;
     finalConfig = await pluginManager.runHookSerial("config", finalConfig);
     finalConfig.renderer = resolveFarmRenderer(finalConfig.renderer);
     const projectRoot = finalConfig.root || process.cwd();
@@ -241,7 +319,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
       tailwindVitePlugin = await loadTailwindVitePlugin();
     }
 
-    server = await createViteServer(
+    server = await createViteDevServer(
       mergeFarmViteConfig(
         {
           root: projectRoot,
@@ -310,8 +388,12 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
         },
         withPortFlag(finalConfig.vite, options.port),
       ),
+      (candidate) => {
+        pendingViteServer = candidate;
+      },
     );
 
+    pendingViteServer = undefined;
     (server as any).__farmPluginManager = pluginManager;
     (server as any).__farmResolvedConfig = resolvedConfig;
     (server as any).__farmInstrumentation = instrumentation;
@@ -349,6 +431,14 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
       // even when an individual shutdown step rejects.
       await attempt("close the dev server", server.close.bind(server));
     } else {
+      const partialServer = pendingViteServer;
+      if (partialServer) {
+        await attempt("close the partially created Vite server", () =>
+          closeViteDevServer(partialServer, partialServer.close.bind(partialServer)),
+        );
+      }
+      // Construction may fail before the lifecycle wrapper is installed.
+      // These owners are idempotent if a late Vite hook fails after installation.
       await attempt("close the plugin runtime", () =>
         pluginManager?.closeRuntime("dev-server-creation-failed"),
       );
@@ -383,7 +473,7 @@ export function noticeSchemaChangesInBackground(
 /**
  * Start the development server
  */
-export async function startDevServer(config: FarmConfig = {}, port?: number) {
+export async function startDevServer(config: FarmConfig | FarmUserConfig = {}, port?: number) {
   const server = await createServer(config, { port });
 
   try {

@@ -193,8 +193,10 @@ Vite server, and then awaits plugin cleanup and instrumentation shutdown exactly
 errors reject `close()`. New restart requests are rejected once final shutdown begins.
 
 If initial development-server creation fails, Farm awaits cleanup of the resources it has
-created before rejecting: the returned Vite server (if available), registered plugin shutdown
-hooks and disposers, and instrumentation. A failing `onError` hook or cleanup step is reported
+created before rejecting: Vite's server once `configureServer` begins (even if a Vite hook
+fails before the server is returned), registered plugin shutdown hooks and disposers, and
+instrumentation. This includes failures in `configureServer`, its returned post hook, and
+middleware-mode `buildStart`. A failing `onError` hook or cleanup step is reported
 separately and does not replace the original startup error or skip the remaining cleanup.
 
 ### Runtime hooks

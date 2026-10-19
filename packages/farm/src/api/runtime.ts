@@ -466,3 +466,7 @@ async function validateInput(
     );
   }
 }
+
+// The MCP tool registry, published by @farm.js/mcp. It lives behind this
+// edge-safe entry so the plugin never pulls core's main index into a worker.
+export { _findFarmMCPEndpointTool, _publishFarmMCPCatalog } from "../mcp-catalog";

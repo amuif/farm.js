@@ -516,6 +516,26 @@ The route's Standard Schema implementation must be convertible to JSON Schema. Z
 without additional configuration. Selected routes currently need JSON responses; binary,
 multipart, and streaming responses are rejected as tool errors.
 
+## Forms that are also tools
+
+When a page's form submits to an API route that is exposed as a tool, the page's Markdown mirror
+says so. Its [`?actions` view](/docs/markdown#describe-a-pages-forms) adds the tool to that form:
+
+```json
+{
+  "type": "form",
+  "method": "POST",
+  "action": "/api/contact",
+  "fields": [{ "name": "email", "type": "email", "required": true }],
+  "tool": { "name": "contact_submit", "endpoint": "/api/mcp" }
+}
+```
+
+An agent reading the page can then call `contact_submit` through MCP instead of posting the form.
+The match uses the form's method and action against the endpoints this server exposes, including
+a custom `api.baseURL`. Forms bound to server functions in a React Server Components app are not
+matched yet.
+
 ## Connect a client
 
 Point an MCP client at the deployed endpoint and supply credentials using that client's secure

@@ -1,4 +1,10 @@
-import type { Plugin, ViteDevServer } from "vite";
+import {
+  createServer,
+  resolveConfig,
+  type InlineConfig,
+  type Plugin,
+  type ViteDevServer,
+} from "vite";
 import { FarmRuntimeShutdownError, type PluginManager } from "../plugin";
 import type { FarmInstrumentationLifecycle } from "../instrumentation";
 import { logger } from "../utils";
@@ -9,6 +15,32 @@ import { logger } from "../utils";
  * started (#1263); farm's shutdown must not inherit that hang.
  */
 const VITE_CLOSE_TIMEOUT_MS = 10_000;
+
+/** Capture the initial server before any app or renderer configureServer hook. */
+export async function createViteDevServer(
+  config: InlineConfig,
+  capture: (server: ViteDevServer) => void,
+): Promise<ViteDevServer> {
+  const resolved = await resolveConfig(
+    config,
+    "serve",
+    undefined,
+    undefined,
+    false,
+    undefined,
+    (plugins) => {
+      // Vite places plugins from vite.config.* before inline plugins. Install the
+      // capture after merging, before hook ordering is cached, to cover their pre
+      // hooks too. It is not part of inlineConfig, so native restarts do not capture
+      // a replacement candidate or change Farm's existing runtime ownership.
+      plugins.unshift({
+        name: "farm:dev-construction",
+        configureServer: { order: "pre", handler: capture },
+      });
+    },
+  );
+  return createServer(resolved);
+}
 
 type VitePendingRequest = {
   request: Promise<unknown>;
@@ -43,6 +75,51 @@ async function drainVitePendingWork(server: ViteDevServer): Promise<void> {
   }
 }
 
+/** Close Vite even during partial construction, without stranding Farm's cleanup. */
+export async function closeViteDevServer(
+  server: ViteDevServer,
+  closeViteServer: () => Promise<void>,
+): Promise<void> {
+  const closingHttpServer = server.httpServer;
+  const closingWatcher = server.watcher;
+  const closingWebSocket = server.ws;
+  // Vite's close() can deadlock after the client entry has been transformed:
+  // pending bare imports can wait for an optimizer that close cancels (#1263).
+  // Drain first, but keep Farm's own teardown bounded if Vite cannot settle.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), VITE_CLOSE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    const outcome = await Promise.race([
+      (async () => {
+        await drainVitePendingWork(server);
+        await closeViteServer();
+        return "closed" as const;
+      })(),
+      timedOut,
+    ]);
+    if (outcome === "timeout") {
+      logger.error(
+        `Vite server close did not settle within ${VITE_CLOSE_TIMEOUT_MS}ms; ` +
+          "continuing shutdown without it (https://github.com/farming-labs/farm.js/issues/1263)",
+      );
+      // Best effort, all idempotent: stop serving even if a container is stranded.
+      await Promise.allSettled([
+        new Promise<void>((resolve) => {
+          if (!closingHttpServer || !closingHttpServer.listening) return resolve();
+          closingHttpServer.close(() => resolve());
+        }),
+        Promise.resolve(closingWatcher?.close?.()).catch(() => {}),
+        Promise.resolve(closingWebSocket?.close?.()).catch(() => {}),
+      ]);
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * One Farm runtime spans Vite's server generations. configureServer runs again
  * on native restart, so install the public close/restart wrappers each time.
@@ -71,9 +148,6 @@ export function createFarmDevLifecyclePlugin(
       // Finish that handoff before closing its current generation.
       await Promise.allSettled(pendingRestarts);
       const closeViteServer = viteClosers.get(server.environments)!;
-      const closingHttpServer = server.httpServer;
-      const closingWatcher = server.watcher;
-      const closingWebSocket = server.ws;
       const failures: Array<{ label: string; error: unknown }> = [];
       const step = async (label: string, run: () => Promise<unknown> | undefined) => {
         try {
@@ -86,50 +160,7 @@ export function createFarmDevLifecyclePlugin(
       // Finish Vite's active optimizer and transforms, stop serving, release
       // what the plugins hold, then flush telemetry last so shutdown problems
       // are still reported.
-      // Vite's close() can deadlock after the client entry has been
-      // transformed: background pre-transforms of its bare imports wait in
-      // the optimized-deps load hook for a dependency run that
-      // depsOptimizer.close() cancels without settling, and the plugin
-      // container then awaits those promises forever (#1263). Draining
-      // Vite's pending transform registry before close preserves its normal
-      // optimizer and pre-transform behavior without triggering that order.
-      // Bound the drain and close so Farm's own teardown — plugin disposers,
-      // instrumentation — still runs if Vite finds another shutdown failure.
-      await step("Vite server close", async () => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const timedOut = new Promise<"timeout">((resolve) => {
-          timer = setTimeout(() => resolve("timeout"), VITE_CLOSE_TIMEOUT_MS);
-          timer.unref?.();
-        });
-        try {
-          const outcome = await Promise.race([
-            (async () => {
-              await drainVitePendingWork(server);
-              await closeViteServer();
-              return "closed" as const;
-            })(),
-            timedOut,
-          ]);
-          if (outcome === "timeout") {
-            logger.error(
-              `Vite server close did not settle within ${VITE_CLOSE_TIMEOUT_MS}ms; ` +
-                "continuing shutdown without it (https://github.com/farming-labs/farm.js/issues/1263)",
-            );
-            // Best effort, all idempotent: make sure nothing keeps serving
-            // even though the container promise is stranded.
-            await Promise.allSettled([
-              new Promise<void>((resolve) => {
-                if (!closingHttpServer || !closingHttpServer.listening) return resolve();
-                closingHttpServer.close(() => resolve());
-              }),
-              Promise.resolve(closingWatcher?.close?.()).catch(() => {}),
-              Promise.resolve(closingWebSocket?.close?.()).catch(() => {}),
-            ]);
-          }
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
-      });
+      await step("Vite server close", () => closeViteDevServer(server, closeViteServer));
       await step("Plugin runtime shutdown", () => pluginManager.closeRuntime("dev-server-closed"));
       await step("Instrumentation shutdown", () => instrumentation.shutdown());
 

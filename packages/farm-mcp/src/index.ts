@@ -24,8 +24,13 @@ import type {
   FarmMCPServerFunction,
   FarmMCPPrompt,
   FarmMCPResource,
+  FarmMCPServer,
 } from "@farm.js/core";
-import { isEndpointFailure, parseRouteSchema } from "@farm.js/core/api/runtime";
+import {
+  _publishFarmMCPCatalog,
+  isEndpointFailure,
+  parseRouteSchema,
+} from "@farm.js/core/api/runtime";
 import {
   _describeServerFunction,
   _invokeServerFunction,
@@ -122,12 +127,18 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
   const normalized = validateOptions(options);
   const resources = validateResources(normalized.resources);
   const prompts = bindPrompts(normalized.prompts);
+  let unpublishCatalog: (() => void) | undefined;
 
   return {
     name: "farm:api-mcp",
     routes: ({ route, api }) => {
       const tools = api.available ? bindTools(api, normalized) : [];
-      const handler = createHandler(normalized, tools, resources, prompts);
+      // Lets core name the tool behind an endpoint, such as a form in the Markdown mirror.
+      // Rebuilding the routes (a dev restart) replaces this endpoint's catalog.
+      const handler = createHandler(normalized, tools, resources, prompts, (server, catalog) => {
+        unpublishCatalog?.();
+        unpublishCatalog = _publishFarmMCPCatalog(server, catalog);
+      });
       const serve = (request: Request, body: unknown) => handler(request, body);
 
       return [
@@ -142,7 +153,8 @@ export function apiMcp(options: APIMCPOptions): FarmPlugin {
         }),
       ] as const;
     },
-    // Only an oauth endpoint has metadata to serve, so others add no request hook.
+    // Only an oauth endpoint has metadata to serve, so others add no runtime hooks:
+    // any runtime hook makes the production build bundle the plugin runtime.
     ...(normalized.oauth
       ? { runtime: { before: ({ request }) => protectedResourceMetadata(request, normalized) } }
       : {}),
@@ -154,6 +166,7 @@ function createHandler(
   tools: readonly BoundTool[],
   resources: readonly FarmMCPResource[],
   prompts: readonly BoundPrompt[],
+  publish: (server: FarmMCPServer, catalog: readonly FarmMCPTool[]) => void,
 ) {
   const catalog: readonly FarmMCPTool[] = Object.freeze(
     tools.map((tool) =>
@@ -173,6 +186,7 @@ function createHandler(
     version: options.version,
     path: options.path,
   });
+  publish(serverIdentity, catalog);
   const toolNames = new Set(catalog.map(({ name }) => name));
   const resourceNames = new Set(resources.map(({ name }) => name));
   const promptNames = new Set(prompts.map(({ definition }) => definition.name));

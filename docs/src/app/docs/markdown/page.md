@@ -315,6 +315,11 @@ curl "http://localhost:3000/contact.md?actions"
 - `submit` lists the buttons, with a button's own `formaction` or `formmethod` when it has one.
 - A React server action form, rendered with React's hidden `$ACTION_` fields, includes
   `serverAction.id`.
+- A form that submits to an API route exposed as an MCP tool by
+  [`@farm.js/mcp`](/docs/plugins/mcp) includes `tool`: the tool `name` and the MCP `endpoint` that
+  serves it, so an agent can call the tool instead of posting the form. The match uses the form's
+  method and resolved action against the running MCP server's tools. The caller's `authorize`
+  policy still decides whether that tool is available to it.
 
 A `page.md` source has no forms, so its `?actions` view is an empty list. The view carries an
 `ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's

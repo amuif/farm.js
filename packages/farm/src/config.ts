@@ -487,6 +487,11 @@ export function hasCustomFarmRouteContext(config: ResolvedFarmConfig): boolean {
   return config[FARM_RESOLVED_CUSTOM_CONTEXT] === true;
 }
 
+/** @internal Every resolveConfig result carries this marker, including the default context. */
+export function isResolvedFarmConfig(config: BaseFarmConfig): config is ResolvedFarmConfig {
+  return Object.prototype.hasOwnProperty.call(config, FARM_RESOLVED_CUSTOM_CONTEXT);
+}
+
 export type FarmLayerConfig = Omit<
   FarmUserConfig,
   | "root"

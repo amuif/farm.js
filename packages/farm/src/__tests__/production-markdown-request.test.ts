@@ -28,6 +28,8 @@ function runtime(config = resolveMarkdownConfig(undefined)) {
       const url = new URL(request.url);
       const adapterContext = {};
       const middlewareHeaders = undefined;
+      // A top-level constant of the generated server.
+      const farmLocalAPIBasePath = "/api";
       ${source.slice(start, end)}
       return null;
     };`,
