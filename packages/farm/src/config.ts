@@ -53,6 +53,7 @@ import {
 import { bundleNodeModule } from "./build/node-module-bundle";
 import path from "path";
 import { logger } from "./utils";
+import { setFarmProjectSourceDir } from "./utils/source-dir";
 import { normalizeFarmDeploymentId } from "./deployment";
 import { normalizeFarmConfigBasePath } from "./base-path";
 import { resolveFarmDevtoolsConfig, type ResolvedFarmDevtoolsConfig } from "./devtools-config";
@@ -1048,6 +1049,7 @@ export async function resolveConfig(
   const deploy = resolveDeployConfig(userConfig);
   const root = userConfig.root || process.cwd();
   const srcDir = userConfig.srcDir || "src";
+  setFarmProjectSourceDir(root, srcDir);
   const docs = await resolveDocsConfig(userConfig.docs, { root, srcDir });
   const md = resolveMarkdownConfig(userConfig.md);
   const mdx = resolveMdxConfig(userConfig.mdx);

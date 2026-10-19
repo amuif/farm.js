@@ -5,6 +5,7 @@ import { isFarmIslandStrategy, type FarmIslandStrategy } from "../island";
 import { isReactRenderer, type FarmRenderer } from "../renderer";
 import type { FarmIsolatedClientHydrationMode } from "../types";
 import { logger } from "../utils";
+import { getFarmProjectSourceDir } from "./source-dir";
 
 function readIfExists(filePath: string): string | null {
   try {
@@ -1656,8 +1657,10 @@ function getProjectImportAliases(projectRoot: string): ProjectImportAlias[] {
       return "-";
     }
   }).join(":");
+  const sourceDir = getFarmProjectSourceDir(projectRoot);
+  const cacheStamp = `${stamp}:${sourceDir}`;
   const cached = projectImportAliasCache.get(projectRoot);
-  if (cached?.stamp === stamp) return cached.aliases;
+  if (cached?.stamp === cacheStamp) return cached.aliases;
 
   const aliases = [
     ...readTsconfigPathAliases(projectRoot),
@@ -1669,10 +1672,10 @@ function getProjectImportAliases(projectRoot: string): ProjectImportAlias[] {
       prefix: "@/",
       suffix: "",
       wildcard: true,
-      targets: [path.join(projectRoot, "src", "*")],
+      targets: [path.join(projectRoot, sourceDir, "*")],
     });
   }
-  projectImportAliasCache.set(projectRoot, { stamp, aliases });
+  projectImportAliasCache.set(projectRoot, { stamp: cacheStamp, aliases });
   return aliases;
 }
 

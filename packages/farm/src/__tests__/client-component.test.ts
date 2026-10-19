@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveConfig } from "../config";
 import { logger } from "../utils";
 import {
   describeSuppressedAsyncHydration,
@@ -248,6 +249,17 @@ describe("client component path resolution", () => {
       expect(getClientModuleMetadata(path.join(root, "src/app/layout.tsx"), root)).toEqual(
         hydrated,
       );
+    });
+
+    it("follows the default @/ alias to a configured srcDir", async () => {
+      const root = writeAliasFixture({
+        "components/nav.tsx": clientNav,
+        "app/layout.tsx":
+          'import { Nav } from "@/components/nav";\nexport default function Layout({ children }) { return <html><body><Nav />{children}</body></html>; }\n',
+      });
+      await resolveConfig({ root, srcDir: "." });
+
+      expect(getClientModuleMetadata(path.join(root, "app/layout.tsx"), root)).toEqual(hydrated);
     });
 
     it("follows tsconfig paths, including comments and trailing commas", () => {
