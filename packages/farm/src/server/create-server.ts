@@ -1,11 +1,15 @@
-import { createServer as createViteServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import type { FarmConfig } from "../types";
 import { farmI18nClientBridgePlugin, farmPlugin, farmServerOnlyEntriesPlugin } from "../vite";
 import { logger } from "../utils";
 import { readSchemaTables } from "../schema-owner";
 import { loadConfig, resolveConfig } from "../config";
 import { PluginManager } from "../plugin";
-import { createFarmDevLifecyclePlugin } from "./dev-lifecycle";
+import {
+  closeViteDevServer,
+  createFarmDevLifecyclePlugin,
+  createViteDevServer,
+} from "./dev-lifecycle";
 import { farmEnvironmentFunctionsPlugin } from "../environment-vite";
 import fs from "fs";
 import path from "path";
@@ -140,6 +144,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
   let pluginManager: PluginManager | null = null;
   let instrumentation: FarmInstrumentationLifecycle | null = null;
   let server: ViteDevServer | undefined;
+  let pendingViteServer: ViteDevServer | undefined;
   try {
     const root = config.root || process.cwd();
 
@@ -241,7 +246,7 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
       tailwindVitePlugin = await loadTailwindVitePlugin();
     }
 
-    server = await createViteServer(
+    server = await createViteDevServer(
       mergeFarmViteConfig(
         {
           root: projectRoot,
@@ -310,8 +315,12 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
         },
         withPortFlag(finalConfig.vite, options.port),
       ),
+      (candidate) => {
+        pendingViteServer = candidate;
+      },
     );
 
+    pendingViteServer = undefined;
     (server as any).__farmPluginManager = pluginManager;
     (server as any).__farmResolvedConfig = resolvedConfig;
     (server as any).__farmInstrumentation = instrumentation;
@@ -349,6 +358,14 @@ export async function createServer(config: FarmConfig = {}, options: { port?: nu
       // even when an individual shutdown step rejects.
       await attempt("close the dev server", server.close.bind(server));
     } else {
+      const partialServer = pendingViteServer;
+      if (partialServer) {
+        await attempt("close the partially created Vite server", () =>
+          closeViteDevServer(partialServer, partialServer.close.bind(partialServer)),
+        );
+      }
+      // Construction may fail before the lifecycle wrapper is installed.
+      // These owners are idempotent if a late Vite hook fails after installation.
       await attempt("close the plugin runtime", () =>
         pluginManager?.closeRuntime("dev-server-creation-failed"),
       );
