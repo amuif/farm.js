@@ -325,6 +325,26 @@ A `page.md` source has no forms, so its `?actions` view is an empty list. The vi
 `ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's
 request, so it shows the forms that caller would see.
 
+## React Server Components apps
+
+Apps built with `defineConfig` from `@farm.js/plugin/rsc` serve the same mirrors. Every page answers
+at its `.md` URL and to `Accept: text/markdown`, with `?outline`, `?section`, `?max_tokens`, and
+`?actions`. HTML pages send the `Link` header, a missing `.md` page answers a Markdown 404, and reads
+fire `agent.read` events. The mirror renders the page through the normal request path, so middleware
+and sign-in gates apply, and a page that must not be shared keeps its private `Cache-Control`.
+
+Set the same `md` options on the RSC config:
+
+```ts title="vite.config.ts"
+import { defineConfig } from "@farm.js/plugin/rsc";
+
+export default defineConfig({
+  md: { expose: ["/", "/pricing", "/docs/[...slug]"], cache: 300 },
+});
+```
+
+`md: false` turns mirrors off. `page.md` sources and `llms.txt` are not part of the RSC pipeline yet.
+
 ## Production notes
 
 - Restrict `md.expose` when authenticated or private pages should not have generated mirrors.

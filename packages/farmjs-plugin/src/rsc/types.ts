@@ -1,3 +1,4 @@
+import type { FarmMarkdownResolvedConfig } from "@farm.js/core/markdown";
 import type { ResolvedFarmI18nConfig } from "@farm.js/core/i18n";
 import type {
   FarmServerActionsConfig,
@@ -113,6 +114,9 @@ export interface EntryContext {
    * Farm's normal config merge order.
    */
   middlewareConfigPaths?: string[];
+
+  /** Resolved Markdown mirror settings (core's `md`): `.md` pages and `Accept: text/markdown`. */
+  markdown?: FarmMarkdownResolvedConfig;
 
   /** Whether debug mode is enabled */
   debug: boolean;

@@ -105,8 +105,17 @@ import {
   getRoutePatternSpecificity,
 } from '@farm.js/core/internal/production-runtime';
 
+import {
+  FARM_MARKDOWN_CONTENT_TYPE,
+  applyMarkdownNegotiationHeaders,
+  createFarmMarkdownErrorBody,
+  createMarkdownMirrorResponse,
+  farmRequestWantsMarkdown,
+} from '@farm.js/core/markdown';
+
 const farmDeploymentId = ${JSON.stringify(ctx.deploymentId)};
 const farmApiBasePath = ${JSON.stringify(ctx.apiBasePath ?? "/api")};
+const farmMarkdownConfig = ${JSON.stringify(ctx.markdown ?? { enabled: false, expose: [], cache: false, includeMetadata: true })};
 `;
   if (ctx.actionsEnabled) {
     code += `import {
@@ -762,6 +771,17 @@ async function handleFarmRequest(request, context) {
   
   if (!matched) {
     debug('404 - No route found for:', url.pathname);
+    // Agents that read in Markdown get a Markdown 404, as in core's server.
+    if (farmMarkdownConfig.enabled && farmRequestWantsMarkdown(url.pathname, request.headers.get('accept'))) {
+      return new Response(createFarmMarkdownErrorBody(404, url.pathname), {
+        status: 404,
+        headers: {
+          'Content-Type': FARM_MARKDOWN_CONTENT_TYPE,
+          'X-Farm-Markdown-Error': '404',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
     return new Response('Not Found', { status: 404 });
   }
   
@@ -1013,13 +1033,36 @@ async function handleFarmRequest(request, context) {
   }
 }
 
+/**
+ * Serves a page's Markdown mirror (\`/page.md\` or \`Accept: text/markdown\`) by
+ * rendering the page through the normal request path, so middleware and sign-in
+ * gates apply; every other request renders as usual, and HTML pages advertise
+ * their mirror with a Link header.
+ */
+async function handleFarmPageOrMarkdown(request, context) {
+  if (!farmMarkdownConfig.enabled) return handleFarmRequest(request, context);
+  const markdown = await createMarkdownMirrorResponse({
+    request,
+    config: farmMarkdownConfig,
+    routeExists: (pathname) => Boolean(matchRoute(pathname)),
+    renderPage: (pageRequest) => handleFarmRequest(pageRequest, context),
+    apiServerBasePath: farmApiBasePath,
+  });
+  if (markdown) return markdown;
+  const response = await handleFarmRequest(request, context);
+  return applyMarkdownNegotiationHeaders(response, {
+    config: farmMarkdownConfig,
+    pathname: new URL(request.url).pathname,
+  });
+}
+
 async function handler(request, context) {
   return _runWithAPIRequestRuntime({
     basePath: farmApiBasePath,
     dispatch: async (localRequest) =>
       (await handleAPIRequest(localRequest)) ?? Response.json({ error: 'Not Found' }, { status: 404 }),
   }, () => _runWithCurrentRequest(request, () =>
-    _runWithAfterRequest(request, () => handleFarmRequest(request, context), context)
+    _runWithAfterRequest(request, () => handleFarmPageOrMarkdown(request, context), context)
   ));
 }
 

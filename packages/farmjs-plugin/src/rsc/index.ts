@@ -45,6 +45,7 @@ import {
   resolveFarmClientCacheAdapterEntry,
 } from "@farm.js/core/vite";
 import { generateRscEntry } from "./entries/rsc.js";
+import { resolveMarkdownConfig, type FarmMarkdownUserConfig } from "@farm.js/core/markdown";
 import { generateSsrEntry } from "./entries/ssr.js";
 import { generateErrorFallbackEntry } from "./entries/error-fallback.js";
 import { generateClientEntry, serverFnTransportErrorClientRuntime } from "./entries/client.js";
@@ -149,6 +150,12 @@ export interface FarmRscConfig {
   };
   /** Extra Vite plugins (e.g. rsc() with entries so client build resolves virtual:vite-rsc/client-references). */
   plugins?: any[];
+  /**
+   * Markdown mirrors for agents: `/page.md` and `Accept: text/markdown`, with
+   * `?outline`, `?section`, `?max_tokens`, and `?actions`. Same options as core's `md`.
+   * @default true
+   */
+  md?: FarmMarkdownUserConfig | boolean;
 }
 
 /**
@@ -175,6 +182,7 @@ export function defineConfig(config: FarmRscConfig = {}): UserConfig {
     serverActions: config.serverActions,
     deploymentId: config.deploymentId,
     generateBuildId: config.generateBuildId,
+    md: config.md,
 
     // Vite server configuration
     server: {
@@ -784,6 +792,7 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
           cache?: FarmCacheUserConfig;
           i18n?: FarmI18nUserConfig | false;
           middleware?: FarmMiddlewareConfig;
+          md?: FarmMarkdownUserConfig | boolean;
         };
         // Check if user enabled RSC in their config
         rscEnabled = c.experimental?.serverComponents === true;
@@ -914,6 +923,7 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
               options.serverActions?.allowedOrigins ?? c.serverActions?.allowedOrigins,
           }),
           deploymentId,
+          markdown: resolveMarkdownConfig(c.md),
           // Resolved the same way core resolves it for the config, so RSC and
           // non-RSC apps match middleware against the same pathname.
           i18n: resolveFarmI18nConfig(c.i18n, {
