@@ -89,7 +89,7 @@ export default function AgentCheckPage() {
                   <IndexedLabel index="06.4" icon={ScanSearch} label="Agent-ready check" />
                 </div>
                 <h1 id="agent-check-title">
-                  Is your site ready for <span className="agents-hero-word">agents</span>?
+                  Is your site ready for <span className="agents-hero-word">agents?</span>
                   <br />
                   <span className="agents-hero-line">Find out in seconds.</span>
                 </h1>
