@@ -192,6 +192,11 @@ concurrently. After all settle, the first observed reporter failure is surfaced 
 dispatch caller; startup and request handling report it separately from the original
 failure. Keep error reporters finite: they are awaited before the caller continues.
 
+Other parallel hooks remain fail-fast: a synchronous throw stops dispatch before later
+hooks are invoked and rejects with the same thrown value. Farm still observes promises
+from already-started hooks so their later rejections are handled. This does not wait for
+or cancel that work; asynchronous failures retain normal `Promise.all` behavior.
+
 In development, a native Vite restart keeps the same Farm plugin runtime and instrumentation
 alive; it does not rerun `setup` or dispose resources registered with `lifecycle.onShutdown()`.
 Awaiting the Farm dev server's `close()` waits for an in-progress restart, closes the current

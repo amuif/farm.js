@@ -1648,11 +1648,18 @@ export class PluginManager {
     } else {
       // Run other hooks in parallel
       const promises: Promise<any>[] = [];
-      for (const plugin of plugins) {
-        for (const hook of this.getPluginHooks(plugin, hookName)) {
-          const hookContext = this.getHookContext(plugin, hookName, args);
-          promises.push((hook as any).apply(plugin, [...args, hookContext]));
+      try {
+        for (const plugin of plugins) {
+          for (const hook of this.getPluginHooks(plugin, hookName)) {
+            const hookContext = this.getHookContext(plugin, hookName, args);
+            promises.push((hook as any).apply(plugin, [...args, hookContext]));
+          }
         }
+      } catch (error) {
+        // A synchronous failure skips the normal Promise.all below. Observe
+        // already-started work without waiting for it or invoking later hooks.
+        void Promise.all(promises).catch(() => {});
+        throw error;
       }
       await Promise.all(promises);
     }
