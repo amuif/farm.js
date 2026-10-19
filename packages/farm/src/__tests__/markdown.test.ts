@@ -852,6 +852,8 @@ describe("Markdown mirrors of protected pages", () => {
     );
     expect(head?.status).toBe(302);
     expect(await head?.text()).toBe("");
-    expect(await mirror(new Response("oops", { status: 500 }))).toBeNull();
+    const failure = new Response("oops", { status: 500 });
+    expect(await mirror(failure)).toBe(failure);
+    expect(await failure.text()).toBe("oops");
   });
 });

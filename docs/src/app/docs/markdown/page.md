@@ -218,6 +218,11 @@ partial views, `HEAD`, and conditional `304` responses. A mirror that sets cooki
 `Cache-Control: private, no-store`, even when `md.cache` is enabled, so a shared cache cannot replay
 one reader's session cookies to another. Cookie-free mirrors keep their configured cache policy.
 
+If the page returns a non-HTML response, such as a JSON error or a `429` rate limit, Farm returns
+that response and its headers (including `Retry-After`) without dispatching the page again.
+`HEAD` keeps the status and headers but omits the body. Sign-in redirects and `401`/`403` responses
+continue to use the Markdown explanations with the original status.
+
 Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
 production, so they answer every request with HTML. They still send the `Link` header, and their
 `.md` URL works, so agents should follow the header or request the `.md` URL directly.
