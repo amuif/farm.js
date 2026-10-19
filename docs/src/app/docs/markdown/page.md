@@ -338,13 +338,17 @@ at its `.md` URL and to `Accept: text/markdown`, with `?outline`, `?section`, `?
 fire `agent.read` events. The mirror renders the page through the normal request path, so middleware
 and sign-in gates apply, and a page that must not be shared keeps its private `Cache-Control`.
 
+The RSC renderer currently sets a deployment cookie on HTML page renders. Its generated mirrors
+therefore use `private, no-store` too; setting `md.cache` does not enable shared caching while that
+cookie is present. This prevents caches from replaying response cookies to another reader.
+
 Set the same `md` options on the RSC config:
 
 ```ts title="vite.config.ts"
 import { defineConfig } from "@farm.js/plugin/rsc";
 
 export default defineConfig({
-  md: { expose: ["/", "/pricing", "/docs/[...slug]"], cache: 300 },
+  md: { expose: ["/", "/pricing", "/docs/[...slug]"] },
 });
 ```
 
