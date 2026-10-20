@@ -57,6 +57,7 @@ import { assertRscPackageCompatibility } from "./compatibility.js";
 import { sendRscDevelopmentResponse } from "./dev-response.js";
 import { loadRscMiddlewareConfigModule } from "./middleware-config-module.js";
 import fs from "fs/promises";
+import { readFileSync } from "node:fs";
 import path from "path";
 import { devServableFileExists } from "../dev-static.js";
 import { createDevRequestHeaders, resolveDevRequestURL } from "../dev-request.js";
@@ -82,11 +83,11 @@ const { getFarmLayerAliases, getFarmSourceRoots, resolveFarmLayers } = require_(
   "@farm.js/core/server",
 ) as typeof import("@farm.js/core/server");
 const {
-  searchParamsToObject,
   readNodeRequestBody,
   resolveFarmServerConfig,
   resolveFarmI18nConfig,
   createFarmRequestBodyErrorResponse,
+  createDefaultErrorMarkup,
 } = require_(
   "@farm.js/core/internal/production-runtime",
 ) as typeof import("@farm.js/core/internal/production-runtime");
@@ -358,6 +359,35 @@ function isOptimizedBoundaryModule(id: string): boolean {
     id === STRATA_PACKAGE ||
     id.startsWith(`${STRATA_PACKAGE}/`)
   );
+}
+
+/** The development error page for a failed RSC render: core's error page, with the real error. */
+function createRscDevErrorDocument(error: unknown, method: string, pathname: string): string {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  let farmVersion: string | undefined;
+  try {
+    // @farm.js/core does not export its package.json, so read it from disk.
+    farmVersion = (
+      JSON.parse(readFileSync(path.join(FARM_CORE_PACKAGE_ROOT, "package.json"), "utf8")) as {
+        version?: string;
+      }
+    ).version;
+  } catch {
+    // The page still renders without a version.
+  }
+  const markup = createDefaultErrorMarkup({
+    statusCode: 500,
+    requestPath: pathname,
+    method,
+    message: failure.message,
+    errorName: failure.name,
+    stack: failure.stack,
+    development: true,
+    mode: "development",
+    farmVersion,
+    nodeVersion: process.version,
+  });
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>500 · Farm.js</title></head><body>${markup}</body></html>`;
 }
 
 function resolveOptimizedBoundaryRuntimeRoot(): string {
@@ -1095,6 +1125,21 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
                 rollupOptions: { input: { index: entryClient } },
               },
               resolve: { conditions: ["browser", "import"] },
+              // Optimize what the browser entry needs up front. A dependency first
+              // found on page load makes Vite re-optimize and reload, and until the
+              // reload client components can see two React copies ("Invalid hook call").
+              optimizeDeps: {
+                include: [
+                  "react",
+                  "react/jsx-runtime",
+                  "react/jsx-dev-runtime",
+                  "react-dom",
+                  "react-dom/client",
+                  "rsc-html-stream/client",
+                  // Reached through core's tracing; nested so pnpm installs resolve it.
+                  "@farm.js/core > @opentelemetry/api",
+                ],
+              },
             },
           },
         };
@@ -1393,7 +1438,6 @@ if (document.readyState === 'loading') {
         logInfo("Dev server middleware ready");
         const serverStartTime = Date.now();
         let bannerPrinted = false;
-        const pageCache = new Map<string, any>();
 
         server.httpServer?.once("listening", () => {
           if (bannerPrinted) return;
@@ -1550,313 +1594,15 @@ if (document.readyState === 'loading') {
                   res.destroy(rscError instanceof Error ? rscError : new Error(String(rscError)));
                 return;
               }
-              // RSC pipeline failed; fall back to legacy SSR for GET only
-              if (method !== "GET" || rscError instanceof FarmDevEnvironmentError) {
-                const duration = Date.now() - startTime;
-                logResponse(method, pathname, 500, duration);
-                console.error("[Farm.js] RSC dev handler error:", rscError);
-                res.statusCode = 500;
-                res.setHeader("Content-Type", "text/html");
-                res.end(
-                  `<!DOCTYPE html><html><head><title>Error</title></head><body><pre>${(rscError as Error).message}</pre></body></html>`,
-                );
-                return;
-              }
-              // Say so: a silent fallback renders a different page and hides the error.
-              console.error(
-                `[Farm.js] RSC render failed for ${method} ${pathname}; falling back to legacy SSR:`,
-                rscError,
-              );
-            }
-
-            try {
-              if (method !== "GET") return next();
-              // Get middleware data from standalone middleware plugin
-              const middlewareData = (req as any).__FARM_MIDDLEWARE_DATA__ || {};
-
-              // Build the glob pattern for discovering routes (Farm convention: src/app when routesDir unset)
-              const srcDir = entryContext.srcDir;
-              const appSegment =
-                entryContext.routesDir === undefined ? "app" : entryContext.routesDir.trim();
-              const glob = appSegment ? `/${srcDir}/${appSegment}` : `/${srcDir}`;
-
-              // Find matching page file
-              const normalized = pathname.replace(/\/$/, "") || "/";
-
-              // Common page file patterns
-              const possiblePaths = [
-                `${glob}${normalized === "/" ? "" : normalized}/page.tsx`,
-                `${glob}${normalized === "/" ? "" : normalized}/page.jsx`,
-                `${glob}/page.tsx`,
-                `${glob}/page.jsx`,
-              ];
-
-              // Also check for dynamic routes by walking up the path
-              const parts = normalized.split("/").filter(Boolean);
-              for (let i = parts.length; i >= 0; i--) {
-                const base = parts.slice(0, i).join("/");
-                possiblePaths.push(base ? `${glob}/${base}/page.tsx` : `${glob}/page.tsx`);
-                possiblePaths.push(base ? `${glob}/${base}/page.jsx` : `${glob}/page.jsx`);
-              }
-
-              let pageModule: any = null;
-              let matchedPath = "";
-              let layoutModule: any = null;
-
-              // Try to find and load the page
-              for (const pagePath of possiblePaths) {
-                try {
-                  // Convert glob path to actual file path
-                  const actualPath = pagePath.startsWith("/") ? `.${pagePath}` : pagePath;
-
-                  if (pageCache.has(pagePath)) {
-                    pageModule = pageCache.get(pagePath);
-                    matchedPath = pagePath;
-                    break;
-                  }
-
-                  pageModule = await loadFarmDevModule(server, actualPath);
-                  if (pageModule?.default) {
-                    pageCache.set(pagePath, pageModule);
-                    matchedPath = pagePath;
-                    // Page loaded successfully
-                    break;
-                  }
-                } catch (e) {
-                  // Page not found at this path, continue
-                }
-              }
-
-              if (!pageModule?.default) {
-                return next();
-              }
-
-              try {
-                const layoutPath = `./${srcDir}${appSegment ? `/${appSegment}` : ""}/layout.tsx`;
-                layoutModule = await loadFarmDevModule(server, layoutPath);
-              } catch {}
-
-              const React = await import("react");
-              const ReactDOMServer = await import("react-dom/server");
-
-              const Page = pageModule.default;
-              const metadata = {
-                title:
-                  typeof pageModule.metadata?.title === "string"
-                    ? pageModule.metadata.title
-                    : layoutModule?.metadata?.title,
-                description:
-                  typeof pageModule.metadata?.description === "string"
-                    ? pageModule.metadata.description
-                    : layoutModule?.metadata?.description,
-              };
-              const Layout = layoutModule?.default;
-
-              // Parse URL params (basic dynamic route support)
-              const params: Record<string, string> = {};
-              const searchParams = searchParamsToObject(resolveDevRequestURL(req).searchParams);
-
-              // Render the page with middleware data
-              const pageProps = {
-                params,
-                searchParams,
-                // Middleware shared data is available to pages
-                middlewareData,
-              };
-
-              // Helper to check if a function is async or returns a Promise
-              // We need to actually call the function to detect this reliably
-              // since transpiled async functions may not be detectable by constructor
-              const isAsyncFunction = (fn: any): boolean => {
-                if (!fn) return false;
-                // Check if it's an AsyncFunction
-                if (fn.constructor?.name === "AsyncFunction") return true;
-                // Check if function.toString() contains async
-                try {
-                  const str = fn.toString();
-                  // Check for "async function" or "async (" patterns
-                  if (/^async\s/.test(str) || /^async\s*\(/.test(str)) return true;
-                } catch {}
-                return false;
-              };
-
-              // Try to render the page - if it returns a Promise, it's async
-              let pageContent;
-              let isAsyncPage = isAsyncFunction(Page);
-
-              try {
-                const result = Page(pageProps);
-                // Check if result is a Promise (thenable)
-                if (result && typeof result.then === "function") {
-                  isAsyncPage = true;
-                  pageContent = await result;
-                } else {
-                  // If it's not a Promise, it's a React element or we need to use createElement
-                  if (React.default.isValidElement(result)) {
-                    pageContent = result;
-                  } else {
-                    pageContent = React.default.createElement(Page, pageProps);
-                  }
-                }
-              } catch (e: any) {
-                // If calling directly failed, use createElement
-                pageContent = React.default.createElement(Page, pageProps);
-              }
-
-              // Check if Layout is async
-              let isAsyncLayout = isAsyncFunction(Layout);
-
-              // Wrap in layout if available
-              let content = pageContent;
-              if (Layout) {
-                try {
-                  const layoutResult = Layout({ children: pageContent });
-                  if (layoutResult && typeof layoutResult.then === "function") {
-                    isAsyncLayout = true;
-                    content = await layoutResult;
-                  } else if (React.default.isValidElement(layoutResult)) {
-                    content = layoutResult;
-                  } else {
-                    content = React.default.createElement(Layout, null, pageContent);
-                  }
-                } catch (e) {
-                  content = React.default.createElement(Layout, null, pageContent);
-                }
-              }
-
-              // Create full HTML page
-              const h = React.default.createElement;
-              const isSyncPage = !isAsyncPage && !isAsyncLayout;
-              // For sync pages we load preamble + vite client + hydrate in one script below; do not load vite-client in head so order is guaranteed.
-              const routesDir =
-                entryContext.routesDir === undefined ? "app" : entryContext.routesDir.trim();
-              const routesPath = routesDir ? `/${routesDir}` : "";
-              const headElements = [
-                h("meta", { key: "charset", charSet: "utf-8" }),
-                h("meta", {
-                  key: "viewport",
-                  name: "viewport",
-                  content: "width=device-width, initial-scale=1",
-                }),
-                metadata.title
-                  ? h("title", { key: "title" }, metadata.title)
-                  : h("title", { key: "title" }, "Farm.js"),
-                metadata.description
-                  ? h("meta", {
-                      key: "description",
-                      name: "description",
-                      content: metadata.description,
-                    })
-                  : null,
-                h("link", {
-                  key: "globals-css",
-                  rel: "stylesheet",
-                  href: `/${srcDir}${routesPath}/globals.css`,
-                }),
-                ...(isSyncPage
-                  ? []
-                  : [
-                      h("script", {
-                        key: "vite-client",
-                        type: "module",
-                        src: "/@vite/client",
-                      }),
-                    ]),
-              ].filter(Boolean);
-
-              // Create body elements
-              // For async (server) pages, we don't hydrate the page itself - only client components within
-              // For sync pages, we can hydrate the whole thing
-              const bodyElements: any[] = [h("div", { key: "root", id: "root" }, content)];
-
-              // Only add hydration script for sync pages (non-async)
-              // When server actions are enabled, set __viteRscCallServer first so form submission works.
-              if (actionsEnabled) {
-                bodyElements.push(
-                  h("script", {
-                    key: "rsc-call-server",
-                    dangerouslySetInnerHTML: {
-                      __html: `(function(){if(typeof globalThis.__viteRscCallServer!=='function'){globalThis.__viteRscCallServer=function(){return Promise.reject(new Error('Farm.js: server actions not ready'));}}})();`,
-                    },
-                  }),
-                );
-              }
-              // Set React refresh preamble synchronously first so "use client" components don't throw when they load.
-              if (!isAsyncPage && !isAsyncLayout) {
-                bodyElements.push(
-                  h("script", {
-                    key: "preamble-sync",
-                    dangerouslySetInnerHTML: {
-                      __html: `window.__vite_plugin_react_preamble_installed__=true;window.$RefreshReg$=function(){};window.$RefreshSig$=function(){return function(t){return t;}};`,
-                    },
-                  }),
-                  h("script", {
-                    key: "page-props",
-                    dangerouslySetInnerHTML: {
-                      __html: `window.__PAGE_PROPS__ = ${JSON.stringify(pageProps)};`,
-                    },
-                  }),
-                  h("script", {
-                    key: "hydrate",
-                    type: "module",
-                    dangerouslySetInnerHTML: {
-                      __html: `import("/@react-refresh").then(m=>{m.default.injectIntoGlobalHook(window);return import("/@vite/client");}).then(()=>import(${JSON.stringify(`/@rsc-hydrate${normalized}`)}));`,
-                    },
-                  }),
-                );
-              } else {
-                // For async pages, we need to hydrate client component islands
-                // Load a minimal script that finds and hydrates "use client" components
-                bodyElements.push(
-                  h("script", {
-                    key: "client-islands",
-                    type: "module",
-                    dangerouslySetInnerHTML: {
-                      __html: `
-// Hydrate client component islands
-import '/@vite/client';
-
-// Find all client components and hydrate them
-// The actual hydration is handled by @vitejs/plugin-rsc transforms
-`,
-                    },
-                  }),
-                );
-              }
-
-              const fullPage = h(
-                "html",
-                { lang: "en" },
-                h("head", null, ...headElements),
-                h("body", null, ...bodyElements),
-              );
-
-              const html = "<!DOCTYPE html>" + ReactDOMServer.renderToString(fullPage);
-
-              res.statusCode = 200;
-              res.setHeader("Content-Type", "text/html");
-              res.end(html);
-
+              // Show the failure. Rendering another page instead (the old legacy
+              // SSR fallback) served the wrong page and hid the error.
               const duration = Date.now() - startTime;
-              logResponse("GET", pathname, 200, duration);
-            } catch (error: any) {
-              const duration = Date.now() - startTime;
-              logResponse("GET", pathname, 500, duration);
-              console.error(error);
-
-              // Return error page
+              logResponse(method, pathname, 500, duration);
+              console.error(`[Farm.js] RSC render failed for ${method} ${pathname}:`, rscError);
               res.statusCode = 500;
-              res.setHeader("Content-Type", "text/html");
-              res.end(`
-                <!DOCTYPE html>
-                <html>
-                <head><title>Error</title></head>
-                <body style="font-family: system-ui; padding: 2rem; background: #1a1a2e; color: #eee;">
-                  <h1 style="color: #ff6b6b;">Error</h1>
-                  <pre style="background: #16213e; padding: 1rem; border-radius: 8px; overflow: auto;">${error.stack || error.message}</pre>
-                </body>
-                </html>
-              `);
+              res.setHeader("Content-Type", "text/html; charset=utf-8");
+              res.setHeader("Cache-Control", "no-store");
+              res.end(createRscDevErrorDocument(rscError, method, pathname));
             }
           });
         };
