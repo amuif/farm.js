@@ -267,7 +267,11 @@ function selectFarmMarkdownPart(
   const open = fences[end];
   const part = `${head}${lines.slice(start, end).join("\n").replace(/\n+$/, "")}${open ? `\n${open.closer}` : ""}`;
   const next = partUrl(`${end}.${version}`);
-  const remaining = estimateFarmMarkdownTokens(lines.slice(end).join("\n"));
+  // Count the unreturned tail without allocating a copy of it. Each boundary
+  // contributes one newline, exactly as slice(end).join("\n") did.
+  let remainingLength = lines.length - end - 1;
+  for (let index = end; index < lines.length; index++) remainingLength += lines[index]!.length;
+  const remaining = Math.ceil(remainingLength / 4);
   return {
     status: 200,
     body: `${part}\n\n---\n\nContinue: ${next} (about ${remaining} more tokens)\n`,

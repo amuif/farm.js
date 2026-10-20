@@ -279,7 +279,8 @@ curl "http://localhost:3000/pricing.md?max_tokens=2000"
   or a higher level. Ids follow GitHub's heading anchors (`## Team plans` is `team-plans`; a
   repeated heading gets `-1`, `-2`). An unknown id answers `404` with the list of valid ids.
 - `?max_tokens=<n>` returns the page, or the section with `?section`, in parts of about `n` tokens
-  (at least 100). See [Read a long page in parts](#read-a-long-page-in-parts).
+  (at least 100). Remaining-token estimates count the unread lines without copying their text.
+  See [Read a long page in parts](#read-a-long-page-in-parts).
 
 Headings inside fenced code blocks and front matter are ignored. Every Markdown response also
 carries an `ETag`, so an agent can re-check a page with `If-None-Match` and receive `304 Not

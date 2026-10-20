@@ -14,7 +14,7 @@ for (const pathname of ["/agents.md", "/blog/0.1.0.md", "/telemetry.md"]) {
   test(`evaluates Markdown preconditions in the emitted server at ${pathname}`, async ({
     request,
   }) => {
-    for (const query of ["", "?outline", "?actions"]) {
+    for (const query of ["", "?outline", "?actions", "?max_tokens=100"]) {
       const url = `${pathname}${query}`;
       const first = await request.get(url);
       expect(first.status()).toBe(200);
