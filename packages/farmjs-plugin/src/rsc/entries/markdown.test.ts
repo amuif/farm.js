@@ -62,6 +62,34 @@ function createHandler(markdownConfig = resolveMarkdownConfig(undefined)) {
 
 describe("RSC Markdown mirrors", () => {
   it.each(["GET", "HEAD"])(
+    "evaluates Markdown preconditions through the RSC %s wrapper",
+    async (method) => {
+      for (const pathname of ["/pricing.md", "/pricing"]) {
+        for (const match of ["*", '"html"']) {
+          const { run, handleFarmRequest } = createHandler();
+          const response = await run(
+            new Request(`https://farm.test${pathname}`, {
+              method,
+              headers: {
+                accept: "text/markdown",
+                "if-match": match,
+                "if-unmodified-since": "Wed, 21 Oct 2015 07:28:00 GMT",
+              },
+            }),
+          );
+          expect(response.status).toBe(match === "*" ? 200 : 412);
+          const body = await response.text();
+          if (match !== "*" || method === "HEAD") expect(body).toBe("");
+          else expect(body).toContain("# Pricing");
+          expect(handleFarmRequest).toHaveBeenCalledOnce();
+          for (const name of ["if-match", "if-unmodified-since"])
+            expect(handleFarmRequest.mock.calls[0][0].headers.has(name)).toBe(false);
+        }
+      }
+    },
+  );
+
+  it.each(["GET", "HEAD"])(
     "isolates cache validators and ranges through the RSC %s wrapper",
     async (method) => {
       for (const pathname of ["/pricing.md", "/pricing"]) {

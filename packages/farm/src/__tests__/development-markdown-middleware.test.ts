@@ -322,6 +322,8 @@ export default function Page() { return <main>must not render</main>; }`,
     async handler(ctx, next) {
       if (ctx.request.headers.accept !== "text/html") return next();
       const headers = { "content-type": "text/html", etag: '"html-v1"', "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" };
+      const match = ctx.request.headers["if-match"];
+      if ((match !== undefined && match !== "*" && match !== headers.etag) || (match === undefined && ctx.request.headers["if-unmodified-since"])) return new Response("<h1>HTML precondition failed</h1>", { status: 412, headers });
       const validator = ctx.request.headers["if-none-match"];
       if (validator === headers.etag || validator === "*" || (validator === undefined && ctx.request.headers["if-modified-since"] === headers["last-modified"])) return new Response(null, { status: 304, headers });
       if (ctx.request.headers.range) return new Response("<h1>Part", { status: 206, headers: { ...headers, "content-range": "bytes 0-7/20" } });
@@ -354,6 +356,8 @@ export default function Page() { return <main>must not render</main>; }`,
         for (const controls of [
           { "if-none-match": '"html-v1"' },
           { "if-modified-since": "Wed, 21 Oct 2015 07:28:00 GMT" },
+          { "if-unmodified-since": "Tue, 20 Oct 2015 07:28:00 GMT" },
+          { "if-match": "*" },
           { range: "bytes=0-7", "if-range": '"html-v1"' },
         ] as Record<string, string>[]) {
           const response = await fetch(`${origin}/conditional${suffix}`, {
@@ -377,6 +381,15 @@ export default function Page() { return <main>must not render</main>; }`,
           expect(cached.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
           expect(await cached.text()).toBe("");
         }
+        for (const match of ['"html-v1"', '"stale"']) {
+          const failed = await fetch(`${origin}/conditional${suffix}`, {
+            method,
+            headers: { accept: "text/markdown", "if-match": match, "if-none-match": "*" },
+          });
+          expect(failed.status).toBe(412);
+          expect(failed.headers.get("cache-control")).toBe("no-store");
+          expect(await failed.text()).toBe("");
+        }
       }
     }
     // Ordinary HTML requests still reach the app's own validator/range handling.
@@ -391,6 +404,16 @@ export default function Page() { return <main>must not render</main>; }`,
     expect(htmlRange.status).toBe(206);
     expect(htmlRange.headers.get("content-range")).toBe("bytes 0-7/20");
     expect(await htmlRange.text()).toBe("<h1>Part");
+    const htmlMatch = await fetch(`${origin}/conditional`, {
+      headers: { accept: "text/html", "if-match": '"html-v1"' },
+    });
+    expect(htmlMatch.status).toBe(200);
+    expect(await htmlMatch.text()).toBe("<h1>Whole page</h1>");
+    const htmlDate = await fetch(`${origin}/conditional`, {
+      headers: { accept: "text/html", "if-unmodified-since": "Tue, 20 Oct 2015 07:28:00 GMT" },
+    });
+    expect(htmlDate.status).toBe(412);
+    expect(await htmlDate.text()).toBe("<h1>HTML precondition failed</h1>");
   }, 30_000);
 
   it("runs app middleware before serving raw markdown page sources", async () => {

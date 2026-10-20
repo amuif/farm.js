@@ -347,7 +347,7 @@ function ifNoneMatchIncludes(header: string | null, etag: string): boolean {
 
 /**
  * Build the final Markdown response: apply `?outline` / `?section`, add an
- * ETag, and answer a matching `If-None-Match` with 304. `?actions` answers with
+ * ETag, and evaluate ETag preconditions. `?actions` answers with
  * the page's forms as JSON instead; a Markdown source has none. Errors retain
  * their full explanation and status regardless of the requested view.
  */
@@ -367,7 +367,16 @@ export function createFarmMarkdownViewResponse(options: {
       : url.searchParams.has("actions")
         ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
         : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
-  const status = view.status === 200 ? options.status : view.status;
+  let status = view.status === 200 ? options.status : view.status;
+  // Our ETags are always weak, so no entity-tag can satisfy If-Match's strong
+  // comparison. Only the existence wildcard succeeds. Page/view errors win.
+  const ifMatch = options.request.headers.get("if-match");
+  const preconditionFailed =
+    status >= 200 && status < 300 && ifMatch !== null && ifMatch.trim() !== "*";
+  if (preconditionFailed) {
+    status = 412;
+    options.headers.set("Cache-Control", "no-store");
+  }
   emitFarmAgentRead(options.request, "markdown", status, readMarkdownViewName(url.searchParams));
   for (const [name, value] of Object.entries(view.headers ?? {}))
     options.headers.append(name, value);
@@ -377,7 +386,7 @@ export function createFarmMarkdownViewResponse(options: {
   if (status === 200 && ifNoneMatchIncludes(options.request.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers: options.headers });
   }
-  return new Response(options.request.method === "HEAD" ? null : view.body, {
+  return new Response(preconditionFailed || options.request.method === "HEAD" ? null : view.body, {
     status,
     headers: options.headers,
   });

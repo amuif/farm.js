@@ -179,7 +179,9 @@ export async function createMarkdownMirrorResponse(
   const headers = new Headers(options.request.headers);
   headers.set("accept", "text/html");
   // Fetch complete HTML, not a cached/partial representation selected by the
-  // Markdown caller. The final view evaluates its own If-None-Match below.
+  // Markdown caller. The final view evaluates its own ETag preconditions below.
+  headers.delete("if-match");
+  headers.delete("if-unmodified-since");
   headers.delete("if-none-match");
   headers.delete("if-modified-since");
   headers.delete("range");

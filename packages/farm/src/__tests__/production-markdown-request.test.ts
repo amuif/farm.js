@@ -48,6 +48,34 @@ describe("production Markdown request ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it.each(["GET", "HEAD"])(
+    "evaluates Markdown preconditions through the production %s caller",
+    async (method) => {
+      for (const suffix of [".md", ""]) {
+        for (const match of ["*", '"html"']) {
+          const r = runtime();
+          const response = await r.run(
+            new Request(`https://farm.test/page${suffix}`, {
+              method,
+              headers: {
+                accept: "text/markdown",
+                "if-match": match,
+                "if-unmodified-since": "Wed, 21 Oct 2015 07:28:00 GMT",
+              },
+            }),
+          );
+          expect(response?.status).toBe(match === "*" ? 200 : 412);
+          expect(await response?.text()).toBe(
+            match !== "*" || method === "HEAD" ? "" : "Source: /page\n\n# Farm 🌱\n",
+          );
+          expect(r.renderPage).toHaveBeenCalledOnce();
+          for (const name of ["if-match", "if-unmodified-since"])
+            expect(r.renderPage.mock.calls[0][0].headers.has(name)).toBe(false);
+        }
+      }
+    },
+  );
+
+  it.each(["GET", "HEAD"])(
     "isolates cache validators and ranges through the production %s caller",
     async (method) => {
       for (const suffix of [".md", ""]) {
