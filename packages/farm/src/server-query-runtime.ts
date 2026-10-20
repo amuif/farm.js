@@ -1,6 +1,6 @@
 "use client";
 
-import { createFarmCacheKey } from "./cache";
+import { createFarmCacheKey } from "./cache-key";
 import { getFarmClientDataCache, trackFarmClientCacheInvalidations } from "./client-cache";
 import type { ServerQuery } from "./server-query";
 import { isFarmServerQueryResult, type FarmServerQueryResult } from "./server-query-protocol";

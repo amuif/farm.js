@@ -8,3 +8,4 @@ export { getHashTargetElement } from "./hash-target";
 export { reconcileFarmDocumentHead } from "./document-head";
 export { isFarmExternalNavigationURL } from "./navigation-url";
 export { createClientCancellation } from "../client-cancellation";
+export { applyFarmCacheInvalidations } from "../cache-invalidation";
