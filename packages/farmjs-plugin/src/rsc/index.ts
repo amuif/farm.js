@@ -57,7 +57,6 @@ import { assertRscPackageCompatibility } from "./compatibility.js";
 import { sendRscDevelopmentResponse } from "./dev-response.js";
 import { loadRscMiddlewareConfigModule } from "./middleware-config-module.js";
 import fs from "fs/promises";
-import { readFileSync } from "node:fs";
 import path from "path";
 import { devServableFileExists } from "../dev-static.js";
 import { createDevRequestHeaders, resolveDevRequestURL } from "../dev-request.js";
@@ -66,6 +65,9 @@ import { createRequire } from "node:module";
 // Use API and middleware plugins from @farm.js/core (require so CJS build resolves when ESM .mjs is missing)
 const require_ = createRequire(import.meta.url);
 const { farmApiPlugin } = require_("@farm.js/core") as typeof import("@farm.js/core");
+const { FARM_VERSION } = require_(
+  "@farm.js/core/version",
+) as typeof import("@farm.js/core/version");
 const { farmMiddlewarePlugin } = require_(
   "@farm.js/core/middleware",
 ) as typeof import("@farm.js/core/middleware");
@@ -194,12 +196,6 @@ export function defineConfig(config: FarmRscConfig = {}): UserConfig {
 
     // Custom logger to hide Vite's default startup banner
     customLogger: createFarmLogger(port, debug),
-
-    // Configure esbuild for JSX transformation
-    esbuild: {
-      jsx: "automatic",
-      jsxImportSource: "react",
-    },
 
     plugins: [
       farmMiddlewarePlugin({
@@ -364,17 +360,6 @@ function isOptimizedBoundaryModule(id: string): boolean {
 /** The development error page for a failed RSC render: core's error page, with the real error. */
 function createRscDevErrorDocument(error: unknown, method: string, pathname: string): string {
   const failure = error instanceof Error ? error : new Error(String(error));
-  let farmVersion: string | undefined;
-  try {
-    // @farm.js/core does not export its package.json, so read it from disk.
-    farmVersion = (
-      JSON.parse(readFileSync(path.join(FARM_CORE_PACKAGE_ROOT, "package.json"), "utf8")) as {
-        version?: string;
-      }
-    ).version;
-  } catch {
-    // The page still renders without a version.
-  }
   const markup = createDefaultErrorMarkup({
     statusCode: 500,
     requestPath: pathname,
@@ -384,7 +369,7 @@ function createRscDevErrorDocument(error: unknown, method: string, pathname: str
     stack: failure.stack,
     development: true,
     mode: "development",
-    farmVersion,
+    farmVersion: FARM_VERSION,
     nodeVersion: process.version,
   });
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>500 · Farm.js</title></head><body>${markup}</body></html>`;
@@ -1082,10 +1067,11 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
                 : []),
             ],
           },
-          esbuild: {
-            jsx: "automatic",
-            jsxImportSource: "react",
-          },
+          // Vite 8 compiles with oxc, which already uses the automatic runtime;
+          // setting esbuild there only prints a "both options were set" warning.
+          ...(this?.meta?.rolldownVersion
+            ? {}
+            : { esbuild: { jsx: "automatic" as const, jsxImportSource: "react" } }),
           ...(c.layers?.length
             ? {
                 server: {
@@ -1447,7 +1433,7 @@ if (document.readyState === 'loading') {
 
           console.log("");
           console.log(
-            `  ${colors.bold(colors.green("Farm.js"))} ${colors.dim("v1.0.0")} ${colors.dim(`ready in ${elapsed}ms`)}`,
+            `  ${colors.bold(colors.green("Farm.js"))} ${colors.dim(`v${FARM_VERSION}`)} ${colors.dim(`ready in ${elapsed}ms`)}`,
           );
           console.log("");
           console.log(
