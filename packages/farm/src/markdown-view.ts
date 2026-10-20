@@ -348,7 +348,8 @@ function ifNoneMatchIncludes(header: string | null, etag: string): boolean {
 /**
  * Build the final Markdown response: apply `?outline` / `?section`, add an
  * ETag, and answer a matching `If-None-Match` with 304. `?actions` answers with
- * the page's forms as JSON instead; a Markdown source has none.
+ * the page's forms as JSON instead; a Markdown source has none. Errors retain
+ * their full explanation and status regardless of the requested view.
  */
 export function createFarmMarkdownViewResponse(options: {
   request: Request;
@@ -360,9 +361,12 @@ export function createFarmMarkdownViewResponse(options: {
   actions?: readonly FarmPageFormAction[];
 }): Response {
   const url = options.requestUrl ?? new URL(options.request.url);
-  const view = url.searchParams.has("actions")
-    ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
-    : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
+  const view: FarmMarkdownView =
+    options.status >= 400
+      ? { status: options.status, body: options.markdown }
+      : url.searchParams.has("actions")
+        ? selectFarmPageActionsView(options.markdownPath, options.actions ?? [], options.headers)
+        : selectFarmMarkdownView(options.markdown, url.searchParams, options.markdownPath);
   const status = view.status === 200 ? options.status : view.status;
   emitFarmAgentRead(options.request, "markdown", status, readMarkdownViewName(url.searchParams));
   for (const [name, value] of Object.entries(view.headers ?? {}))

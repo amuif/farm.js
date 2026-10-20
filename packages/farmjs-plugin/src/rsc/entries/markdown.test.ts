@@ -61,6 +61,41 @@ function createHandler(markdownConfig = resolveMarkdownConfig(undefined)) {
 }
 
 describe("RSC Markdown mirrors", () => {
+  it.each(["GET", "HEAD"])(
+    "preserves HTML authentication errors through the RSC %s wrapper",
+    async (method) => {
+      for (const pathname of ["/pricing.md", "/pricing"]) {
+        const { run, handleFarmRequest } = createHandler();
+        handleFarmRequest.mockResolvedValue(
+          new Response("<h1>Sign in</h1><p>Access requires authentication.</p>", {
+            status: 401,
+            headers: {
+              "content-type": "text/html",
+              "www-authenticate": 'Bearer realm="farm"',
+              "retry-after": "60",
+            },
+          }),
+        );
+        const response = await run(
+          new Request(`https://farm.test${pathname}?actions`, {
+            method,
+            headers: { accept: "text/markdown" },
+          }),
+        );
+        expect(response.status).toBe(401);
+        expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+        expect(response.headers.get("www-authenticate")).toBe('Bearer realm="farm"');
+        expect(response.headers.get("retry-after")).toBe("60");
+        expect(await response.text()).toBe(
+          method === "HEAD"
+            ? ""
+            : "Source: /pricing\n\n# Sign in\n\nAccess requires authentication.\n",
+        );
+        expect(handleFarmRequest).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each([204, 205, 304])(
     "retains bodyless HTML %s responses without conversion or retry",
     async (status) => {

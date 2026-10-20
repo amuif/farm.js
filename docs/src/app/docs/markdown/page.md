@@ -227,6 +227,14 @@ headers but omits the body. Sign-in redirects and non-HTML `401`/`403` responses
 the Markdown explanations with the original status. Unused bodies from these explanations and
 terminal `HEAD` responses are cancelled without delaying the response.
 
+HTML `4xx` and `5xx` responses keep their original status and full converted error message.
+Partial-view parameters (`outline`, `section`, `max_tokens`, `cursor`, and `actions`) do not
+filter or replace errors, and a matching `If-None-Match` does not turn an error into `304`.
+Converted errors preserve `WWW-Authenticate`, `Proxy-Authenticate`, `Retry-After`, and `Allow`
+when present. Generated sign-in and redirect explanations also preserve these headers,
+including retry guidance. HTML-specific content lengths, encodings, and ETags are not copied
+onto the converted body. Successful-page views keep their normal selection and validation behavior.
+
 The internal page request carries the caller's abort signal. In development, disconnecting the
 Markdown client also cancels the internal HTTP page fetch, including while its body is being read.
 Rendering and server-side fetches that observe their request's signal can stop cooperatively;

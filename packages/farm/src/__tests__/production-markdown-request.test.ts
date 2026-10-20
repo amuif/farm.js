@@ -47,6 +47,33 @@ function runtime(config = resolveMarkdownConfig(undefined)) {
 describe("production Markdown request ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it.each(["GET", "HEAD"])(
+    "preserves HTML errors through the production %s caller",
+    async (method) => {
+      for (const suffix of [".md", ""]) {
+        const r = runtime();
+        r.renderPage.mockReturnValue(
+          new Response("<h1>Unavailable</h1><p>Try later.</p>", {
+            status: 503,
+            headers: { "content-type": "text/html", "retry-after": "60" },
+          }),
+        );
+        const response = await r.run(
+          new Request(`https://farm.test/page${suffix}?section=missing`, {
+            method,
+            headers: { accept: "text/markdown" },
+          }),
+        );
+        expect(response?.status).toBe(503);
+        expect(response?.headers.get("retry-after")).toBe("60");
+        expect(await response?.text()).toBe(
+          method === "HEAD" ? "" : "Source: /page\n\n# Unavailable\n\nTry later.\n",
+        );
+        expect(r.renderPage).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each([204, 205, 304, 429])(
     "returns terminal %s without falling through to route dispatch",
     async (status) => {

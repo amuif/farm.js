@@ -221,6 +221,86 @@ export default function Page() { return <main>must not render</main>; }`,
     }
   }, 30_000);
 
+  it("preserves HTML errors through the real Markdown fetch path", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-error-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "farm.config.ts",
+      `export default {
+  middleware: [401, 429, 503].map(status => ({
+    matcher: "/error/" + status,
+    async handler(ctx, next) {
+      // Fail the internal HTML render, not the outer negotiated request:
+      // an outer middleware short-circuit intentionally bypasses conversion.
+      if (ctx.request.headers.accept !== "text/html") return next();
+      return new Response("<h1>Request failed</h1><p>Try later.</p>", {
+        status,
+        headers: {
+          "content-type": "text/html",
+          "retry-after": "60",
+          "www-authenticate": 'Bearer realm="farm"',
+          "cache-control": "no-store",
+        },
+      });
+    },
+  })),
+};`,
+    );
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/error/[status]/page.tsx",
+      `import React from "react";
+export default function Page() { return <main>must not render</main>; }`,
+    );
+
+    const server = await createServer({ root, images: { provider: "none" } });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    for (const status of [401, 429, 503]) {
+      for (const method of ["GET", "HEAD"]) {
+        for (const suffix of [".md", ""]) {
+          for (const query of ["?section=missing", "?max_tokens=invalid", "?actions"]) {
+            const response = await fetch(
+              `http://localhost:${address.port}/error/${status}${suffix}${query}`,
+              {
+                method,
+                headers: { accept: "text/markdown" },
+              },
+            );
+            expect(response.status).toBe(status);
+            expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+            expect(response.headers.get("www-authenticate")).toBe('Bearer realm="farm"');
+            expect(response.headers.get("retry-after")).toBe("60");
+            expect(response.headers.get("cache-control")).toBe("no-store");
+            expect(await response.text()).toBe(
+              method === "HEAD"
+                ? ""
+                : `Source: /error/${status}\n\n# Request failed\n\nTry later.\n`,
+            );
+          }
+        }
+      }
+    }
+  }, 30_000);
+
   it("runs app middleware before serving raw markdown page sources", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-middleware-"));
     temporaryRoots.add(root);

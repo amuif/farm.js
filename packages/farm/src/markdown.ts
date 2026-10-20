@@ -227,7 +227,8 @@ export async function createMarkdownMirrorResponse(
 
   const html = await pageResponse.text();
   const markdownPath = target.pathname === "/" ? "/index.md" : `${target.pathname}.md`;
-  const actions = extractFarmPageActions(html, pageUrl);
+  // Error responses are read in full, not as action/partial views.
+  const actions = pageResponse.status >= 400 ? [] : extractFarmPageActions(html, pageUrl);
   for (const form of actions) {
     // Only a same-origin target can be an endpoint of this app.
     if (!form.action?.startsWith("/")) continue;
@@ -267,6 +268,9 @@ export async function createMarkdownMirrorResponse(
       : createMarkdownCacheHeader(cache),
   );
   preserveMarkdownResponseCookies(pageResponse.headers, headersOut);
+  if (pageResponse.status >= 400) {
+    preserveMarkdownResponseControlHeaders(pageResponse.headers, headersOut);
+  }
 
   // The mirror is the same document in another format, so it keeps the page's
   // indexing rules and points search engines at the page as the canonical copy.
@@ -310,6 +314,7 @@ function createMarkdownAccessResponse(
     "X-Farm-Markdown-Route": pathname,
   });
   preserveMarkdownResponseCookies(pageResponse.headers, headers);
+  preserveMarkdownResponseControlHeaders(pageResponse.headers, headers);
   let body: string;
   if (redirect) {
     let target: string;
@@ -323,14 +328,20 @@ function createMarkdownAccessResponse(
       `# Redirected\n\n\`${pathname}\` redirects to [${target}](${target}). ` +
       "The page may require signing in.\n";
   } else {
-    const authenticate = pageResponse.headers.get("www-authenticate");
-    if (authenticate) headers.set("WWW-Authenticate", authenticate);
     body =
       pageResponse.status === 401
         ? `# Sign-in required\n\n\`${pathname}\` requires signing in.\n`
         : `# Access denied\n\nThis account cannot read \`${pathname}\`.\n`;
   }
   return new Response(head ? null : body, { status: pageResponse.status, headers });
+}
+
+function preserveMarkdownResponseControlHeaders(source: Headers, target: Headers): void {
+  // These describe how to recover from the response, not the HTML representation.
+  for (const name of ["WWW-Authenticate", "Proxy-Authenticate", "Retry-After", "Allow"]) {
+    const value = source.get(name);
+    if (value !== null) target.set(name, value);
+  }
 }
 
 function preserveMarkdownResponseCookies(source: Headers, target: Headers): void {
