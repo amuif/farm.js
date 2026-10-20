@@ -1136,8 +1136,6 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
                   "react-dom",
                   "react-dom/client",
                   "rsc-html-stream/client",
-                  // Reached through core's tracing; nested so pnpm installs resolve it.
-                  "@farm.js/core > @opentelemetry/api",
                 ],
               },
             },
