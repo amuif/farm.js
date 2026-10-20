@@ -235,6 +235,14 @@ when present. Generated sign-in and redirect explanations also preserve these he
 including retry guidance. HTML-specific content lengths, encodings, and ETags are not copied
 onto the converted body. Successful-page views keep their normal selection and validation behavior.
 
+The internal HTML request omits `If-None-Match`, `If-Modified-Since`, `Range`, and `If-Range`.
+An HTML cache hit or byte fragment cannot be used to construct the Markdown representation.
+Farm evaluates `If-None-Match` against the selected Markdown view's own ETag after conversion;
+HTML ETags do not validate the mirror. Generated mirrors have no `Last-Modified` date and ignore
+`If-Modified-Since`. Byte ranges are not supported: a range request receives the complete selected
+view (or `304` for a matching Markdown ETag), not a slice of HTML. This does not change ordinary
+HTML requests or the page's application-level middleware checks.
+
 The internal page request carries the caller's abort signal. In development, disconnecting the
 Markdown client also cancels the internal HTTP page fetch, including while its body is being read.
 Rendering and server-side fetches that observe their request's signal can stop cooperatively;

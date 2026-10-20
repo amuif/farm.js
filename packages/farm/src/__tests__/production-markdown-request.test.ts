@@ -48,6 +48,42 @@ describe("production Markdown request ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it.each(["GET", "HEAD"])(
+    "isolates cache validators and ranges through the production %s caller",
+    async (method) => {
+      for (const suffix of [".md", ""]) {
+        const r = runtime();
+        r.renderPage.mockImplementation((request) =>
+          request.headers.has("if-none-match") || request.headers.has("if-modified-since")
+            ? new Response(null, {
+                status: 304,
+                headers: { "content-type": "text/html", etag: '"html"' },
+              })
+            : new Response("<h1>Whole page</h1>", { headers: { "content-type": "text/html" } }),
+        );
+        const response = await r.run(
+          new Request(`https://farm.test/page${suffix}`, {
+            method,
+            headers: {
+              accept: "text/markdown",
+              "if-none-match": '"html"',
+              "if-modified-since": "Wed, 21 Oct 2015 07:28:00 GMT",
+              range: "bytes=0-7",
+              "if-range": '"html"',
+            },
+          }),
+        );
+        expect(response?.status).toBe(200);
+        expect(await response?.text()).toBe(
+          method === "HEAD" ? "" : "Source: /page\n\n# Whole page\n",
+        );
+        expect(r.renderPage).toHaveBeenCalledOnce();
+        for (const name of ["if-none-match", "if-modified-since", "range", "if-range"])
+          expect(r.renderPage.mock.calls[0][0].headers.has(name)).toBe(false);
+      }
+    },
+  );
+
+  it.each(["GET", "HEAD"])(
     "preserves HTML errors through the production %s caller",
     async (method) => {
       for (const suffix of [".md", ""]) {

@@ -62,6 +62,42 @@ function createHandler(markdownConfig = resolveMarkdownConfig(undefined)) {
 
 describe("RSC Markdown mirrors", () => {
   it.each(["GET", "HEAD"])(
+    "isolates cache validators and ranges through the RSC %s wrapper",
+    async (method) => {
+      for (const pathname of ["/pricing.md", "/pricing"]) {
+        const { run, handleFarmRequest } = createHandler();
+        handleFarmRequest.mockImplementation(async (request) =>
+          request.headers.has("range")
+            ? new Response("<h1>Part", {
+                status: 206,
+                headers: { "content-type": "text/html", "content-range": "bytes 0-7/20" },
+              })
+            : new Response("<h1>Whole page</h1>", { headers: { "content-type": "text/html" } }),
+        );
+        const response = await run(
+          new Request(`https://farm.test${pathname}`, {
+            method,
+            headers: {
+              accept: "text/markdown",
+              range: "bytes=0-7",
+              "if-range": '"html"',
+              "if-none-match": '"html"',
+              "if-modified-since": "Wed, 21 Oct 2015 07:28:00 GMT",
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(
+          method === "HEAD" ? "" : "Source: /pricing\n\n# Whole page\n",
+        );
+        expect(handleFarmRequest).toHaveBeenCalledOnce();
+        for (const name of ["if-none-match", "if-modified-since", "range", "if-range"])
+          expect(handleFarmRequest.mock.calls[0][0].headers.has(name)).toBe(false);
+      }
+    },
+  );
+
+  it.each(["GET", "HEAD"])(
     "preserves HTML authentication errors through the RSC %s wrapper",
     async (method) => {
       for (const pathname of ["/pricing.md", "/pricing"]) {

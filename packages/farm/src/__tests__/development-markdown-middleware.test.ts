@@ -301,6 +301,98 @@ export default function Page() { return <main>must not render</main>; }`,
     }
   }, 30_000);
 
+  it("isolates Markdown validators and ranges through the real internal HTML fetch", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-validators-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "farm.config.ts",
+      `export default {
+  middleware: [{
+    matcher: "/conditional",
+    async handler(ctx, next) {
+      if (ctx.request.headers.accept !== "text/html") return next();
+      const headers = { "content-type": "text/html", etag: '"html-v1"', "last-modified": "Wed, 21 Oct 2015 07:28:00 GMT" };
+      const validator = ctx.request.headers["if-none-match"];
+      if (validator === headers.etag || validator === "*" || (validator === undefined && ctx.request.headers["if-modified-since"] === headers["last-modified"])) return new Response(null, { status: 304, headers });
+      if (ctx.request.headers.range) return new Response("<h1>Part", { status: 206, headers: { ...headers, "content-range": "bytes 0-7/20" } });
+      return new Response("<h1>Whole page</h1>", { headers });
+    },
+  }],
+};`,
+    );
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/conditional/page.tsx",
+      `import React from "react";
+export default function Page() { return <main>must not render</main>; }`,
+    );
+    const server = await createServer({ root, images: { provider: "none" } });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    const origin = `http://localhost:${address.port}`;
+
+    for (const method of ["GET", "HEAD"]) {
+      for (const suffix of [".md", ""]) {
+        for (const controls of [
+          { "if-none-match": '"html-v1"' },
+          { "if-modified-since": "Wed, 21 Oct 2015 07:28:00 GMT" },
+          { range: "bytes=0-7", "if-range": '"html-v1"' },
+        ] as Record<string, string>[]) {
+          const response = await fetch(`${origin}/conditional${suffix}`, {
+            method,
+            headers: { accept: "text/markdown", ...controls },
+          });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+          expect(response.headers.has("content-range")).toBe(false);
+          const etag = response.headers.get("etag")!;
+          expect(etag).not.toBe('"html-v1"');
+          expect(await response.text()).toBe(
+            method === "HEAD" ? "" : "Source: /conditional\n\n# Whole page\n",
+          );
+          const cached = await fetch(`${origin}/conditional${suffix}`, {
+            method,
+            headers: { accept: "text/markdown", ...controls, "if-none-match": etag },
+          });
+          expect(cached.status).toBe(304);
+          expect(cached.headers.get("etag")).toBe(etag);
+          expect(cached.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+          expect(await cached.text()).toBe("");
+        }
+      }
+    }
+    // Ordinary HTML requests still reach the app's own validator/range handling.
+    const htmlCached = await fetch(`${origin}/conditional`, {
+      headers: { accept: "text/html", "if-none-match": '"html-v1"' },
+    });
+    expect(htmlCached.status).toBe(304);
+    expect(htmlCached.headers.get("etag")).toBe('"html-v1"');
+    const htmlRange = await fetch(`${origin}/conditional`, {
+      headers: { accept: "text/html", range: "bytes=0-7" },
+    });
+    expect(htmlRange.status).toBe(206);
+    expect(htmlRange.headers.get("content-range")).toBe("bytes 0-7/20");
+    expect(await htmlRange.text()).toBe("<h1>Part");
+  }, 30_000);
+
   it("runs app middleware before serving raw markdown page sources", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-middleware-"));
     temporaryRoots.add(root);

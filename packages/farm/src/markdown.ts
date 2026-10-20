@@ -178,6 +178,12 @@ export async function createMarkdownMirrorResponse(
   for (const name of FARM_MARKDOWN_VIEW_PARAMS) pageUrl.searchParams.delete(name);
   const headers = new Headers(options.request.headers);
   headers.set("accept", "text/html");
+  // Fetch complete HTML, not a cached/partial representation selected by the
+  // Markdown caller. The final view evaluates its own If-None-Match below.
+  headers.delete("if-none-match");
+  headers.delete("if-modified-since");
+  headers.delete("range");
+  headers.delete("if-range");
 
   const pageResponse = await options.renderPage(
     new Request(pageUrl, {
