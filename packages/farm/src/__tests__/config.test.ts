@@ -14,6 +14,7 @@ import {
   resolveDocsConfig,
   resolveMigrationsConfig,
 } from "../config";
+import { resolveFarmAgentConfig } from "../agent-config";
 import { getResolvedEnv, setEnv } from "../env";
 import { routeRulesToNitroRouteRules } from "../route-rules";
 
@@ -409,15 +410,23 @@ describe("resolveConfig", () => {
     ).rejects.toThrow("agent.apiCatalog must be a boolean.");
   });
 
-  it("resolves the agent config with JSON-LD and llms.txt off by default", async () => {
+  it("describes the site to agents by default: a WebSite in JSON-LD and an llms.txt", async () => {
     const defaults = await resolveConfig({}, "production");
-    expect(defaults.agent.jsonLd).toBe(false);
+    expect(defaults.agent.jsonLd).toEqual({ type: "WebSite" });
+    // llms-full.txt renders every listed page per request, so it stays opt-in.
     expect(defaults.agent.llmsTxt).toEqual({
-      enabled: false,
+      enabled: true,
       include: [],
       exclude: [],
       full: false,
     });
+    // The docs engine serves its own llms.txt, which a default would replace.
+    expect(resolveFarmAgentConfig(undefined, { docs: true }).llmsTxt.enabled).toBe(false);
+    expect(resolveFarmAgentConfig({ llmsTxt: true }, { docs: true }).llmsTxt.enabled).toBe(true);
+
+    const off = await resolveConfig({ agent: { jsonLd: false, llmsTxt: false } }, "production");
+    expect(off.agent.jsonLd).toBe(false);
+    expect(off.agent.llmsTxt.enabled).toBe(false);
 
     const llms = await resolveConfig(
       { agent: { llmsTxt: { title: "Acme", exclude: ["/admin/[...path]"] } } },

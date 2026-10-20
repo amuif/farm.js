@@ -286,7 +286,7 @@ mount, and shortcut together.
 | integrations  | Registering built-in or custom integrations.                                           |
 | auth          | Enabling Farm's built-in email/password auth, sessions, helpers, and hooks.            |
 | mcp           | Composing API routes and standalone tools in one authenticated MCP server.             |
-| agent         | Opt-in agent readiness: llms.txt, JSON-LD, AI crawler rules, and an API catalog.       |
+| agent         | Agent readiness: llms.txt and JSON-LD by default, crawler rules, and an API catalog.   |
 | theme         | Enabling light, dark, and system modes with client and server APIs.                    |
 | storage       | Configuring KV drivers/mounts and, in the current beta, an integration DB client.      |
 | migrations    | Running one-shot schema/provider commands with `farm migrate`.                         |
@@ -440,9 +440,20 @@ mixed declarations, the resolved catalog, and permission checks.
 
 ## Agent readiness
 
-`agent` holds opt-in features that help AI agents and crawlers understand a public site, and decide
-which of them may use it. All of them are off by default, so internal tools and private dashboards
-are unaffected.
+`agent` holds features that help AI agents and crawlers understand a public site, and decide which
+of them may use it. The two that only describe what agents can already read are on by default:
+`jsonLd` (a schema.org `WebSite` built from your metadata) and `llmsTxt` (an index of your static
+pages, when the [docs engine](/docs/docs-engine) isn't serving its own). The rest, which expose more
+or change who may crawl, are opt-in. Turn a default off with `false`, for example on an internal tool:
+
+```ts title="farm.config.ts"
+export default defineConfig({
+  agent: { jsonLd: false, llmsTxt: false },
+});
+```
+
+Pages without Open Graph metadata also get `og:title` and `og:description` from their own title and
+description, so social cards and agents citing a page have something to show.
 
 ```ts title="farm.config.ts"
 import { defineConfig } from "@farm.js/core";
@@ -466,6 +477,8 @@ export default defineConfig({
 on a preview deployment; [Preview deployments](/docs/deployment#preview-deployments) covers how
 Farm detects one.
 
+Left unset, `llmsTxt` serves `/llms.txt` without `/llms-full.txt` (which renders every page); with
+the docs engine enabled it stays off, since the docs engine answers `/llms.txt` itself.
 `llmsTxt: true` serves [`/llms.txt`](https://llmstxt.org): a Markdown index of every static page,
 with each page's metadata title and description, linking to its [Markdown mirror](/docs/markdown)
 when one is exposed. An options object sets the `title` and `summary` (the root layout's metadata by
@@ -491,9 +504,10 @@ structured format, and receives the generated pages and defaults to build on. Wh
 [docs engine](/docs/docs-engine) is enabled too, the app's own files take `/llms.txt` and
 `/llms-full.txt`.
 
-`jsonLd: true` adds a schema.org `Organization` to page heads, built from the site's metadata: the
-site name or title, `metadataBase`, and description. A page with none of those gets no JSON-LD. An
-object sets the `type` (emitted as `@type`) and fields such as `name`, `url`, `logo`, and `sameAs`.
+`jsonLd` adds a schema.org entity to page heads, built from the site's metadata: the site name or
+title, `metadataBase`, and description. A page with none of those gets no JSON-LD. Left unset, the
+entity is a `WebSite`; `true` makes it an `Organization`, and an object sets the `type` (emitted as
+`@type`) and fields such as `name`, `url`, `logo`, and `sameAs`.
 
 Pages and layouts add their own structured data with `metadata.jsonLd`, an object or an array of
 objects. It works without `agent.jsonLd`; when both are set, the site script comes first.

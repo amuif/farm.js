@@ -1,8 +1,8 @@
 /**
- * Agent-readiness configuration: opt-in primitives that make a Farm site easier
- * for AI agents and crawlers to discover, resolve, and use. Off by default so
- * sites that do not want agent exposure (internal tools, private dashboards) are
- * unaffected.
+ * Agent-readiness configuration: primitives that make a Farm site easier for AI agents and
+ * crawlers to discover, resolve, and use. The ones that only describe the site agents can
+ * already read (JSON-LD, llms.txt) are on by default; the ones that expose more
+ * (crawler rules, an API catalog) are opt-in. Each one turns off with `false`.
  */
 import {
   resolveFarmAgentCrawlers,
@@ -42,10 +42,11 @@ export interface FarmAgentJsonLd {
 export interface FarmAgentUserConfig {
   /**
    * Emit schema.org JSON-LD in the document head so agents and crawlers can
-   * resolve the site's identity. `true` emits an `Organization` built from the
-   * site's metadata; an object customizes the type and fields.
+   * resolve the site's identity. Left unset, it emits a `WebSite` built from the
+   * site's metadata; `true` emits an `Organization`; an object customizes the type
+   * and fields; `false` turns it off.
    *
-   * @default false
+   * @default { type: "WebSite" }
    */
   jsonLd?: boolean | FarmAgentJsonLd;
   /**
@@ -59,11 +60,13 @@ export interface FarmAgentUserConfig {
   noindexPreviews?: boolean;
   /**
    * Serve `/llms.txt` (https://llmstxt.org): a Markdown index of the app's static
-   * pages, linking to their Markdown mirrors. `true` builds it from page metadata;
-   * an object sets the title, summary, details, and which routes to list. A
-   * `src/app/llms.ts` metadata route replaces the generated file.
+   * pages, linking to their Markdown mirrors. `true` builds it from page metadata
+   * and also serves `/llms-full.txt`; an object sets the title, summary, details,
+   * and which routes to list. A `src/app/llms.ts` metadata route or a
+   * `public/llms.txt` replaces the generated file. Left unset, `/llms.txt` is served
+   * (without `/llms-full.txt`) unless the docs engine is enabled, which serves its own.
    *
-   * @default false
+   * @default { full: false } without docs, false with docs
    */
   llmsTxt?: boolean | FarmLlmsTxtUserConfig;
   /**
@@ -94,14 +97,27 @@ export interface ResolvedFarmAgentConfig {
   apiCatalog: boolean;
 }
 
+/** What an app gets without an `agent` block: the site described, nothing more exposed. */
+const DEFAULT_JSON_LD: FarmAgentJsonLd = { type: "WebSite" };
+
 export function resolveFarmAgentConfig(
   input: FarmAgentUserConfig | undefined,
+  context: { docs?: boolean } = {},
 ): ResolvedFarmAgentConfig {
   const jsonLd = input?.jsonLd;
   return {
-    jsonLd: !jsonLd ? false : jsonLd === true ? {} : jsonLd,
+    jsonLd:
+      jsonLd === undefined
+        ? { ...DEFAULT_JSON_LD }
+        : !jsonLd
+          ? false
+          : jsonLd === true
+            ? {}
+            : jsonLd,
     noindexPreviews: resolveFarmNoindexPreviews(input?.noindexPreviews),
-    llmsTxt: resolveFarmLlmsTxtConfig(input?.llmsTxt),
+    // The docs engine answers /llms.txt with its own pages; a default here would replace it.
+    // llms-full.txt renders every listed page, so it stays opt-in.
+    llmsTxt: resolveFarmLlmsTxtConfig(input?.llmsTxt ?? (context.docs ? false : { full: false })),
     crawlers: resolveFarmAgentCrawlers(input?.crawlers),
     apiCatalog: resolveFarmApiCatalogEnabled(input?.apiCatalog),
   };

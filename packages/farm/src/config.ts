@@ -1130,7 +1130,7 @@ export async function resolveConfig(
       ppr: false,
       ...userConfig.experimental,
     },
-    agent: resolveFarmAgentConfig(userConfig.agent),
+    agent: resolveFarmAgentConfig(userConfig.agent, { docs: docs.enabled }),
     plugins: [
       ...resolveIntegrationPlugins(integrations),
       ...(nativeMCPPlugin ? [nativeMCPPlugin] : []),

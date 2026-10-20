@@ -175,9 +175,10 @@ export default function AgentCheckPage() {
               </div>
               <div className="agents-open-copy">
                 <p>
-                  Farm.js apps pass the readable and Markdown checks by default, and one agent block
-                  in farm.config.ts adds llms.txt and JSON-LD. The agent infrastructure we're
-                  building goes further: one gateway for your tools, and a trace of every agent run.
+                  A new Farm.js app passes the reach and read checks out of the box: Markdown,
+                  llms.txt, JSON-LD and Open Graph come from its pages and metadata, and MCP and
+                  OpenAPI are a config block away. The agent infrastructure we're building goes
+                  further: one gateway for your tools, and a trace of every agent run.
                 </p>
                 <div className="agents-links">
                   <a href="/agents">

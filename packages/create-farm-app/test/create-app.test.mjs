@@ -1477,3 +1477,56 @@ test("generated starters declare the optional core peers their features use", as
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("basic starters ship what agents read: server-rendered copy and an Open Graph image", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "create-farm-app-agent-ready-"));
+  const image = await readFile(
+    path.join(packageDir, "templates/basic/src/app/opengraph-image.png"),
+  );
+  const pages = {
+    react: "src/app/page.tsx",
+    preact: "src/app/page.tsx",
+    solid: "src/app/page.tsx",
+    vue: "src/app/page.vue",
+    svelte: "src/app/page.svelte",
+  };
+
+  try {
+    for (const [renderer, page] of Object.entries(pages)) {
+      const projectName = `agent-ready-${renderer}-app`;
+      execFileSync(
+        process.execPath,
+        [
+          path.join(packageDir, "bin/create-farm-app.js"),
+          projectName,
+          "--template",
+          "basic",
+          ...(renderer === "react" ? [] : ["--renderer", renderer]),
+          "--typescript",
+          "--skip-install",
+        ],
+        { cwd: tempDir, stdio: "pipe" },
+      );
+      const generatedDir = path.join(tempDir, projectName);
+      // Copied byte for byte: og:image for the whole app through the file convention.
+      assert.deepEqual(
+        await readFile(path.join(generatedDir, "src/app/opengraph-image.png")),
+        image,
+        renderer,
+      );
+      // Agent checks treat a page with a few words of HTML as an empty client shell, so the
+      // starter says what it is in the server-rendered markup.
+      const source = await readFile(path.join(generatedDir, page), "utf8");
+      const text = source
+        .slice(source.indexOf("<main"))
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\{[^}]*\}/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      assert.ok(text.length > 400, `${renderer}: ${text.length} characters of text`);
+      assert.match(source, /class(?:Name)?="feature-list"/, renderer);
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

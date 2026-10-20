@@ -285,7 +285,10 @@ export function renderMetadataHead(
   }
 
   appendNamedMetaRecord(tags, resolvedMetadata.other);
-  appendOpenGraph(tags, resolvedMetadata.openGraph, metadataBase);
+  appendOpenGraph(tags, resolvedMetadata.openGraph, metadataBase, {
+    title: explicitTitle,
+    description: resolvedMetadata.description,
+  });
   appendTwitter(tags, resolvedMetadata.twitter, metadataBase);
   appendVerification(tags, resolvedMetadata.verification);
 
@@ -330,11 +333,23 @@ function mergeNestedMetadata(base: unknown, next: unknown): any {
   return next ?? base;
 }
 
-function appendOpenGraph(tags: string[], openGraph: Metadata["openGraph"], metadataBase?: string) {
-  if (!isRecord(openGraph)) return;
+/**
+ * Open Graph tags. A page without Open Graph data still gets og:title and og:description
+ * from its own title and description, as social cards and agents citing the page look for
+ * them there.
+ */
+function appendOpenGraph(
+  tags: string[],
+  input: Metadata["openGraph"],
+  metadataBase: string | undefined,
+  page: { title?: string; description?: unknown },
+) {
+  const description = typeof page.description === "string" ? page.description : undefined;
+  if (!isRecord(input) && !page.title && !description) return;
+  const openGraph = (isRecord(input) ? input : {}) as NonNullable<Metadata["openGraph"]>;
 
-  appendMetaProperty(tags, "og:title", openGraph.title);
-  appendMetaProperty(tags, "og:description", openGraph.description);
+  appendMetaProperty(tags, "og:title", openGraph.title ?? page.title);
+  appendMetaProperty(tags, "og:description", openGraph.description ?? description);
   appendMetaProperty(tags, "og:url", resolveMetadataUrl(openGraph.url, metadataBase));
   appendMetaProperty(tags, "og:site_name", openGraph.siteName);
   // Default og:type so a route that sets Open Graph data without a type still
