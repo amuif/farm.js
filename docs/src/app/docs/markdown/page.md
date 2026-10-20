@@ -227,6 +227,12 @@ headers but omits the body. Sign-in redirects and non-HTML `401`/`403` responses
 the Markdown explanations with the original status. Unused bodies from these explanations and
 terminal `HEAD` responses are cancelled without delaying the response.
 
+The internal page request carries the caller's abort signal. In development, disconnecting the
+Markdown client also cancels the internal HTTP page fetch, including while its body is being read.
+Rendering and server-side fetches that observe their request's signal can stop cooperatively;
+cancellation does not undo work or side effects that have already completed. Normal response
+completion does not cancel the request.
+
 Prerendered pages, such as those exporting `dynamic = "force-static"`, are served as static files in
 production, so they answer every request with HTML. They still send the `Link` header, and their
 `.md` URL works, so agents should follow the header or request the `.md` URL directly.

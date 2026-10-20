@@ -87,6 +87,16 @@ describe("RSC Markdown mirrors", () => {
     },
   );
 
+  it("forwards cancellation through the generated RSC mirror wrapper", async () => {
+    const controller = new AbortController();
+    const { run, rendered } = createHandler();
+    const pending = run(new Request("https://farm.test/pricing.md", { signal: controller.signal }));
+    controller.abort("request cancelled");
+    await pending;
+    expect(rendered[0].signal.aborted).toBe(true);
+    expect(rendered[0].signal.reason).toBe("request cancelled");
+  });
+
   it.each(["/pricing.md", "/pricing"])(
     "does not retry rate-limited middleware at %s",
     async (pathname) => {

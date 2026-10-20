@@ -183,6 +183,7 @@ export async function createMarkdownMirrorResponse(
     new Request(pageUrl, {
       method: "GET",
       headers,
+      signal: options.request.signal,
     }),
   );
 

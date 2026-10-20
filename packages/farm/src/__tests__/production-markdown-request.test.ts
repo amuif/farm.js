@@ -64,6 +64,17 @@ describe("production Markdown request ownership", () => {
     },
   );
 
+  it("forwards the incoming signal through the production mirror call", async () => {
+    const controller = new AbortController();
+    const r = runtime();
+    const pending = r.run(new Request("https://farm.test/page.md", { signal: controller.signal }));
+    controller.abort("request cancelled");
+    await pending;
+    const pageRequest = r.renderPage.mock.calls[0][0];
+    expect(pageRequest.signal.aborted).toBe(true);
+    expect(pageRequest.signal.reason).toBe("request cancelled");
+  });
+
   it.each([undefined, "text/html", "text/markdown;q=0", "*/*", "application/json"])(
     "reuses the caller's URL for ordinary HTML negotiation (%s)",
     async (accept) => {

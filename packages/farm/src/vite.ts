@@ -2054,7 +2054,15 @@ window.__FARM_MANIFEST__ = ${inlineValue({
                   Boolean(farmApp.getRouteManager().matchRoute(pathname).route),
                 // Keep the page's own redirect (a sign-in gate, say) so the mirror
                 // answers with it, as production does, instead of the target page.
-                renderPage: async (request) => fetch(request, { redirect: "manual" }),
+                renderPage: async (request) =>
+                  fetch(request, {
+                    redirect: "manual",
+                    // Only accepted mirrors need disconnect listeners. An earlier
+                    // close (for example while the docs handler ran) must also abort.
+                    signal: res.destroyed
+                      ? AbortSignal.abort()
+                      : createFarmNodeRequestAbortSignal(req, res),
+                  }),
                 apiServerBasePath,
               });
           if (markdownResponse) {

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ViteDevServer } from "vite";
 import { createServer } from "../server/create-server";
 import { getAvailablePort } from "./dev-server-port";
@@ -16,6 +16,7 @@ const servers = new Set<ViteDevServer>();
 afterEach(async () => {
   await Promise.all([...servers].map((server) => server.close()));
   servers.clear();
+  vi.restoreAllMocks();
   await Promise.all(
     [...temporaryRoots].map((root) =>
       fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
@@ -31,6 +32,127 @@ async function writeModule(root: string, relativePath: string, source: string): 
 }
 
 describe("development markdown-source middleware ordering", () => {
+  it("closes the internal page fetch when a Markdown client disconnects", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-abort-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/slow/page.tsx",
+      `import React from "react";
+export default function Page() { return <main>Slow page</main>; }`,
+    );
+
+    let probe: {
+      started(): void;
+      reading(): void;
+      gate: Promise<void>;
+      streaming: boolean;
+      closed: boolean;
+    };
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const response = await realFetch(input, init);
+      if (input instanceof Request && input.headers.get("accept") === "text/html") {
+        const current = probe;
+        const read = response.text.bind(response);
+        vi.spyOn(response, "text").mockImplementation(() => {
+          const pending = read();
+          current.reading();
+          return pending;
+        });
+      }
+      return response;
+    });
+    const server = await createServer({
+      root,
+      images: { provider: "none" },
+      plugins: [
+        {
+          name: "markdown-cancellation-probe",
+          async beforeRequest(req, res) {
+            if (req.url !== "/slow" || req.headers.accept !== "text/html") return;
+            const current = probe;
+            res.once("close", () => {
+              current.closed = true;
+            });
+            res.setHeader("Content-Type", "text/html");
+            if (current.streaming) res.write("<h1>Slow page</h1>");
+            current.started();
+            await current.gate;
+            res.end("<p>Complete</p>");
+          },
+        },
+      ],
+    });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    const origin = `http://localhost:${address.port}`;
+
+    for (const method of ["GET", "HEAD"]) {
+      for (const suffix of [".md", ""]) {
+        for (const streaming of [false, true]) {
+          let started!: () => void;
+          let reading!: () => void;
+          let finish!: () => void;
+          const ready = new Promise<void>((resolve) => {
+            started = resolve;
+          });
+          const gate = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          const readingBody = new Promise<void>((resolve) => {
+            reading = resolve;
+          });
+          probe = { started, reading, gate, streaming, closed: false };
+          const client = new AbortController();
+          const request = fetch(`${origin}/slow${suffix}`, {
+            method,
+            headers: { accept: "text/markdown" },
+            signal: client.signal,
+          }).then(
+            () => "completed",
+            (error) => error.name,
+          );
+          try {
+            await ready;
+            // Do not mistake headers being written for a body read having started.
+            if (streaming) await readingBody;
+            client.abort();
+            expect(await request).toBe("AbortError");
+            await vi.waitFor(() => expect(probe.closed).toBe(true), { timeout: 5_000 });
+          } finally {
+            client.abort();
+            finish();
+            await request;
+          }
+        }
+      }
+    }
+    // A disconnect must not poison the next successful mirror request.
+    probe = { started() {}, reading() {}, gate: Promise.resolve(), streaming: true, closed: false };
+    const healthy = await fetch(`${origin}/slow.md`);
+    expect(healthy.status).toBe(200);
+    expect(await healthy.text()).toContain("# Slow page");
+    await vi.waitFor(() => expect(probe.closed).toBe(true));
+  }, 30_000);
+
   it("preserves terminal page responses through the real Markdown fetch path", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-terminal-"));
     temporaryRoots.add(root);
