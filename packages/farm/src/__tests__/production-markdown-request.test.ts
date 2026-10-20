@@ -48,6 +48,42 @@ describe("production Markdown request ownership", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it.each(["GET", "HEAD"])(
+    "serves the actions JSON through the production %s caller",
+    async (method) => {
+      const r = runtime();
+      r.renderPage.mockImplementation(
+        () =>
+          new Response(
+            '<main><form method="post"><input name="email"><button>Send</button></form></main>',
+            { headers: { "content-type": "text/html" } },
+          ),
+      );
+      for (const suffix of [".md", ""]) {
+        const response = await r.run(
+          new Request(`https://farm.test/page${suffix}?actions&ref=nav`, {
+            method,
+            headers: { accept: "text/markdown" },
+          }),
+        );
+        expect(response?.status).toBe(200);
+        expect(response?.headers.get("content-type")).toBe("application/json; charset=utf-8");
+        const body = await response!.text();
+        expect(method === "HEAD" ? body : JSON.parse(body).actions[0].action).toBe(
+          method === "HEAD" ? "" : "/page?ref=nav",
+        );
+        const cached = await r.run(
+          new Request(`https://farm.test/page${suffix}?actions&ref=nav`, {
+            method,
+            headers: { accept: "text/markdown", "if-none-match": response!.headers.get("etag")! },
+          }),
+        );
+        expect(cached?.status).toBe(304);
+        expect(await cached!.text()).toBe("");
+      }
+    },
+  );
+
+  it.each(["GET", "HEAD"])(
     "evaluates Markdown preconditions through the production %s caller",
     async (method) => {
       for (const suffix of [".md", ""]) {

@@ -32,6 +32,76 @@ async function writeModule(root: string, relativePath: string, source: string): 
 }
 
 describe("development markdown-source middleware ordering", () => {
+  it("serves actions from the rendered page through the real Markdown fetch path", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-actions-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/contact/page.tsx",
+      `import React from "react";
+export default function Page() {
+  return <main><h1>Contact</h1><form method="post" action="/api/contact">
+    <input type="email" name="email" required /><button>Send</button>
+  </form><form hidden><input name="secret" /></form></main>;
+}`,
+    );
+    const server = await createServer({ root, images: { provider: "none" } });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    const origin = `http://localhost:${address.port}`;
+    for (const suffix of [".md", ""]) {
+      const url = `${origin}/contact${suffix}?actions&section=missing&max_tokens=invalid`;
+      const response = await fetch(url, { headers: { accept: "text/markdown" } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      expect(await response.json()).toEqual({
+        page: "/contact",
+        markdown: "/contact.md",
+        actions: [
+          {
+            type: "form",
+            method: "POST",
+            action: "/api/contact",
+            enctype: "application/x-www-form-urlencoded",
+            fields: [{ name: "email", type: "email", required: true }],
+            submit: [{ label: "Send" }],
+          },
+        ],
+      });
+      for (const method of ["GET", "HEAD"]) {
+        const cached = await fetch(url, {
+          method,
+          headers: { accept: "text/markdown", "if-none-match": response.headers.get("etag")! },
+        });
+        expect(cached.status).toBe(304);
+        expect(await cached.text()).toBe("");
+      }
+      const head = await fetch(url, { method: "HEAD", headers: { accept: "text/markdown" } });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("etag")).toBe(response.headers.get("etag"));
+      expect(await head.text()).toBe("");
+    }
+    const normal = await fetch(`${origin}/contact.md`);
+    expect(await normal.text()).toContain("# Contact");
+  }, 30_000);
+
   it("closes the internal page fetch when a Markdown client disconnects", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-abort-"));
     temporaryRoots.add(root);

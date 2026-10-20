@@ -368,7 +368,9 @@ curl "http://localhost:3000/contact.md?actions"
 
 A `page.md` source has no forms, so its `?actions` view is an empty list. The view carries an
 `ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's
-request, so it shows the forms that caller would see.
+request, so it shows the forms that caller would see. Farm still renders the page and extracts its
+forms, but skips converting its content to Markdown when only the actions JSON is needed. Error
+responses still return their full Markdown explanation.
 
 ## React Server Components apps
 

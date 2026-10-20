@@ -246,12 +246,17 @@ export async function createMarkdownMirrorResponse(
       _findFarmMCPEndpointTool(form.method, stripFarmBasePath(pathname), options.apiServerBasePath);
     if (tool) form.tool = tool;
   }
-  const markdown = htmlToMarkdown(html, {
-    title: target.route?.title,
-    includeMetadata: options.config?.includeMetadata ?? true,
-    sourcePath: target.pathname,
-    actionsPath: actions.length > 0 ? `${markdownPath}?actions` : undefined,
-  });
+  // The actions view uses only the forms as JSON. Errors still need their full
+  // Markdown explanation, regardless of the requested view.
+  const markdown =
+    pageResponse.status < 400 && requestUrl.searchParams.has("actions")
+      ? ""
+      : htmlToMarkdown(html, {
+          title: target.route?.title,
+          includeMetadata: options.config?.includeMetadata ?? true,
+          sourcePath: target.pathname,
+          actionsPath: actions.length > 0 ? `${markdownPath}?actions` : undefined,
+        });
   const headersOut = new Headers({
     "Content-Type": "text/markdown; charset=utf-8",
     "Content-Location": markdownPath,
