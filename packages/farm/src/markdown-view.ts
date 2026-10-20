@@ -25,7 +25,10 @@ const ATX_HEADING = /^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 
 /** Parse ATX headings, skipping front matter and fenced code blocks. */
 export function parseFarmMarkdownHeadings(markdown: string): FarmMarkdownHeading[] {
-  const lines = markdown.split("\n");
+  return parseMarkdownHeadingsFromLines(markdown.split("\n"));
+}
+
+function parseMarkdownHeadingsFromLines(lines: string[]): FarmMarkdownHeading[] {
   const headings: FarmMarkdownHeading[] = [];
   const used = new Map<string, number>();
   let index = 0;
@@ -145,7 +148,7 @@ export function selectFarmMarkdownView(
   if (!wantsOutline && sectionId === null) return withinBudget(markdown);
 
   const lines = markdown.split("\n");
-  const headings = parseFarmMarkdownHeadings(markdown);
+  const headings = parseMarkdownHeadingsFromLines(lines);
   const sectionText = (heading: FarmMarkdownHeading) =>
     lines.slice(heading.start, heading.end).join("\n").trim();
 
@@ -161,10 +164,26 @@ export function selectFarmMarkdownView(
     };
   }
 
+  // Outlines need section lengths, not copies of every overlapping section.
+  // Offsets include the separating newlines and retain JS's UTF-16 counting.
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
   const minLevel = headings.reduce((min, heading) => Math.min(min, heading.level), 6);
   const entries = headings.map((heading) => {
     const indent = "  ".repeat(heading.level - minLevel);
-    const tokens = estimateFarmMarkdownTokens(sectionText(heading));
+    let last = heading.end - 1;
+    while (last > heading.start && lines[last]!.trim().length === 0) last--;
+    const first = lines[heading.start]!;
+    const length =
+      offsets[last]! +
+      lines[last]!.trimEnd().length -
+      offsets[heading.start]! -
+      (first.length - first.trimStart().length);
+    const tokens = Math.ceil(length / 4);
     return `${indent}- [${heading.text}](${viewUrl({ section: heading.id })}) ~${tokens} tokens`;
   });
   return {

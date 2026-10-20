@@ -274,7 +274,8 @@ curl "http://localhost:3000/pricing.md?max_tokens=2000"
 ```
 
 - `?outline` returns the heading tree. Each entry links to its section and estimates its size in
-  tokens, so an agent can decide what to read.
+  tokens, so an agent can decide what to read. Estimates use the same four-character approximation
+  without constructing a full copy of every section.
 - `?section=<id>` returns one heading and everything under it, up to the next heading at the same
   or a higher level. Ids follow GitHub's heading anchors (`## Team plans` is `team-plans`; a
   repeated heading gets `-1`, `-2`). An unknown id answers `404` with the list of valid ids.
