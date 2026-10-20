@@ -1245,6 +1245,9 @@ const VOID_TAGS = new Set([
  * stays, since that content can still be found and revealed.
  */
 function removeHiddenElements(html: string): string {
+  // Both supported attribute names contain "hidden". Only prove absence here;
+  // any occurrence (including text or quoted values) uses the complete parser.
+  if (!/hidden/i.test(html)) return html;
   const openingTag = /<([a-zA-Z][\w:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
   let closingTags: Map<number, number> | undefined;
   let result = "";

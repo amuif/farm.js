@@ -195,6 +195,9 @@ export default defineConfig({
 
 Markdown mirrors call the rendered page, strip scripts/styles and elements hidden by an attribute (`aria-hidden="true"`, or `hidden` except `hidden="until-found"`, which the browser can reveal), convert HTML headings, paragraphs, lists (ordered lists keep their numbers), blockquotes, tables (as GFM tables), and code blocks (keeping a `language-*` class or `data-language` as the fence language) into markdown, then return `text/markdown`. The mirror is built without CSS, so text hidden only by a stylesheet (`display: none`, a collapsed menu) still appears. Mark decorative text `aria-hidden` to keep it out of the mirror as well as out of screen readers.
 
+Content without any `hidden` text (case-insensitive) skips hidden-element parsing. Any occurrence
+still uses the same attribute-aware parser, including quoted values, revealable content, and forms.
+
 **Terminal**
 
 ```bash
