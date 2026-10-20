@@ -370,7 +370,9 @@ A `page.md` source has no forms, so its `?actions` view is an empty list. The vi
 `ETag` like every other Markdown response. Like the mirror itself, it is rendered with the caller's
 request, so it shows the forms that caller would see. Farm still renders the page and extracts its
 forms, but skips converting its content to Markdown when only the actions JSON is needed. Error
-responses still return their full Markdown explanation.
+responses still return their full Markdown explanation. When a mirror needs both the forms and
+Markdown, they share the same prepared HTML content within that request; nothing is cached across
+callers.
 
 ## React Server Components apps
 

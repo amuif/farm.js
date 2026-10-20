@@ -235,8 +235,12 @@ export async function createMarkdownMirrorResponse(
 
   const html = await pageResponse.text();
   const markdownPath = target.pathname === "/" ? "/index.md" : `${target.pathname}.md`;
+  // Forms and Markdown read the same prepared content. Keep it request-local,
+  // and keep the no-form actions view free of content preparation altogether.
   // Error responses are read in full, not as action/partial views.
-  const actions = pageResponse.status >= 400 ? [] : extractFarmPageActions(html, pageUrl);
+  const region =
+    pageResponse.status < 400 && /<form\b/i.test(html) ? readHtmlContentRegion(html) : undefined;
+  const actions = region === undefined ? [] : extractPageActionsFromRegion(region, pageUrl);
   for (const form of actions) {
     // Only a same-origin target can be an endpoint of this app.
     if (!form.action?.startsWith("/")) continue;
@@ -251,12 +255,16 @@ export async function createMarkdownMirrorResponse(
   const markdown =
     pageResponse.status < 400 && requestUrl.searchParams.has("actions")
       ? ""
-      : htmlToMarkdown(html, {
-          title: target.route?.title,
-          includeMetadata: options.config?.includeMetadata ?? true,
-          sourcePath: target.pathname,
-          actionsPath: actions.length > 0 ? `${markdownPath}?actions` : undefined,
-        });
+      : convertHtmlToMarkdown(
+          html,
+          {
+            title: target.route?.title,
+            includeMetadata: options.config?.includeMetadata ?? true,
+            sourcePath: target.pathname,
+            actionsPath: actions.length > 0 ? `${markdownPath}?actions` : undefined,
+          },
+          region,
+        );
   const headersOut = new Headers({
     "Content-Type": "text/markdown; charset=utf-8",
     "Content-Location": markdownPath,
@@ -422,8 +430,16 @@ export function htmlToMarkdown(
     actionsPath?: string;
   } = {},
 ): string {
+  return convertHtmlToMarkdown(html, options);
+}
+
+function convertHtmlToMarkdown(
+  html: string,
+  options: NonNullable<Parameters<typeof htmlToMarkdown>[1]>,
+  region?: string,
+): string {
   const title = options.title ?? extractHtmlTitle(html);
-  let source = readHtmlContentRegion(html);
+  let source = region ?? readHtmlContentRegion(html);
 
   // Code blocks are set aside behind placeholders so the tidying below never
   // touches them, and each gets a fence longer than any backtick run inside it,
@@ -889,7 +905,10 @@ const FORM_ENCTYPES = new Set([
  */
 export function extractFarmPageActions(html: string, pageUrl: URL): FarmPageFormAction[] {
   if (!/<form\b/i.test(html)) return [];
-  const region = readHtmlContentRegion(html);
+  return extractPageActionsFromRegion(readHtmlContentRegion(html), pageUrl);
+}
+
+function extractPageActionsFromRegion(region: string, pageUrl: URL): FarmPageFormAction[] {
   const labelsFor = new Map<string, string>();
   for (const match of region.matchAll(/<label\b([^>]*)>([\s\S]*?)<\/label>/gi)) {
     const target = readDecodedAttribute(match[1]!, "for");
