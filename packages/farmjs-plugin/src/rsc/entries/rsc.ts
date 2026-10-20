@@ -131,6 +131,58 @@ const serverActionSecurity = ${JSON.stringify(ctx.serverActions)};
 `;
   }
 
+  // In development, a page, layout, loading or error file that fails to load
+  // fails only the routes that use it. Eager globs would fail the whole entry,
+  // so every route returned the same error until the file was fixed. The
+  // modules still load once, in order, before the first request. Middleware
+  // and API routes stay eager: skipping a broken auth middleware would leave
+  // its routes unprotected. Production keeps eager globs, where a broken
+  // import already fails the build.
+  const isolateRouteModules = ctx.development === true;
+  const uiRouteGlob = (pattern: string) =>
+    isolateRouteModules
+      ? `await loadFarmDevRouteModules(import.meta.glob(${JSON.stringify(pattern)}))`
+      : `import.meta.glob(${JSON.stringify(pattern)}, { eager: true })`;
+  if (isolateRouteModules) {
+    code += `
+const farmRouteLoadErrors = new Map();
+
+async function loadFarmDevRouteModules(loaders) {
+  const modules = {};
+  for (const [filePath, load] of Object.entries(loaders)) {
+    try {
+      modules[filePath] = await load();
+    } catch (error) {
+      console.error('[Farm.js] Could not load ' + filePath + ':', error);
+      const failed = {
+        default: function FarmRouteLoadFailure() {
+          throw error;
+        },
+      };
+      farmRouteLoadErrors.set(failed, error);
+      modules[filePath] = failed;
+    }
+  }
+  return modules;
+}
+
+/** The load error of a module the matched route renders with, if any. */
+function findFarmRouteLoadError(matched) {
+  if (farmRouteLoadErrors.size === 0) return undefined;
+  const routeModules = [
+    pages[matched.pattern],
+    ...getRouteModules(matched.pattern, layouts, 'layout'),
+    ...getRouteModules(matched.pattern, loadings, 'loading'),
+    ...getRouteModules(matched.pattern, errors, 'error'),
+  ];
+  for (const module of routeModules) {
+    if (farmRouteLoadErrors.has(module)) return farmRouteLoadErrors.get(module);
+  }
+  return undefined;
+}
+`;
+  }
+
   // Auto-discover pages, layouts, and middleware using Vite's glob import
   code += `
 // Debug logging helper
@@ -160,13 +212,10 @@ function applyActionResponseHeaders(headers, request) {
 // Auto-discover all route modules. Every glob remains a literal so Vite can analyze it.
 ${routeSourceRoots
   .map(
-    (
-      root,
-      index,
-    ) => `const pages${index} = import.meta.glob(${JSON.stringify(`${root.glob}/**/page.{tsx,jsx,ts,js}`)}, { eager: true });
-const layouts${index} = import.meta.glob(${JSON.stringify(`${root.glob}/**/layout.{tsx,jsx,ts,js}`)}, { eager: true });
-const loadings${index} = import.meta.glob(${JSON.stringify(`${root.glob}/**/loading.{tsx,jsx,ts,js}`)}, { eager: true });
-const errors${index} = import.meta.glob(${JSON.stringify(`${root.glob}/**/error.{tsx,jsx,ts,js}`)}, { eager: true });
+    (root, index) => `const pages${index} = ${uiRouteGlob(`${root.glob}/**/page.{tsx,jsx,ts,js}`)};
+const layouts${index} = ${uiRouteGlob(`${root.glob}/**/layout.{tsx,jsx,ts,js}`)};
+const loadings${index} = ${uiRouteGlob(`${root.glob}/**/loading.{tsx,jsx,ts,js}`)};
+const errors${index} = ${uiRouteGlob(`${root.glob}/**/error.{tsx,jsx,ts,js}`)};
 const middlewares${index} = import.meta.glob(${JSON.stringify(`${root.glob}/**/middleware.{tsx,jsx,ts,js}`)}, { eager: true });
 const apiRouteModules${index} = import.meta.glob(${JSON.stringify(`${root.glob}/api/**/route.{tsx,jsx,ts,js}`)}, { eager: true });
 const routeDefinitionModules${index} = import.meta.glob(${JSON.stringify(
@@ -786,7 +835,13 @@ async function handleFarmRequest(request, context) {
   }
   
   const { Page, pattern, params, pageMetadata } = matched;
-  const LayoutModules = getLayoutModules(pattern);
+  ${
+    isolateRouteModules
+      ? `const routeLoadError = findFarmRouteLoadError(matched);
+  if (routeLoadError) throw routeLoadError;
+  `
+      : ""
+  }const LayoutModules = getLayoutModules(pattern);
   const metadata = mergeDocumentMetadata(
     ...LayoutModules.map((layoutModule) => layoutModule.metadata),
     pageMetadata,
@@ -947,7 +1002,13 @@ async function handleFarmRequest(request, context) {
     )
   );
   } catch (err) {
-    const redirect = getFarmRedirectError(err);
+    ${
+      isolateRouteModules
+        ? `// A file that failed to load: show the dev error page, not error.tsx.
+    if ([...farmRouteLoadErrors.values()].includes(err)) throw err;
+    `
+        : ""
+    }const redirect = getFarmRedirectError(err);
     if (redirect) return new Response(null, { status: redirect.status, headers: { location: redirect.url, 'cache-control': 'no-store' } });
     if (isFarmNotFoundError(err)) return new Response('Not Found', { status: 404, headers: { 'cache-control': 'no-store' } });
     console.error('[RSC] Handler error:', err);
