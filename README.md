@@ -30,14 +30,6 @@
   <a href="https://stackblitz.com/github/farming-labs/farm.js/tree/main/examples/stackblitz?file=src%2Fapp%2Fpage.tsx&title=Farm.js%20Playground"><img src="https://developer.stackblitz.com/img/open_in_stackblitz.svg" alt="Open in StackBlitz" /></a>
 </p>
 
-<p align="center">
-  <code>npx @farm.js/create-app@latest my-app</code>
-</p>
-
-<p align="center">
-  <img src="./.github/assets/quickstart.gif" alt="Create a Farm.js app, start the dev server, edit a page and watch it update without a reload, then read the same page as Markdown at /index.md" width="900" />
-</p>
-
 ## ✨ Built for Full-Stack Products
 
 | Feature                            | What it gives you                                                                                                                                                                                                                                          |
