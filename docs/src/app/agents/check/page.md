@@ -9,21 +9,19 @@ Is your site ready for agents? Enter a URL at [farmjs.dev/agents/check](/agents/
 
 ## What it checks
 
-Every check looks at what an agent sees without a browser: the HTML, the Markdown, the discovery files, and the tools a site offers. The checks fall into three groups: can agents get in (Reach), can they read it (Read), and can they use it (Act).
+Every check looks at what an agent sees without a browser: the HTML, the Markdown, the discovery files, and the tools a site offers.
 
-| Group | Check                        | Looks at                                                                      | Points |
-| ----- | ---------------------------- | ----------------------------------------------------------------------------- | ------ |
-| Reach | Readable without JavaScript  | Content in the HTML, not behind a sign-in or a client render.                 | 20     |
-| Reach | robots.txt                   | Agents acting for users and AI search aren't blocked.                         | 15     |
-| Read  | Markdown version             | A `.md` URL and `Accept: text/markdown`, linked from the page.                | 20     |
-| Read  | llms.txt                     | A Markdown index of the site for language models.                             | 15     |
-| Read  | Title, canonical, Open Graph | How agents name and cite the page.                                            | 10     |
-| Read  | JSON-LD                      | schema.org data about who runs the site.                                      | 5      |
-| Act   | MCP server                   | Tools agents can call over Streamable HTTP at `/api/mcp` or `/mcp`.           | 10     |
-| Act   | OpenAPI                      | A machine-readable description of the site's API at `/openapi.json`.          | 5      |
-| Act   | Agent card                   | `/.well-known/agent-card.json`. Reported, not scored, while the specs settle. | 0      |
-| Act   | WebMCP                       | Tools the page registers for in-browser agents. Reported, not scored.         | 0      |
-
-A report shows how many of each group's points the site earns, lists the gaps by the points they cost with the Farm.js config that closes each one, and copies them as a prompt for a coding agent.
+| Check                        | Looks at                                                                      | Points |
+| ---------------------------- | ----------------------------------------------------------------------------- | ------ |
+| Readable without JavaScript  | Content in the HTML, not behind a sign-in or a client render.                 | 20     |
+| Markdown version             | A `.md` URL and `Accept: text/markdown`, linked from the page.                | 20     |
+| llms.txt                     | A Markdown index of the site for language models.                             | 15     |
+| robots.txt                   | Agents acting for users and AI search aren't blocked.                         | 15     |
+| Title, canonical, Open Graph | How agents name and cite the page.                                            | 10     |
+| MCP server                   | Tools agents can call over Streamable HTTP at `/api/mcp` or `/mcp`.           | 10     |
+| OpenAPI                      | A machine-readable description of the site's API at `/openapi.json`.          | 5      |
+| JSON-LD                      | schema.org data about who runs the site.                                      | 5      |
+| Agent card                   | `/.well-known/agent-card.json`. Reported, not scored, while the specs settle. | 0      |
+| WebMCP                       | Tools the page registers for in-browser agents. Reported, not scored.         | 0      |
 
 A new Farm.js app passes the Reach and Read checks out of the box: Markdown, `llms.txt`, JSON-LD and Open Graph come from its pages and metadata (see [agent readiness](/docs/configuration#agent-readiness)), and MCP and OpenAPI are a config block away. See [agent infrastructure](/agents) for what comes next.

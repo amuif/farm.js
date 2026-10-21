@@ -1,5 +1,6 @@
 import { type Metadata, type MetadataProps, notFound, type PageProps } from "@farm.js/core";
 import { ArrowRight } from "lucide-react";
+import { AgentCheckCopyLink } from "../../../../components/agents/check-copy-link";
 import {
   AgentCheckReportSections,
   hostOf,
@@ -43,7 +44,18 @@ export default async function AgentCheckReportPage({ params }: PageProps<"/agent
         <div className="farm-page-content min-w-0">
           <SiteHeader activePage="agents" />
           <main id="agent-check-content" tabIndex={-1}>
-            <AgentCheckReportSections scan={scan} />
+            <AgentCheckReportSections
+              scan={scan}
+              actions={
+                <>
+                  <AgentCheckCopyLink />
+                  <a href={`/agents/check?url=${encodeURIComponent(scan.report.url)}`}>
+                    Scan again
+                  </a>
+                  <a href="/agents/check">Check another site</a>
+                </>
+              }
+            />
 
             <section
               className="agents-open-web farm-full-rule"
