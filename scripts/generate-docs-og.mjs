@@ -377,7 +377,7 @@ try {
                   <span>the web and agents</span>
                 </h1>
                 <p class="summary">
-                  Every app serves people and AI agents: HTML, Markdown, and llms.txt by default, MCP tools when you want them.
+                  Agent-ready by default, and open to any agent runtime: Eve, Cloudflare&nbsp;Agents, the AI&nbsp;SDK, Mastra, and more.
                 </p>
               </section>
 
@@ -408,7 +408,7 @@ try {
                   </div>
                 </div>
 
-                <div class="architecture-note"><strong>Agent-ready by default.</strong> Nothing extra to install.</div>
+                <div class="architecture-note"><strong>Bring your own agent.</strong> One open runtime contract.</div>
               </aside>
             </div>
 

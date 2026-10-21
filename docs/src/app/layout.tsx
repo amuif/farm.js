@@ -11,7 +11,7 @@ export const metadata = {
   metadataBase: new URL(SITE_URL),
   title: "Farm.js - The framework for the web and agents",
   description:
-    "Farm.js is the full-stack framework for the web and agents: every app serves Markdown and llms.txt to AI agents by default. Built on Vite and Nitro.",
+    "Farm.js is the full-stack framework for the web and agents: apps are agent-ready by default and run any agent runtime you bring. Built on Vite and Nitro.",
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml", sizes: "any" }],
   },
