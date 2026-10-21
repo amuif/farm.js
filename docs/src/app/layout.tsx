@@ -9,9 +9,9 @@ import "./globals.css";
 // pages set their own og title and description rather than inheriting one here.
 export const metadata = {
   metadataBase: new URL(SITE_URL),
-  title: "farmjs.dev - Framework for integrated apps",
+  title: "Farm.js - The framework for the web and agents",
   description:
-    "Farm.js is an easy and fast full-stack framework that blends app foundations and external services into one flow so teams can ship products faster.",
+    "Farm.js is the full-stack framework for the web and agents: every app serves Markdown and llms.txt to AI agents by default. Built on Vite and Nitro.",
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml", sizes: "any" }],
   },
