@@ -185,6 +185,39 @@ describe("minifyFarmServerChunk", () => {
     expect([...code].every((character) => character.charCodeAt(0) < 128)).toBe(true);
   });
 
+  it("restores import() specifiers without require() calls, leaving other templates alone", async () => {
+    // No require() here, so the module record handles every import().
+    const code = await minifyFarmServerChunk(
+      [
+        'export const a = () => import("./_chunks/a.mjs");',
+        "export const b = () => import('./_chunks/b.mjs');",
+        "export const dynamic = (name) => import(`./_chunks/${name}.mjs`);",
+        'export const sample = "import(`./not-a-module.mjs`)";',
+        "export const label = `plain`;",
+      ].join("\n"),
+      "_virtual_farm-ssr-entry.mjs",
+      { keepNames: true, target: "esnext" },
+    );
+
+    expect(code).toContain('import("./_chunks/a.mjs")');
+    expect(code).toContain('import("./_chunks/b.mjs")');
+    expect(code).not.toMatch(/import\(`\.\/_chunks\/[ab]\.mjs`\)/);
+    // A template with a substitution is not a static specifier; it stays as is.
+    expect(code).toMatch(/import\(`\.\/_chunks\/\$\{/);
+    expect(code).toContain("import(`./not-a-module.mjs`)");
+  });
+
+  it("falls back to the AST for escaped import() specifiers", async () => {
+    const code = await minifyFarmServerChunk(
+      'export const load = () => import("./_chunks/page-\u00e9.mjs");',
+      "_virtual_farm-ssr-entry.mjs",
+      { keepNames: true, target: "esnext" },
+    );
+
+    expect(code).toContain('import("./_chunks/page-\\u00e9.mjs")');
+    expect([...code].every((character) => character.charCodeAt(0) < 128)).toBe(true);
+  });
+
   it("throws on syntax errors instead of emitting partial output", async () => {
     await expect(
       minifyFarmServerChunk("export const = ;", "broken.mjs", {

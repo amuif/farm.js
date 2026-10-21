@@ -715,39 +715,66 @@ function restoreLiteralModuleSpecifiers(
   fileName: string,
   { parseSync, Visitor }: Pick<typeof import("rolldown/utils"), "parseSync" | "Visitor">,
 ): string {
-  if (!code.includes("import(`") && !code.includes("require(`")) return code;
+  const hasImportTemplate = code.includes("import(`");
+  const hasRequireTemplate = code.includes("require(`");
+  if (!hasImportTemplate && !hasRequireTemplate) return code;
 
   const parsed = parseSync(fileName, code, { lang: "js", sourceType: "module" });
   if (parsed.errors.length > 0) {
     throw new Error(`Failed to minify ${fileName}: ${parsed.errors[0].message}`);
   }
   const replacements: Array<{ start: number; end: number; text: string }> = [];
-  const restore = (node: { type: string; start: number; end: number } | undefined) => {
-    if (node?.type !== "TemplateLiteral") return;
-    const template = node as import("rolldown/utils").ESTree.TemplateLiteral;
-    const value = template.quasis[0]?.value.cooked;
-    if (template.expressions.length > 0 || typeof value !== "string") return;
-    // The minified chunk is ASCII-only; keep the restored literal ASCII too.
-    const text = JSON.stringify(value).replace(
-      /[\u007f-￿]/g,
-      (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-    );
-    replacements.push({ start: template.start, end: template.end, text });
-  };
-  new Visitor({
-    ImportExpression(node) {
-      restore(node.source);
-    },
-    CallExpression(node) {
-      if (
-        node.callee.type === "Identifier" &&
-        node.callee.name === "require" &&
-        node.arguments.length === 1
-      ) {
-        restore(node.arguments[0]);
+
+  // Fast path: the module record lists every import() argument without
+  // materializing the AST in JavaScript, which is most of the cost on a large
+  // server chunk. A template with no escapes, line breaks or substitutions is
+  // its own value. Anything else, and require() calls, which the module record
+  // does not list, take the AST path.
+  let needsAst = hasRequireTemplate;
+  if (!needsAst) {
+    for (const { moduleRequest } of parsed.module.dynamicImports) {
+      const source = code.slice(moduleRequest.start, moduleRequest.end);
+      if (!source.startsWith("`")) continue;
+      const value = source.slice(1, -1);
+      if (source.length < 2 || !source.endsWith("`") || /[\\\r\n`]|\$\{/.test(value)) {
+        needsAst = true;
+        break;
       }
-    },
-  }).visit(parsed.program);
+      replacements.push({
+        start: moduleRequest.start,
+        end: moduleRequest.end,
+        text: toAsciiStringLiteral(value),
+      });
+    }
+  }
+  if (needsAst) {
+    replacements.length = 0;
+    const restore = (node: { type: string; start: number; end: number } | undefined) => {
+      if (node?.type !== "TemplateLiteral") return;
+      const template = node as import("rolldown/utils").ESTree.TemplateLiteral;
+      const value = template.quasis[0]?.value.cooked;
+      if (template.expressions.length > 0 || typeof value !== "string") return;
+      replacements.push({
+        start: template.start,
+        end: template.end,
+        text: toAsciiStringLiteral(value),
+      });
+    };
+    new Visitor({
+      ImportExpression(node) {
+        restore(node.source);
+      },
+      CallExpression(node) {
+        if (
+          node.callee.type === "Identifier" &&
+          node.callee.name === "require" &&
+          node.arguments.length === 1
+        ) {
+          restore(node.arguments[0]);
+        }
+      },
+    }).visit(parsed.program);
+  }
 
   let restored = "";
   let offset = 0;
@@ -756,6 +783,14 @@ function restoreLiteralModuleSpecifiers(
     offset = end;
   }
   return restored + code.slice(offset);
+}
+
+/** A double-quoted string literal; the minified chunk is ASCII-only, so this is too. */
+function toAsciiStringLiteral(value: string): string {
+  return JSON.stringify(value).replace(
+    /[\u007f-￿]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
 }
 
 function createServerChunkMinifyPlugin(options: FarmServerChunkMinifyOptions): Rollup.Plugin {
