@@ -4788,7 +4788,6 @@ export function generateNativeAuthIntegrationSource(auth: ResolvedFarmConfig["au
   };
 }
 
-
 /**
  * Runtime source for the production entry's integration request dispatch.
  *
