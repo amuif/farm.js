@@ -420,6 +420,67 @@ const BLOCK_TAGS =
 const BOX_TAGS =
   /<\/?(label|button|input|select|textarea|option|output|meter|progress|td|th)\b[^>]*>/gi;
 
+// Layout containers whose children are often a row of separate items (a flex
+// label and value, a nav of links) rather than running text.
+const LAYOUT_ROW =
+  /<(div|nav|section|header|footer|aside|main|article|figure|figcaption|dt|dd)\b([^>]*)>((?:(?!<\/?(?:div|nav|section|header|footer|aside|main|article|figure|figcaption|dt|dd|p|h[1-6]|ul|ol|li|table|pre|blockquote)\b)[\s\S])*?)<\/\1>/gi;
+const HTML_TOKEN = /<\/?([a-zA-Z][\w:-]*)\b[^>]*?(\/?)>|[^<]+/g;
+
+/**
+ * JSX drops the line breaks between siblings, so a flex row written as
+ * `<span>00</span>` and `<span>Basic starter</span>` on two lines renders as
+ * `<span>00</span><span>Basic starter</span>`, and the text reads "00Basic
+ * starter". Inside a layout container with no text of its own, each child
+ * element is its own item, so a space goes between them. A container with text
+ * of its own is prose, and children of one character each are a letter-split
+ * word, so both keep their markup as written.
+ */
+function separateLayoutRowItems(source: string): string {
+  return source.replace(
+    LAYOUT_ROW,
+    (container: string, tag: string, attributes: string, content: string) => {
+      const boundaries: number[] = [];
+      const items: string[] = [];
+      let depth = 0;
+      let previousEnd = -1;
+      let item = "";
+      for (const match of content.matchAll(HTML_TOKEN)) {
+        const [token, name, selfClosing] = match;
+        const index = match.index ?? 0;
+        if (name === undefined) {
+          if (depth === 0) {
+            if (token.trim()) return container;
+            previousEnd = -1;
+          } else {
+            item += token;
+          }
+          continue;
+        }
+        const closing = token.startsWith("</");
+        const isVoid = selfClosing === "/" || VOID_TAGS.has(name.toLowerCase());
+        if (closing) {
+          depth = Math.max(0, depth - 1);
+        } else {
+          if (depth === 0 && previousEnd === index) boundaries.push(index);
+          if (!isVoid) depth += 1;
+        }
+        if (depth === 0) {
+          previousEnd = index + token.length;
+          items.push(decodeHtml(item).trim());
+          item = "";
+        }
+      }
+      if (boundaries.length === 0) return container;
+      if (items.filter(Boolean).every((text) => text.length === 1)) return container;
+      let separated = content;
+      for (const boundary of boundaries.reverse()) {
+        separated = `${separated.slice(0, boundary)} ${separated.slice(boundary)}`;
+      }
+      return `<${tag}${attributes}>${separated}</${tag}>`;
+    },
+  );
+}
+
 export function htmlToMarkdown(
   html: string,
   options: {
@@ -479,6 +540,7 @@ function convertHtmlToMarkdown(
       return `\n\n${CODE_BLOCK_MARK}${codeBlocks.length - 1}${CODE_BLOCK_MARK}\n\n`;
     },
   );
+  source = separateLayoutRowItems(source);
   source = source.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => {
     return `\n\n${"#".repeat(Number(level))} ${toInlineMarkdown(content).trim()}\n\n`;
   });

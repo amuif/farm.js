@@ -688,6 +688,35 @@ describe("htmlToMarkdown", () => {
     ).toBe("Hello ex**am**ple\n");
   });
 
+  it("separates items in a layout row that has no text of its own", () => {
+    // JSX drops the line breaks between siblings, so a flex row of a label and
+    // a value renders as `<span>00</span><span>Basic starter</span>`.
+    expect(
+      htmlToMarkdown(
+        '<main><div class="eyebrow"><span>00</span><span>FARMJS / Basic starter</span></div>' +
+          '<div class="command"><span>01</span><code>npm run dev</code></div>' +
+          '<nav><span><a href="/docs"><span>Docs</span></a></span>' +
+          '<span><span aria-hidden="true">/</span><a href="/gh"><span>GitHub</span></a></span></nav></main>',
+        { includeMetadata: false },
+      ),
+    ).toBe("00 FARMJS / Basic starter\n\n01 npm run dev\n\nDocs GitHub\n");
+  });
+
+  it("keeps a letter-split word joined in a layout container", () => {
+    expect(
+      htmlToMarkdown(
+        "<main><div><span>a</span><span>g</span><span>e</span><span>n</span><span>t</span><span>s</span></div></main>",
+        { includeMetadata: false },
+      ),
+    ).toBe("agents\n");
+    // Text of the container's own means it is prose, not a row of items.
+    expect(
+      htmlToMarkdown("<main><div>ex<span>am</span><span>ple</span></div></main>", {
+        includeMetadata: false,
+      }),
+    ).toBe("example\n");
+  });
+
   it("prefers page content over layout chrome", () => {
     expect(
       htmlToMarkdown(
