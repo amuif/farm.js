@@ -1,4 +1,15 @@
+import { createRequire } from "node:module";
 import type { EntryContext } from "../types.js";
+
+const require_ = createRequire(import.meta.url);
+
+/** Core's production source for the \`mcp\` plugin, so both servers merge config the same way. */
+function generateMCPPluginSource(): { importSource: string; registerSource: string } {
+  const { generateNativeMCPPluginSource } = require_(
+    "@farm.js/core/internal/production-runtime",
+  ) as typeof import("@farm.js/core/internal/production-runtime");
+  return generateNativeMCPPluginSource({ enabled: true });
+}
 
 /**
  * Generates the terminal middleware-result handling shared by the RSC entry
@@ -56,6 +67,15 @@ export function generateRscEntry(ctx: EntryContext): string {
         )};`,
     )
     .join("\n");
+  const mcpConfigImports = (ctx.mcpConfigPaths ?? [])
+    .map(
+      (configPath, index) =>
+        `import * as FarmMCPConfigModule${index} from ${JSON.stringify(
+          configPath.replace(/\\/g, "/"),
+        )};`,
+    )
+    .join("\n");
+  const mcpSource = ctx.mcpConfigPaths?.length ? generateMCPPluginSource() : null;
   const middlewareConfigValues = (ctx.middlewareConfigPaths ?? []).map(
     (_configPath, index) =>
       `(FarmMiddlewareConfigModule${index}.default || FarmMiddlewareConfigModule${index})`,
@@ -64,6 +84,8 @@ export function generateRscEntry(ctx: EntryContext): string {
 import React from 'react';
 import ServerErrorFallback from '/.farm/rsc-entries/error-fallback.tsx';
 ${middlewareConfigImports}
+${mcpConfigImports}
+${mcpSource ? `${mcpSource.importSource}\nimport { mergePluginAPIRoutes } from '@farm.js/core/api/runtime';` : ""}
 import { registerAPIRouteShape } from '@farm.js/core/api/runtime';
 import {
   renderToReadableStream,
@@ -382,7 +404,41 @@ function registerApiRouteSources(fileModules, definitionModules, sourceCount) {
 }
 
 registerApiRouteSources(apiRouteModules, routeDefinitionModules, ${routeSourceRoots.length});
-
+${
+  mcpSource
+    ? `
+// mcp: the same plugin core's production server mounts, built from the mcp
+// config read from each config file, layers first.
+const farmNativeMCPPlugin = (() => {
+  const farmRuntimeConfigs = [${(ctx.mcpConfigPaths ?? [])
+    .map((_path, index) => `(FarmMCPConfigModule${index}.default || FarmMCPConfigModule${index})`)
+    .join(", ")}];
+  ${mcpSource.registerSource}
+  return farmNativeMCPPlugin;
+})();
+if (farmNativeMCPPlugin) {
+  const mountedRoutes = [...apiRouteMap.values()].map((route) => ({
+    path: route.path,
+    methods: [...route.methods],
+    endpoints: { ...route.handlers },
+  }));
+  // Rejects a plugin route that would replace an app endpoint.
+  for (const route of mergePluginAPIRoutes(mountedRoutes, [farmNativeMCPPlugin])) {
+    for (const method of route.pluginMethods ?? []) {
+      let target = apiRouteMap.get(route.path);
+      if (!target) {
+        target = { path: route.path, methods: [], handlers: {}, files: {}, sources: {} };
+        apiRouteMap.set(route.path, target);
+      }
+      target.methods.push(method);
+      target.handlers[method] = route.endpoints[method];
+      target.files[method] = 'plugin:' + farmNativeMCPPlugin.name;
+    }
+  }
+}
+`
+    : ""
+}
 async function handleAPIRequest(request) {
   const url = new URL(request.url);
   const match = matchAPIRouteAtBasePath(apiRouteMap, url.pathname, farmApiBasePath);

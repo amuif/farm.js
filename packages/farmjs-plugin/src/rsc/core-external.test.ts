@@ -128,6 +128,30 @@ describe("RSC core runtime bundling", () => {
     }
   });
 
+  it("rejects mcp.oauth, which the RSC server cannot serve yet", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "farm-rsc-mcp-oauth-"));
+    try {
+      linkRscFixtureDependencies(root);
+      const plugin = farmRsc().find((candidate) => candidate.name === "@farm.js/plugin/rsc:config");
+      const configHook = plugin!.config as (
+        config: Record<string, unknown>,
+        env: { command: "serve"; mode: string },
+      ) => Promise<any>;
+      await expect(
+        configHook(
+          {
+            root,
+            experimental: { serverComponents: true },
+            mcp: { oauth: { authorizationServers: ["https://auth.example.com"] } },
+          },
+          { command: "serve", mode: "development" },
+        ),
+      ).rejects.toThrow("mcp.oauth is not supported in RSC apps yet");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not prefix absolute Vite environment output paths with the project root", () => {
     const root = path.resolve("/workspace/app");
     const absoluteOutDir = path.join(root, ".nitro", "vite", "dist", "rsc");

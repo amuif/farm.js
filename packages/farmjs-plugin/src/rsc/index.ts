@@ -56,7 +56,11 @@ import { transformAutomaticOptimizedBoundaries } from "./automatic-optimized-bou
 import { resolveRscBuildOutputPath } from "./build-paths.js";
 import { assertRscPackageCompatibility } from "./compatibility.js";
 import { sendRscDevelopmentResponse } from "./dev-response.js";
-import { loadRscMiddlewareConfigModule } from "./middleware-config-module.js";
+import {
+  loadRscConfigPropertyModule,
+  loadRscMiddlewareConfigModule,
+} from "./middleware-config-module.js";
+import type { FarmMCPUserConfig } from "@farm.js/core/server";
 import fs from "fs/promises";
 import path from "path";
 import { devServableFileExists } from "../dev-static.js";
@@ -82,9 +86,13 @@ const {
 const { normalizeFarmDeploymentId } = require_(
   "@farm.js/core/deployment",
 ) as typeof import("@farm.js/core/deployment");
-const { getFarmLayerAliases, getFarmSourceRoots, resolveFarmLayers } = require_(
-  "@farm.js/core/server",
-) as typeof import("@farm.js/core/server");
+const {
+  getFarmLayerAliases,
+  getFarmSourceRoots,
+  resolveFarmLayers,
+  resolveFarmMCPConfig,
+  resolveFarmMCPPlugin,
+} = require_("@farm.js/core/server") as typeof import("@farm.js/core/server");
 const {
   readNodeRequestBody,
   resolveFarmServerConfig,
@@ -169,6 +177,13 @@ export interface FarmRscConfig {
    * @default { llmsTxt: { full: false } }
    */
   agent?: { llmsTxt?: boolean | FarmLlmsTxtUserConfig };
+  /**
+   * An MCP endpoint for agents, with the same options as core's top-level
+   * `mcp`. Requires `@farm.js/mcp`. Declare it directly in this config object:
+   * the server reads it, and only the bindings it uses, from this file.
+   * `oauth` is not supported in RSC apps yet.
+   */
+  mcp?: FarmMCPUserConfig;
 }
 
 /**
@@ -197,6 +212,7 @@ export function defineConfig(config: FarmRscConfig = {}): UserConfig {
     generateBuildId: config.generateBuildId,
     md: config.md,
     agent: config.agent,
+    mcp: config.mcp,
 
     // Vite server configuration
     server: {
@@ -218,6 +234,8 @@ export function defineConfig(config: FarmRscConfig = {}): UserConfig {
         srcDir: config.srcDir ?? "src",
         debug,
         bodySizeLimit: config.server?.bodySizeLimit,
+        // The dev API server mounts the MCP endpoint, as core's does.
+        ...(config.mcp ? { plugins: ({ root }) => resolveRscMCPPlugins(config.mcp, root) } : {}),
       }),
       farmRsc({
         debug,
@@ -302,6 +320,7 @@ const VIRTUAL_HYDRATE_ENTRY = "virtual:@farm.js/rsc/hydrate";
 const OPTIMIZED_BOUNDARY_ADAPTER = "@farm.js/plugin/rsc/optimized-boundary";
 const STRATA_PACKAGE = "@farming-labs/strata";
 const RSC_MIDDLEWARE_CONFIG_QUERY = "?farm-rsc-middleware";
+const RSC_MCP_CONFIG_QUERY = "?farm-rsc-mcp";
 const FARM_CORE_PACKAGE_ROOT = path.resolve(path.dirname(require_.resolve("@farm.js/core")), "..");
 const FARM_CONFIG_FILENAMES = [
   "farm.config.ts",
@@ -346,6 +365,23 @@ async function findFarmConfigPath(root: string): Promise<string | null> {
     }
   }
   return null;
+}
+
+/** Resolves `mcp` for an RSC app, rejecting what the RSC server cannot serve yet. */
+function resolveRscMCPConfig(input: FarmMCPUserConfig | undefined) {
+  const config = resolveFarmMCPConfig(input);
+  if (config.enabled && config.oauth) {
+    throw new Error(
+      "[Farm.js] mcp.oauth is not supported in RSC apps yet: the RSC server does not serve " +
+        "the protected-resource metadata. Remove oauth, or validate tokens in mcp.authorize.",
+    );
+  }
+  return config;
+}
+
+async function resolveRscMCPPlugins(input: FarmMCPUserConfig | undefined, root: string) {
+  const plugin = await resolveFarmMCPPlugin(resolveRscMCPConfig(input), { root });
+  return plugin ? [plugin] : [];
 }
 
 async function resolveMiddlewareConfigPaths(
@@ -639,6 +675,7 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
   let entryContext: EntryContext;
   let rscBuildRoot: string | undefined;
   const middlewareConfigModules = new Map<string, string>();
+  let mcpConfigCandidates: string[] | null = null;
 
   // Store for debugging
   const debug = options.debug ?? false;
@@ -752,8 +789,39 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
       enforce: "pre",
 
       resolveId(id) {
-        if (!id.endsWith(RSC_MIDDLEWARE_CONFIG_QUERY)) return null;
+        if (!id.endsWith(RSC_MIDDLEWARE_CONFIG_QUERY) && !id.endsWith(RSC_MCP_CONFIG_QUERY)) {
+          return null;
+        }
         return id.replace(/\\/g, "/");
+      },
+
+      // The MCP config is read from the Vite config file too, whose path is
+      // only known here. Entries are generated on load, after this runs.
+      async configResolved(resolved) {
+        if (!mcpConfigCandidates || !entryContext) return;
+        const configPaths = [...mcpConfigCandidates];
+        if (resolved.configFile) configPaths.push(path.resolve(resolved.configFile));
+        const mcpConfigPaths: string[] = [];
+        for (const configPath of new Set(configPaths)) {
+          const extracted = await loadRscConfigPropertyModule(configPath, "mcp");
+          if (extracted.kind === "unsupported") {
+            throw new Error(
+              `[Farm.js] Cannot read mcp for the RSC server from ${configPath}: ${extracted.reason}. ` +
+                "Declare mcp directly in defineConfig({ mcp: ... }).",
+            );
+          }
+          if (extracted.kind === "absent") continue;
+          const moduleId = `${configPath.replace(/\\/g, "/")}${RSC_MCP_CONFIG_QUERY}`;
+          middlewareConfigModules.set(moduleId, extracted.code);
+          mcpConfigPaths.push(moduleId);
+        }
+        if (mcpConfigPaths.length === 0) {
+          throw new Error(
+            "[Farm.js] The RSC server could not find the mcp config. " +
+              "Declare mcp directly in defineConfig({ mcp: ... }) in your Vite or Farm config file.",
+          );
+        }
+        entryContext.mcpConfigPaths = mcpConfigPaths;
       },
 
       load(id) {
@@ -820,6 +888,7 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
           middleware?: FarmMiddlewareConfig;
           md?: FarmMarkdownUserConfig | boolean;
           agent?: { llmsTxt?: boolean | FarmLlmsTxtUserConfig };
+          mcp?: FarmMCPUserConfig;
         };
         // Check if user enabled RSC in their config
         rscEnabled = c.experimental?.serverComponents === true;
@@ -860,6 +929,11 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
         }
 
         middlewareConfigModules.clear();
+        // The config files mcp is read from at runtime; the Vite config file is
+        // added once it is known, in configResolved.
+        mcpConfigCandidates = resolveRscMCPConfig(c.mcp).enabled
+          ? await resolveMiddlewareConfigPaths(root, c.layers)
+          : null;
         const middlewareConfigPaths: string[] = [];
         if (hasFarmMiddlewareConfig(c.middleware)) {
           const configPaths = await resolveMiddlewareConfigPaths(root, c.layers);

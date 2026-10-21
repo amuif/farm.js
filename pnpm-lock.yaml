@@ -1236,6 +1236,9 @@ importers:
       '@farm.js/core':
         specifier: workspace:*
         version: link:../../packages/farm
+      '@farm.js/mcp':
+        specifier: workspace:*
+        version: link:../../packages/farm-mcp
       picocolors:
         specifier: ^1.0.0
         version: 1.1.1

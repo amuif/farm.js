@@ -25,6 +25,8 @@ import {
   resolveAPIRouteEndpoint,
 } from "./route-manager";
 import { matchAPIRouteAtBasePath } from "./runtime";
+import { mergePluginAPIRoutes } from "./plugin-route-runtime";
+import type { PluginRoutesFactory } from "./route";
 import { sendWebResponse } from "../server/response";
 import { resolveFarmRequestURL } from "../server/request";
 import type { FarmRequest } from "../types";
@@ -55,6 +57,15 @@ export interface FarmApiPluginOptions {
   bodySizeLimit?: number | string;
   /** Same-origin path where canonical `/api` routes are served. @default "/api" */
   basePath?: string;
+  /**
+   * Plugins whose `routes` hook adds API routes, such as the `mcp` endpoint.
+   * Merged after file routes, as core's dev server and production bundle do.
+   */
+  plugins?: (context: {
+    root: string;
+  }) =>
+    | readonly { name: string; routes?: PluginRoutesFactory }[]
+    | Promise<readonly { name: string; routes?: PluginRoutesFactory }[]>;
 }
 
 export interface ApiRoute {
@@ -78,6 +89,12 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
   // API routes cache
   let apiRoutesCache: Map<string, ApiRoute> = new Map();
   let apiRouterHandler: ((req: Request) => Promise<Response>) | null = null;
+  let projectRoot = process.cwd();
+  // File routes plus plugin routes, when plugins add any. Without plugins,
+  // requests match the discovery cache directly, as before.
+  let pluginMergedRoutes: Map<string, ApiRoute> | null = null;
+  const servedRoutes = (): Map<string, ApiRoute> => pluginMergedRoutes ?? apiRoutesCache;
+  let routePlugins: Promise<readonly { name: string; routes?: PluginRoutesFactory }[]> | undefined;
   let discoveryComplete = false;
   let discoveryPromise: Promise<void> | null = null;
   let discoveryError: unknown;
@@ -212,7 +229,17 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
 
   // Create API router handler
   const createRouter = async (): Promise<void> => {
-    const totalEndpoints = Array.from(apiRoutesCache.values()).reduce(
+    const plugins = options.plugins
+      ? await (routePlugins ??= Promise.resolve(options.plugins({ root: projectRoot })))
+      : [];
+    pluginMergedRoutes = plugins.length
+      ? new Map(
+          mergePluginAPIRoutes([...apiRoutesCache.values()], plugins, undefined, {
+            bodySizeLimit,
+          }).map((route) => [route.path, route]),
+        )
+      : null;
+    const totalEndpoints = Array.from(servedRoutes().values()).reduce(
       (sum, route) => sum + route.methods.length,
       0,
     );
@@ -225,7 +252,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
         const method = request.method.toUpperCase();
         const pathname = url.pathname;
 
-        const match = matchAPIRouteAtBasePath(apiRoutesCache, pathname, basePath);
+        const match = matchAPIRouteAtBasePath(servedRoutes(), pathname, basePath);
         if (!match) {
           return new Response(JSON.stringify({ error: "Not Found" }), {
             status: 404,
@@ -264,6 +291,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
     enforce: "pre",
 
     configureServer(server: ViteDevServer) {
+      projectRoot = server.config.root;
       // Discover API routes in /api directory
       const discoverFileRoutes = async (apiDir: string): Promise<void> => {
         const fs = await import("fs");
@@ -441,7 +469,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
       // Expose API router for other plugins
       (server as any).__farmApi__ = {
         getHandler: () => apiRouterHandler,
-        getRoutes: () => apiRoutesCache,
+        getRoutes: () => servedRoutes(),
         isReady: () => discoveryComplete,
         waitForDiscovery,
       };
@@ -455,7 +483,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
 
           if (discoveryPromise) await waitForDiscovery();
 
-          if (!matchAPIRouteAtBasePath(apiRoutesCache, pathname, basePath)) {
+          if (!matchAPIRouteAtBasePath(servedRoutes(), pathname, basePath)) {
             return next();
           }
 
@@ -486,7 +514,7 @@ export function farmApiPlugin(options: FarmApiPluginOptions = {}): Plugin {
             const currentPathname = currentUrl.split("?")[0];
             if (
               currentPathname !== pathname &&
-              !matchAPIRouteAtBasePath(apiRoutesCache, currentPathname, basePath)
+              !matchAPIRouteAtBasePath(servedRoutes(), currentPathname, basePath)
             ) {
               // Rewritten off the API surface; let the page pipeline serve it.
               return next();

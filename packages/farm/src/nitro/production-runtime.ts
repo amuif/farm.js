@@ -50,6 +50,7 @@ export {
   resolveFarmNotFoundMetadata,
 } from "../metadata";
 export { createFarmMetadataRouteResponse } from "../metadata-route";
+export { generateNativeMCPPluginSource } from "./native-mcp-source";
 export { createFarmAgentRobots } from "../agent-crawlers";
 export { createFarmApiCatalogResponse } from "../api-catalog";
 export {

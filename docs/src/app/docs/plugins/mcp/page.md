@@ -534,7 +534,7 @@ says so. Its [`?actions` view](/docs/markdown#describe-a-pages-forms) adds the t
 An agent reading the page can then call `contact_submit` through MCP instead of posting the form.
 The match uses the form's method and action against the endpoints this server exposes, including
 a custom `api.baseURL`. Forms bound to server functions in a React Server Components app are not
-matched yet.
+matched yet; see [React Server Components apps](#react-server-components-apps) for MCP itself.
 
 ## Connect a client
 
@@ -628,3 +628,29 @@ Normal applications do not need this manual form.
 
 The runnable [`examples/api-mcp`](https://github.com/farming-labs/farm.js/tree/main/examples/api-mcp)
 shows two endpoint-backed tools and a standalone search tool sharing one authorization policy.
+
+## React Server Components apps
+
+Apps built with `defineConfig` from `@farm.js/plugin/rsc` take the same `mcp` option:
+
+```ts title="vite.config.ts"
+import { defineConfig } from "@farm.js/plugin/rsc";
+import { productQuery } from "./src/actions/server-query.ts";
+import { GET as listUsers } from "./src/api/users/route.ts";
+
+export default defineConfig({
+  mcp: {
+    authorize: authorizeAgent,
+    tools: [{ endpoint: listUsers, name: "list_users" }, productQuery],
+  },
+});
+```
+
+Declare `mcp` directly in the config object. The RSC server reads that property, and only the
+imports and declarations it uses, from the config file, so your Vite plugins never load at runtime.
+The config file then has to be statically readable: an `mcp` that comes from a spread, or
+top-level code other than imports and declarations, fails at startup with the reason. `oauth` is
+not supported in RSC apps yet. Validate tokens in `authorize` instead.
+
+[`examples/rsc-demo`](https://github.com/farming-labs/farm.js/tree/main/examples/rsc-demo) serves
+an endpoint tool and a server query this way.

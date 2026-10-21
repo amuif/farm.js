@@ -116,6 +116,9 @@ export interface EntryContext {
    */
   middlewareConfigPaths?: string[];
 
+  /** Modules that export `{ mcp }`, read from the app's config files, in layer order. */
+  mcpConfigPaths?: string[];
+
   /** Resolved Markdown mirror settings (core's `md`): `.md` pages and `Accept: text/markdown`. */
   markdown?: FarmMarkdownResolvedConfig;
 
