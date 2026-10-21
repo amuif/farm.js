@@ -399,7 +399,19 @@ export default defineConfig({
 });
 ```
 
-`md: false` turns mirrors off. `page.md` sources and `llms.txt` are not part of the RSC pipeline yet.
+`md: false` turns mirrors off. `page.md` sources are not part of the RSC pipeline yet.
+
+RSC apps also serve `/llms.txt` by default, listing their static pages with links to these mirrors.
+It is answered after middleware, like a page. Set `agent.llmsTxt` with the same options as core;
+`full: true` adds `/llms-full.txt`, and `false` turns both off:
+
+```ts title="vite.config.ts"
+export default defineConfig({
+  agent: { llmsTxt: { full: true, exclude: ["/admin/[...rest]"] } },
+});
+```
+
+`llms.ts` and `llms-full.ts` route files are not supported in RSC apps yet.
 
 ## Production notes
 

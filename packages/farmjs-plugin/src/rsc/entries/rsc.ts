@@ -117,6 +117,20 @@ const farmDeploymentId = ${JSON.stringify(ctx.deploymentId)};
 const farmApiBasePath = ${JSON.stringify(ctx.apiBasePath ?? "/api")};
 const farmMarkdownConfig = ${JSON.stringify(ctx.markdown ?? { enabled: false, expose: [], cache: false, includeMetadata: true })};
 `;
+  if (ctx.llmsTxt?.enabled) {
+    code += `import {
+  collectFarmLlmsTxtPages,
+  createFarmDefaultLlmsTxt,
+  createFarmLlmsFullRenderer,
+  createFarmLlmsMarkdownReader,
+  createFarmMetadataRouteResponse,
+  renderFarmLlmsFullTxt,
+} from '@farm.js/core/internal/production-runtime';
+
+const farmLlmsTxtConfig = ${JSON.stringify(ctx.llmsTxt)};
+const farmLlmsFullRenderer = createFarmLlmsFullRenderer({ revalidate: farmLlmsTxtConfig.revalidate });
+`;
+  }
   if (ctx.actionsEnabled) {
     code += `import {
   createServerActionRequestErrorResponse,
@@ -663,7 +677,14 @@ async function handleFarmRequest(request, context) {
   if (apiResponse) {
     return applyProductionMiddlewareHeaders(apiResponse, middlewareHeaders);
   }
-  if (isFarmAPIPathname(url.pathname, farmApiBasePath) || isFarmAPIPathname(url.pathname)) {
+  ${
+    ctx.llmsTxt?.enabled
+      ? `// agent.llmsTxt: answered after middleware, so its redirects and headers apply.
+  const llmsResponse = await handleFarmLlmsTxtRequest(request, context);
+  if (llmsResponse) return applyProductionMiddlewareHeaders(llmsResponse, middlewareHeaders);
+  `
+      : ""
+  }if (isFarmAPIPathname(url.pathname, farmApiBasePath) || isFarmAPIPathname(url.pathname)) {
     return applyProductionMiddlewareHeaders(new Response(
       JSON.stringify({ error: 'API route not found', pathname: url.pathname }),
       { status: 404, headers: { 'Content-Type': 'application/json' } },
@@ -1094,7 +1115,89 @@ async function handleFarmRequest(request, context) {
   }
 }
 
-/**
+${
+  ctx.llmsTxt?.enabled
+    ? `/**
+ * agent.llmsTxt, built the same way as core's production server: /llms.txt
+ * lists the app's static pages and links to their Markdown mirrors, and
+ * /llms-full.txt inlines each mirror.
+ */
+function createFarmLlmsTxtContext(request, context, full) {
+  const origin = new URL(request.url).origin;
+  const pages = collectFarmLlmsTxtPages(
+    pageRoutes.map(({ module, segments }) => ({
+      // Dynamic routes have no single URL, so the collector skips them.
+      pattern: '/' + segments
+        .map((part) => (part.isDynamic ? '[' + part.segment + ']' : part.segment))
+        .join('/'),
+      metadata: module && module.metadata,
+    })),
+    {
+      origin,
+      markdown: farmMarkdownConfig,
+      include: farmLlmsTxtConfig.include,
+      exclude: farmLlmsTxtConfig.exclude,
+    },
+  );
+  const rootLayout = getRouteModules('/page.tsx', layouts, 'layout')[0];
+  return {
+    defaults: createFarmDefaultLlmsTxt({
+      origin,
+      pages,
+      config: farmLlmsTxtConfig,
+      rootMetadata: rootLayout && rootLayout.metadata,
+    }),
+    // Pages are read in-process through the full handler with a fresh request,
+    // so the caller's cookies never shape the file. HEAD reads nothing.
+    markdown: full && request.method.toUpperCase() !== 'HEAD'
+      ? createFarmLlmsMarkdownReader((page) => handler(page, context))
+      : async () => null,
+  };
+}
+
+async function handleFarmLlmsTxtRequest(request, context) {
+  const { origin, pathname } = new URL(request.url);
+  const kind = pathname === '/llms.txt'
+    ? 'llms'
+    : farmLlmsTxtConfig.full && pathname === '/llms-full.txt' ? 'llms-full' : null;
+  if (!kind) return null;
+  const method = request.method.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } });
+  }
+  const llmsContext = createFarmLlmsTxtContext(request, context, kind === 'llms-full');
+  // A page that times out is left out, and that response is neither reused nor cached.
+  let complete = true;
+  const renderFull = (shared) =>
+    renderFarmLlmsFullTxt(llmsContext.defaults, {
+      origin,
+      readMarkdown: llmsContext.markdown,
+      onIncomplete: () => {
+        complete = false;
+        if (shared) shared.incomplete();
+      },
+    });
+  // HEAD reads no pages, so it neither waits for nor fills the shared render.
+  const body = kind === 'llms'
+    ? llmsContext.defaults
+    : method === 'HEAD'
+      ? await renderFull()
+      : await farmLlmsFullRenderer(origin, renderFull, (settled) => {
+          complete = settled;
+        });
+  const response = createFarmMetadataRouteResponse(
+    kind,
+    body,
+    { revalidate: complete ? farmLlmsTxtConfig.revalidate : 0 },
+    { method, request },
+  );
+  if (!complete) response.headers.set('cache-control', 'no-store');
+  return response;
+}
+
+`
+    : ""
+}/**
  * Serves a page's Markdown mirror (\`/page.md\` or \`Accept: text/markdown\`) by
  * rendering the page through the normal request path, so middleware and sign-in
  * gates apply; every other request renders as usual, and HTML pages advertise

@@ -46,6 +46,7 @@ import {
 } from "@farm.js/core/vite";
 import { generateRscEntry } from "./entries/rsc.js";
 import { resolveMarkdownConfig, type FarmMarkdownUserConfig } from "@farm.js/core/markdown";
+import type { FarmLlmsTxtUserConfig } from "@farm.js/core/internal/production-runtime";
 import { generateSsrEntry } from "./entries/ssr.js";
 import { generateErrorFallbackEntry } from "./entries/error-fallback.js";
 import { generateClientEntry, serverFnTransportErrorClientRuntime } from "./entries/client.js";
@@ -90,6 +91,7 @@ const {
   resolveFarmI18nConfig,
   createFarmRequestBodyErrorResponse,
   createDefaultErrorMarkup,
+  resolveFarmLlmsTxtConfig,
 } = require_(
   "@farm.js/core/internal/production-runtime",
 ) as typeof import("@farm.js/core/internal/production-runtime");
@@ -159,6 +161,14 @@ export interface FarmRscConfig {
    * @default true
    */
   md?: FarmMarkdownUserConfig | boolean;
+  /**
+   * Agent-facing files. `llmsTxt` serves `/llms.txt`, an index of the app's
+   * static pages that links to their Markdown mirrors, and with `full: true`
+   * also `/llms-full.txt`, which inlines them. Same options as core's
+   * `agent.llmsTxt`; `false` turns it off.
+   * @default { llmsTxt: { full: false } }
+   */
+  agent?: { llmsTxt?: boolean | FarmLlmsTxtUserConfig };
 }
 
 /**
@@ -186,6 +196,7 @@ export function defineConfig(config: FarmRscConfig = {}): UserConfig {
     deploymentId: config.deploymentId,
     generateBuildId: config.generateBuildId,
     md: config.md,
+    agent: config.agent,
 
     // Vite server configuration
     server: {
@@ -808,6 +819,7 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
           i18n?: FarmI18nUserConfig | false;
           middleware?: FarmMiddlewareConfig;
           md?: FarmMarkdownUserConfig | boolean;
+          agent?: { llmsTxt?: boolean | FarmLlmsTxtUserConfig };
         };
         // Check if user enabled RSC in their config
         rscEnabled = c.experimental?.serverComponents === true;
@@ -939,6 +951,8 @@ export default function farmRsc(options: FarmRscPluginOptions = {}): Plugin[] {
           }),
           deploymentId,
           markdown: resolveMarkdownConfig(c.md),
+          // Core's default for an app without docs: llms.txt on, llms-full.txt off.
+          llmsTxt: resolveFarmLlmsTxtConfig(c.agent?.llmsTxt ?? { full: false }),
           // Resolved the same way core resolves it for the config, so RSC and
           // non-RSC apps match middleware against the same pathname.
           i18n: resolveFarmI18nConfig(c.i18n, {

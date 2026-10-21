@@ -58,6 +58,9 @@ export {
   createFarmLlmsMarkdownReader,
   renderFarmLlmsFullTxt,
   createFarmLlmsFullRenderer,
+  resolveFarmLlmsTxtConfig,
+  type FarmLlmsTxtUserConfig,
+  type ResolvedFarmLlmsTxtConfig,
 } from "../llms-txt";
 export {
   applyProductionMiddlewareHeaders,
