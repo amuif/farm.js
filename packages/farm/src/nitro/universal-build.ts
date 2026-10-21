@@ -564,6 +564,27 @@ function isNitroRollupExternal(id: string): boolean {
 
 const FARM_METADATA_IMAGE_WASM_PREFIX = "\0farm-metadata-image-wasm:";
 
+/**
+ * Replaces React's `process.env.NODE_ENV` checks with "production", so a bundle
+ * that includes React keeps only its production builds. React's entry files pick
+ * the development or production build at runtime from that check; left in place,
+ * both builds ship.
+ */
+function createReactProductionModePlugin() {
+  const nodeEnvExpression = ["process", "env", "NODE_ENV"].join(".");
+  return {
+    name: "farm-react-production-mode",
+    transform(code: string, id: string) {
+      const normalizedId = id.replace(/\\/g, "/");
+      const isReactRuntime =
+        normalizedId.includes("/node_modules/react/") ||
+        normalizedId.includes("/node_modules/react-dom/");
+      if (!isReactRuntime || !code.includes(nodeEnvExpression)) return null;
+      return { code: code.split(nodeEnvExpression).join('"production"'), map: null };
+    },
+  };
+}
+
 function createMetadataImageWasmPlugin(): Rollup.Plugin {
   return {
     name: "farm-metadata-image-wasm",
@@ -4582,24 +4603,7 @@ async function buildSSRInMemory(
         metadataImageRoutes.some((image) => image.sourceType === "module")
           ? [createMetadataImageWasmPlugin()]
           : []),
-        {
-          name: "farm-react-production-mode",
-          enforce: "pre",
-          transform(code, id) {
-            const normalizedId = id.replace(/\\/g, "/");
-            const isReactRuntime =
-              normalizedId.includes("/node_modules/react/") ||
-              normalizedId.includes("/node_modules/react-dom/");
-            const nodeEnvExpression = ["process", "env", "NODE_ENV"].join(".");
-
-            if (!isReactRuntime || !code.includes(nodeEnvExpression)) return null;
-
-            return {
-              code: code.split(nodeEnvExpression).join('"production"'),
-              map: null,
-            };
-          },
-        },
+        { ...createReactProductionModePlugin(), enforce: "pre" as const },
         farmServerOnlyEntriesPlugin(),
         farmPlugin({ ...config, isolatedClientBoundaryModules }, pluginManager),
         farmEnvironmentFunctionsPlugin(),
@@ -9745,10 +9749,15 @@ export default async function farmNitroEventHandler(event) {
     },
     rollupConfig: {
       external: nitroRollupExternal,
-      plugins:
-        hasGeneratedMetadataImages && !useExternalMetadataImageRuntime
+      plugins: [
+        ...(hasGeneratedMetadataImages && !useExternalMetadataImageRuntime
           ? [createMetadataImageWasmPlugin()]
-          : [],
+          : []),
+        // Workers bundle React here rather than loading it from node_modules.
+        // Unenv rewrites `process` before Nitro's own replacements run, so
+        // React's development builds would otherwise ship next to production.
+        ...(isCloudflareWorker ? [createReactProductionModePlugin()] : []),
+      ],
     },
     // Keep the public Nitro boolean intact for build hooks. Farm replaces
     // Nitro's minifier only when no custom OXC transform was requested.

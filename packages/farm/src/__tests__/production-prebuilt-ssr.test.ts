@@ -5189,6 +5189,11 @@ export default function OpenGraphImage() {
       expect(serverOutput).toContain("renderToReadableStream");
       expect(serverOutput).not.toMatch(/\bfrom\s*["']react(?:-dom(?:\/server)?)?["']/);
       expect(serverOutput).not.toMatch(/\bimport\s*\(?\s*["']react(?:-dom(?:\/server)?)?["']/);
+      // React picks its development or production build from NODE_ENV at
+      // runtime unless the bundler replaces the check; the worker ships only
+      // production. This warning exists only in React's development builds.
+      expect(serverOutput).not.toContain("Each child in a list should have a unique");
+      expect(serverOutput).not.toMatch(/process\.env\.NODE_ENV|\.env\.NODE_ENV\s*===/);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
