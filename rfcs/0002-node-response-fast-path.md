@@ -1,6 +1,6 @@
 # RFC 0002: Owned page responses and a Node response fast path
 
-- Status: Proposed
+- Status: Implemented in 0.1.29 (see [Outcome](#outcome))
 - Tracking issue: none yet
 - Scope: production page responses in Farm's generated server (all renderers; the fast Node
   response applies to Node presets only)
@@ -175,6 +175,42 @@ Three pull requests, each shippable on its own:
 No configuration flag: the change is internal and the acceptance tests cover the observable
 behavior. If a regression appears, reverting PR 2 restores today's Node sending.
 
+## Outcome
+
+Shipped in 0.1.29 as four pull requests instead of the three above:
+
+1. [#2118](https://github.com/farming-labs/farm.js/pull/2118): ownership and in-place header
+   steps, as designed. About 9% less server CPU per page request (375 to 342 µs).
+2. [#2120](https://github.com/farming-labs/farm.js/pull/2120): on `node-server`, the Nitro entry
+   turns the final response into a `FastResponse` when its body is still the string Farm built.
+   About 3% less CPU and 5% lower latency.
+3. [#2122](https://github.com/farming-labs/farm.js/pull/2122): use srvx's own `Request` instead
+   of copying it to swap the abort signal. About 1%.
+4. [#2124](https://github.com/farming-labs/farm.js/pull/2124): buffered pages are built as
+   `FastResponse` from the start (`farmOwnedHtmlResponse`), so the HTML is never encoded twice.
+   About 6% less CPU for both identity and brotli responses.
+
+Together, page requests on the benchmark app went from about 375 to about 310 µs of server CPU.
+The runs were on different builds and machine loads, so treat the total as an estimate.
+
+Differences from the design above:
+
+- **Where `FastResponse` is created.** Only `node-server` registers it
+  (`useFarmNodePageResponse`). Other Node function targets keep the Web `Response`.
+- **Buffered-HTML tracking.** Pages built as `FastResponse` are tracked by the response object.
+  Every other response keeps the existing tracking by `response.body`, so the planned third pull
+  request was not needed.
+- **Steps that only checked for a body.** The preload budget and compression's eligibility check
+  read `response.body` just to know a body exists. They now skip that read when the HTML is
+  already known, and compression takes a `lazyBody` flag so it does not create a body only to
+  cancel it.
+- **Nitro route rules.** `routeRules.headers` are applied after the handler returns, and h3 then
+  rebuilds the response from its body. Pages with route-rule headers keep the chunked path. They
+  stay correct, only without the speedup.
+- **Compressed bodies.** Sending compressed pages in one write was built and measured, and showed
+  no difference beyond noise, so it was not shipped. Compression itself (about 86 µs for brotli
+  on an 8 KB page) dominates that path.
+
 ## Alternatives considered
 
 - **Patching the global `Response`** (srvx's `patchGlobalRequest` style) would speed up every
@@ -188,9 +224,15 @@ behavior. If a regression appears, reverting PR 2 restores today's Node sending.
 ## Future work
 
 - Precompute the static parts of each route's document head at build time and assemble the
-  document in one pass, instead of the current prefix, root and head string scans.
+  document in one pass, instead of the current prefix, root and head string scans. Measured after
+  the rollout, those scans cost about 8 to 9 µs per request, and only 2 to 3 µs can be removed
+  without changing how unusual documents are handled.
 - Skip creating the Web `Request` for page requests on Node when no middleware, plugin or route
-  needs it.
+  needs it. srvx builds a native `Request` (about 15 µs), and Farm and user code call
+  `new Request(request, ...)`, which needs one, so this is not a small change.
+- Most of the remaining cost is React's renderer (rendering, then encoding its output to bytes)
+  and Node's HTTP layer. A server compiler that emits HTML strings from JSX would be the next
+  large step.
 
 ## Open questions
 
