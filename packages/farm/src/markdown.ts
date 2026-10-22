@@ -1,3 +1,4 @@
+import { _withFarmResponseHeaders } from "./owned-response";
 import { stripFarmBasePath } from "./base-path";
 import { _findFarmMCPEndpointTool, type FarmMCPEndpointTool } from "./mcp-catalog";
 import { createFarmMarkdownViewResponse, FARM_MARKDOWN_VIEW_PARAMS } from "./markdown-view";
@@ -393,14 +394,9 @@ export function applyMarkdownNegotiationHeaders(
     return response;
   }
 
-  const headers = new Headers(response.headers);
-  appendHeaderToken(headers, "Vary", "Accept");
-  headers.append("Link", `<${alternatePath}>; rel="alternate"; type="text/markdown"`);
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
+  return _withFarmResponseHeaders(response, (headers) => {
+    appendHeaderToken(headers, "Vary", "Accept");
+    headers.append("Link", `<${alternatePath}>; rel="alternate"; type="text/markdown"`);
   });
 }
 

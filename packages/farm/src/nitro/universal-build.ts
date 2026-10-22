@@ -4905,6 +4905,24 @@ function getConfiguredSetCookieHeaders(headers) {
   return value ? [value] : [];
 }
 
+// Owned responses (core's owned-response.ts, RFC 0002) are edited in place.
+function farmEditableHeaders(response) {
+  return (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).has(response)
+    ? response.headers
+    : new Headers(response.headers);
+}
+
+function farmResponseWithHeaders(response, headers) {
+  if (!headers || headers === response.headers) return response;
+  const output = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).add(output);
+  return output;
+}
+
 function applyConfiguredResponseHeaders(response, pathname) {
   if (preparedHeaderRoutes.length === 0) return response;
   const pathnameSegments = splitRuntimePath(pathname).map(decodeRouteSegment);
@@ -4919,12 +4937,12 @@ function applyConfiguredResponseHeaders(response, pathname) {
       const normalizedKey = header.key.toLowerCase();
       if (normalizedKey === "set-cookie") {
         if (getConfiguredSetCookieHeaders(currentHeaders).includes(header.value)) continue;
-        if (!headers) headers = new Headers(response.headers);
+        if (!headers) headers = farmEditableHeaders(response);
         headers.append("Set-Cookie", header.value);
       } else {
         const currentValue = currentHeaders.get(header.key);
         if (currentValue === header.value) continue;
-        if (!headers) headers = new Headers(response.headers);
+        if (!headers) headers = farmEditableHeaders(response);
         if (normalizedKey === "link") {
           appendFarmLinkHeader(headers, header.value);
         } else {
@@ -4934,12 +4952,7 @@ function applyConfiguredResponseHeaders(response, pathname) {
     }
   }
 
-  if (!headers) return response;
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+  return farmResponseWithHeaders(response, headers);
 }
 `.trim();
 }
@@ -4969,6 +4982,34 @@ export function generatePreloadResponseRuntimeSource(): string {
 // (plugins, CSP nonces, clone/tee) creates a new stream and falls back to
 // reading it, so a changed body is never paired with a stale string.
 const farmBufferedHtml = new WeakMap();
+
+// A Response Farm creates for this request. Later header steps edit it in place
+// instead of copying it; responses from app code are never owned. Same registry
+// as core's owned-response.ts (RFC 0002).
+function farmOwnedResponse(body, init) {
+  const response = new Response(body, init);
+  (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).add(response);
+  return response;
+}
+
+function isFarmOwnedResponseForPreload(response) {
+  return (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).has(response);
+}
+
+// Header-only rebuild: in place for an owned response, otherwise a copy Farm owns.
+function farmPreloadHeadersResponse(response, edit) {
+  if (isFarmOwnedResponseForPreload(response)) {
+    edit(response.headers);
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  edit(headers);
+  return farmOwnedResponse(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
 
 function rememberFarmBufferedHtml(response, html) {
   // Response.text() strips a leading BOM, so a BOM document keeps reading its
@@ -5002,13 +5043,9 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   const isBuffered = bufferedMarker === "1" || hasNoHtmlPreloads;
   if (!isHtml) {
     if (!isStreaming && !isBuffered) return response;
-    headers = new Headers(headers);
-    headers.delete("x-farm-preload-streaming");
-    headers.delete("x-farm-preload-buffered");
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
+    return farmPreloadHeadersResponse(response, (editable) => {
+      editable.delete("x-farm-preload-streaming");
+      editable.delete("x-farm-preload-buffered");
     });
   }
 
@@ -5022,42 +5059,44 @@ async function applyFarmPreloadBudget(response, pathname, request) {
     if (!headers.has("x-farm-preload-streaming") &&
         !headers.has("x-farm-preload-buffered") &&
         (managed.value || null) === headers.get("Link")) return response;
-    headers = new Headers(headers);
-    headers.delete("x-farm-preload-streaming");
-    headers.delete("x-farm-preload-buffered");
-    if (managed.value) headers.set("Link", managed.value);
-    else headers.delete("Link");
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
+    return farmPreloadHeadersResponse(response, (editable) => {
+      editable.delete("x-farm-preload-streaming");
+      editable.delete("x-farm-preload-buffered");
+      if (managed.value) editable.set("Link", managed.value);
+      else editable.delete("Link");
     });
   }
 
   // Keep the document/header budget semantics (including unchanged Link
   // formatting), but do not consume and re-encode a proven preload-free body.
-  headers = new Headers(headers);
-  headers.delete("x-farm-preload-streaming");
-  headers.delete("x-farm-preload-buffered");
   const ownedHtml = hasNoHtmlPreloads ? undefined : getFarmOwnedBufferedHtml(response);
   const html = hasNoHtmlPreloads ? "" : (ownedHtml ?? await response.text());
   const managed = manageFarmDocumentPreloads(html, linkHeader, farmPreloadConfig);
   // A remembered document the budget left unchanged keeps its unread body.
   const reusesBody = hasNoHtmlPreloads || (ownedHtml !== undefined && managed.html === html);
   if (ownedHtml !== undefined && !reusesBody) response.body?.cancel().catch(() => {});
-  if (managed.linkHeader) headers.set("Link", managed.linkHeader);
-  else headers.delete("Link");
-  if (managed.html !== html) headers.delete("Content-Length");
   reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
     ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
     : undefined);
-  const output = new Response(reusesBody ? response.body : managed.html, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+  const applyBudgetHeaders = (editable) => {
+    editable.delete("x-farm-preload-streaming");
+    editable.delete("x-farm-preload-buffered");
+    if (managed.linkHeader) editable.set("Link", managed.linkHeader);
+    else editable.delete("Link");
+    if (managed.html !== html) editable.delete("Content-Length");
+  };
+  if (reusesBody) return farmPreloadHeadersResponse(response, applyBudgetHeaders);
+  const rebuiltHeaders = new Headers(headers);
+  applyBudgetHeaders(rebuiltHeaders);
   // A rebuilt document is still a complete string Farm holds.
-  return reusesBody ? output : rememberFarmBufferedHtml(output, managed.html);
+  return rememberFarmBufferedHtml(
+    farmOwnedResponse(managed.html, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: rebuiltHeaders,
+    }),
+    managed.html,
+  );
 }
 `.trim();
 }
@@ -7694,7 +7733,7 @@ async function handleFarmRequestInContext(
       url.search,
     );
     if (redirectMatch) {
-      return new Response("Redirecting to " + redirectMatch.destination, {
+      return farmOwnedResponse("Redirecting to " + redirectMatch.destination, {
         status: redirectMatch.statusCode,
         headers: { Location: redirectMatch.destination },
       });
@@ -7818,7 +7857,7 @@ async function handleFarmRequestInContext(
       );
       const docsHeaders = new Headers(wrappedDocsResponse.headers);
       docsHeaders.set("x-farm-preload-buffered", "1");
-      return applyProductionMiddlewareHeaders(new Response(wrappedDocsResponse.body, {
+      return applyProductionMiddlewareHeaders(farmOwnedResponse(wrappedDocsResponse.body, {
         status: wrappedDocsResponse.status,
         statusText: wrappedDocsResponse.statusText,
         headers: docsHeaders,
@@ -7895,7 +7934,7 @@ async function handleFarmRequestInContext(
   ) {
     const method = request.method.toUpperCase();
     const specResponse = method === "GET" || method === "HEAD"
-      ? new Response(method === "HEAD" ? null : JSON.stringify(farmOpenAPIReference.spec), {
+      ? farmOwnedResponse(method === "HEAD" ? null : JSON.stringify(farmOpenAPIReference.spec), {
           status: 200,
           headers: {
             "Content-Type": "application/json; charset=utf-8",
@@ -7903,7 +7942,7 @@ async function handleFarmRequestInContext(
             "X-Content-Type-Options": "nosniff",
           },
         })
-      : new Response("Method Not Allowed", {
+      : farmOwnedResponse("Method Not Allowed", {
           status: 405,
           headers: {
             "Allow": "GET, HEAD",
@@ -7919,7 +7958,7 @@ async function handleFarmRequestInContext(
   ) {
     const method = request.method.toUpperCase();
     const response = method === "GET" || method === "HEAD"
-      ? new Response(method === "HEAD" ? null : farmOpenAPIReference.html, {
+      ? farmOwnedResponse(method === "HEAD" ? null : farmOpenAPIReference.html, {
           status: 200,
           headers: {
             "Content-Type": "text/html; charset=utf-8",
@@ -7927,7 +7966,7 @@ async function handleFarmRequestInContext(
             "X-Content-Type-Options": "nosniff",
           },
         })
-      : new Response("Method Not Allowed", {
+      : farmOwnedResponse("Method Not Allowed", {
           status: 405,
           headers: {
             "Allow": "GET, HEAD",
@@ -8046,7 +8085,7 @@ async function handleFarmRequestInContext(
 
   // Preserve the explicit JSON 404 for misses below the configured local API path.
   if (isFarmLocalAPIPathname(pathname)) {
-    return applyProductionMiddlewareHeaders(new Response(
+    return applyProductionMiddlewareHeaders(farmOwnedResponse(
       JSON.stringify({ error: "API route not found", pathname }),
       { status: 404, headers: { "Content-Type": "application/json" } }
     ), middlewareHeaders);
@@ -8062,7 +8101,7 @@ async function handleFarmRequestInContext(
     );
     if (trailingSlashLocation) {
       return applyProductionMiddlewareHeaders(
-        new Response(null, {
+        farmOwnedResponse(null, {
           status: 308,
           headers: { Location: trailingSlashLocation },
         }),
@@ -8105,7 +8144,7 @@ async function handleFarmRequestInContext(
             status: 200,
             durationMs: Date.now() - requestStartTime,
           });
-          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(cachedPPRShell, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(cachedPPRShell, {
             status: 200,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -8608,7 +8647,7 @@ async function handleFarmRequestInContext(
               });
             }
           );
-          return applyProductionMiddlewareHeaders(new Response(streamedDocument, {
+          return applyProductionMiddlewareHeaders(farmOwnedResponse(streamedDocument, {
             status: pageStatus,
             headers: { ...responseHeaders, "x-farm-preload-streaming": "1" },
           }), middlewareHeaders);
@@ -8749,7 +8788,7 @@ async function handleFarmRequestInContext(
           durationMs: Date.now() - requestStartTime,
         });
 
-        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
+        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
           fullHtml,
           { 
             status: pageStatus,
@@ -8783,7 +8822,7 @@ async function handleFarmRequestInContext(
           status: redirect.status,
           durationMs: Date.now() - requestStartTime,
         });
-        return applyProductionMiddlewareHeaders(new Response(null, {
+        return applyProductionMiddlewareHeaders(farmOwnedResponse(null, {
           status: redirect.status,
           headers: {
             Location: redirectUrl,
@@ -8855,7 +8894,7 @@ async function handleFarmRequestInContext(
             status: errorStatus,
             durationMs: Date.now() - requestStartTime,
           });
-          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(errorDocument, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(errorDocument, {
             status: errorStatus,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -8890,7 +8929,7 @@ async function handleFarmRequestInContext(
         farmResolvedRuntimeConfig.basePath,
         getFarmTheme(request)
       );
-      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
+      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
         fallbackDocument,
         {
           status: errorStatus,
@@ -8921,7 +8960,7 @@ async function handleFarmRequestInContext(
       status: 404,
       durationMs: Date.now() - requestStartTime,
     });
-    return applyProductionMiddlewareHeaders(new Response(
+    return applyProductionMiddlewareHeaders(farmOwnedResponse(
       createFarmMarkdownErrorBody(404, pathname, applyFarmBasePath("/", farmResolvedRuntimeConfig.basePath)),
       {
         status: 404,
@@ -9018,7 +9057,7 @@ async function handleFarmRequestInContext(
       durationMs: Date.now() - requestStartTime,
     });
 
-    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(fullHtml, {
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(fullHtml, {
       status: 404,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
@@ -9033,7 +9072,7 @@ async function handleFarmRequestInContext(
       farmResolvedRuntimeConfig.basePath,
       getFarmTheme(request)
     );
-    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(new Response(
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
       fallbackDocument,
       {
         status: 404,
@@ -9100,7 +9139,7 @@ async function handleFarmPluginRequest(request, runtimeOptions, adapterContext) 
   headers.delete("content-length");
   headers.delete("x-farm-preload-streaming");
   headers.set("x-farm-preload-buffered", getFarmBufferedPreloadMarker(html));
-  return rememberFarmBufferedHtml(new Response(html, {
+  return rememberFarmBufferedHtml(farmOwnedResponse(html, {
     status: response.status,
     statusText: response.statusText,
     headers,

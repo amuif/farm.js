@@ -1,3 +1,4 @@
+import { _withFarmResponseHeaders } from "../owned-response";
 import type { FarmPlugin, FarmPluginContext } from "../plugin";
 import type { FarmRequest, FarmResponse } from "../types";
 import { pipeline, Readable } from "node:stream";
@@ -215,14 +216,7 @@ function compressResponse(response: Response, encoding: SupportedEncoding): Resp
 }
 
 function varyIdentityResponse(response: Response): Response {
-  const headers = new Headers(response.headers);
-  appendVary(headers, "Accept-Encoding");
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+  return _withFarmResponseHeaders(response, (headers) => appendVary(headers, "Accept-Encoding"));
 }
 
 /**
