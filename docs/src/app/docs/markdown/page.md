@@ -198,6 +198,9 @@ Markdown mirrors call the rendered page, strip scripts/styles and elements hidde
 Content without any `hidden` text (case-insensitive) skips hidden-element parsing. Any occurrence
 still uses the same attribute-aware parser, including quoted values, revealable content, and forms.
 
+When a layout row needs spaces between adjacent items, conversion assembles the row once rather
+than copying it for each separator. Existing prose, letter-split words, and whitespace stay unchanged.
+
 **Terminal**
 
 ```bash

@@ -32,6 +32,60 @@ async function writeModule(root: string, relativePath: string, source: string): 
 }
 
 describe("development markdown-source middleware ordering", () => {
+  it("serves large layout rows through real HTML rendering and Markdown negotiation", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-rows-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    await writeModule(
+      root,
+      "src/app/rows/page.tsx",
+      `import React from "react";
+export default function Page() {
+  return <main><div>{Array.from({ length: 1000 }, (_, index) => <span key={index}>Item {index}</span>)}</div></main>;
+}`,
+    );
+    const server = await createServer({
+      root,
+      md: { includeMetadata: false },
+      images: { provider: "none" },
+    });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    const origin = `http://localhost:${address.port}`;
+    const expected = `${Array.from({ length: 1_000 }, (_, index) => `Item ${index}`).join(" ")}\n`;
+    for (const suffix of [".md", ""]) {
+      const url = `${origin}/rows${suffix}`;
+      const response = await fetch(url, { headers: { accept: "text/markdown" } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      expect(await response.text()).toBe(expected);
+      for (const method of ["GET", "HEAD"]) {
+        const cached = await fetch(url, {
+          method,
+          headers: { accept: "text/markdown", "if-none-match": response.headers.get("etag")! },
+        });
+        expect(cached.status).toBe(304);
+        expect(await cached.text()).toBe("");
+      }
+    }
+  });
+
   it("serves actions from the rendered page through the real Markdown fetch path", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-actions-"));
     temporaryRoots.add(root);

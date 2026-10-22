@@ -468,10 +468,15 @@ function separateLayoutRowItems(source: string): string {
       }
       if (boundaries.length === 0) return container;
       if (items.filter(Boolean).every((text) => text.length === 1)) return container;
-      let separated = content;
-      for (const boundary of boundaries.reverse()) {
-        separated = `${separated.slice(0, boundary)} ${separated.slice(boundary)}`;
+      // Append disjoint spans in source order instead of slicing the growing
+      // row again for every separator.
+      let separated = "";
+      let start = 0;
+      for (const boundary of boundaries) {
+        separated += `${content.slice(start, boundary)} `;
+        start = boundary;
       }
+      separated += content.slice(start);
       return `<${tag}${attributes}>${separated}</${tag}>`;
     },
   );
