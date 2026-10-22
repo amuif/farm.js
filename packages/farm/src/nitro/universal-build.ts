@@ -6202,6 +6202,9 @@ const farmDocsHandler = ${
   contentDir: farmDocsResolvedConfig.contentDir || farmDocsResolvedConfig.config?.contentDir,
 }, {
   rootDir: farmDocsRuntimeRoot,
+  // A production build's content cannot change, so the adapter reads its
+  // navigation once instead of scanning the content directory per request.
+  immutableContent: true,
   clientEntry: "/__farm_client_js_src__",
   // Font CSS is merged into the client stylesheet; farm-fonts.css only exists when the
   // app has fonts, so linking it separately 404'd for apps without them.
@@ -9914,6 +9917,11 @@ function toFarmNodeResponse(request, response) {
         baseURL: "/",
       },
     ],
+    // A self-hosted Node server sends static files itself, so precompress them
+    // with gzip and let Nitro serve that by Accept-Encoding. Brotli at Nitro's
+    // fixed top quality cost a docs app ~20 s of build CPU for a small further
+    // saving. Serverless and edge targets sit behind a CDN that compresses.
+    ...(preset === "node-server" ? { compressPublicAssets: { gzip: true } } : {}),
     ...(prerenderRoutes.length > 0
       ? {
           prerender: {
