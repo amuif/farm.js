@@ -7834,9 +7834,13 @@ async function handleFarmRequestInContext(
   ${
     apiRoutes.length > 0
       ? `
-  const apiResponse = await handleAPIRequest(cloneFarmRequestWithContext(request));
-  if (apiResponse) {
-    return applyProductionMiddlewareHeaders(apiResponse, middlewareHeaders);
+  // Clone only for an API request: cloning a Request costs more than the match,
+  // and handleAPIRequest returns null without one.
+  if (matchLocalAPIRequest(request)) {
+    const apiResponse = await handleAPIRequest(cloneFarmRequestWithContext(request));
+    if (apiResponse) {
+      return applyProductionMiddlewareHeaders(apiResponse, middlewareHeaders);
+    }
   }
   `
       : ""
