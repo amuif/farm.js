@@ -4992,6 +4992,43 @@ function farmOwnedResponse(body, init) {
   return response;
 }
 
+// node-server registers srvx's FastResponse here (RFC 0002). A buffered page
+// built with it keeps its HTML as a string until something reads the body, and
+// srvx writes that string in one call; other runtimes keep the Web Response.
+let FarmNodePageResponse;
+function useFarmNodePageResponse(ResponseClass) {
+  FarmNodePageResponse = ResponseClass;
+}
+
+// HTML of buffered pages built as FarmNodePageResponse, keyed by the response:
+// its body always comes from this string, and looking it up never creates the
+// Web body the way reading response.body would.
+const farmLazyBufferedHtml = new WeakMap();
+
+function hasFarmContentType(headers) {
+  if (!headers) return false;
+  if (typeof headers.has === "function") return headers.has("content-type");
+  for (const key in headers) if (key.toLowerCase() === "content-type") return true;
+  return false;
+}
+
+// A complete HTML document Farm built for this request. Same contract as
+// farmOwnedResponse followed by rememberFarmBufferedHtml.
+function farmOwnedHtmlResponse(html, init) {
+  if (
+    !FarmNodePageResponse ||
+    typeof html !== "string" ||
+    html.charCodeAt(0) === 0xfeff ||
+    !hasFarmContentType(init?.headers)
+  ) {
+    return rememberFarmBufferedHtml(farmOwnedResponse(html, init), html);
+  }
+  const response = new FarmNodePageResponse(html, init);
+  (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).add(response);
+  farmLazyBufferedHtml.set(response, html);
+  return response;
+}
+
 function isFarmOwnedResponseForPreload(response) {
   return (globalThis[Symbol.for("farm.ownedResponses")] ??= new WeakSet()).has(response);
 }
@@ -5012,6 +5049,7 @@ function farmPreloadHeadersResponse(response, edit) {
 }
 
 function rememberFarmBufferedHtml(response, html) {
+  if (farmLazyBufferedHtml.has(response)) return response;
   // Response.text() strips a leading BOM, so a BOM document keeps reading its
   // body to preserve that behavior.
   if (typeof html === "string" && html.charCodeAt(0) !== 0xfeff && response.body) {
@@ -5021,6 +5059,8 @@ function rememberFarmBufferedHtml(response, html) {
 }
 
 function getFarmOwnedBufferedHtml(response) {
+  const lazyHtml = farmLazyBufferedHtml.get(response);
+  if (lazyHtml !== undefined) return lazyHtml;
   const body = response.body;
   if (!body || response.bodyUsed || body.locked) return undefined;
   return farmBufferedHtml.get(body);
@@ -5049,7 +5089,8 @@ async function applyFarmPreloadBudget(response, pathname, request) {
     });
   }
 
-  if (isStreaming || !isBuffered || response.body === null) {
+  const isLazyPage = farmLazyBufferedHtml.has(response);
+  if (isStreaming || !isBuffered || (!isLazyPage && response.body === null)) {
     const managed = manageFarmLinkHeaderPreloads(linkHeader, farmPreloadConfig);
     reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
       ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
@@ -5074,7 +5115,9 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   const managed = manageFarmDocumentPreloads(html, linkHeader, farmPreloadConfig);
   // A remembered document the budget left unchanged keeps its unread body.
   const reusesBody = hasNoHtmlPreloads || (ownedHtml !== undefined && managed.html === html);
-  if (ownedHtml !== undefined && !reusesBody) response.body?.cancel().catch(() => {});
+  if (ownedHtml !== undefined && !reusesBody && !isLazyPage) {
+    response.body?.cancel().catch(() => {});
+  }
   reportFarmPreloadWarnings(managed.warnings, managed.warnings.length > 0
     ? "route " + (pathname ?? getFarmRoutePathname(new URL(request.url).pathname))
     : undefined);
@@ -5089,14 +5132,11 @@ async function applyFarmPreloadBudget(response, pathname, request) {
   const rebuiltHeaders = new Headers(headers);
   applyBudgetHeaders(rebuiltHeaders);
   // A rebuilt document is still a complete string Farm holds.
-  return rememberFarmBufferedHtml(
-    farmOwnedResponse(managed.html, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: rebuiltHeaders,
-    }),
-    managed.html,
-  );
+  return farmOwnedHtmlResponse(managed.html, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: rebuiltHeaders,
+  });
 }
 `.trim();
 }
@@ -8144,7 +8184,7 @@ async function handleFarmRequestInContext(
             status: 200,
             durationMs: Date.now() - requestStartTime,
           });
-          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(cachedPPRShell, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(cachedPPRShell, {
             status: 200,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -8788,7 +8828,7 @@ async function handleFarmRequestInContext(
           durationMs: Date.now() - requestStartTime,
         });
 
-        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
+        return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(
           fullHtml,
           { 
             status: pageStatus,
@@ -8894,7 +8934,7 @@ async function handleFarmRequestInContext(
             status: errorStatus,
             durationMs: Date.now() - requestStartTime,
           });
-          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(errorDocument, {
+          return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(errorDocument, {
             status: errorStatus,
             headers: {
               "Content-Type": "text/html; charset=utf-8",
@@ -8929,7 +8969,7 @@ async function handleFarmRequestInContext(
         farmResolvedRuntimeConfig.basePath,
         getFarmTheme(request)
       );
-      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
+      return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(
         fallbackDocument,
         {
           status: errorStatus,
@@ -9057,7 +9097,7 @@ async function handleFarmRequestInContext(
       durationMs: Date.now() - requestStartTime,
     });
 
-    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(fullHtml, {
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(fullHtml, {
       status: 404,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
@@ -9072,7 +9112,7 @@ async function handleFarmRequestInContext(
       farmResolvedRuntimeConfig.basePath,
       getFarmTheme(request)
     );
-    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedResponse(
+    return rememberFarmBufferedHtml(applyProductionMiddlewareHeaders(farmOwnedHtmlResponse(
       fallbackDocument,
       {
         status: 404,
@@ -9139,11 +9179,11 @@ async function handleFarmPluginRequest(request, runtimeOptions, adapterContext) 
   headers.delete("content-length");
   headers.delete("x-farm-preload-streaming");
   headers.set("x-farm-preload-buffered", getFarmBufferedPreloadMarker(html));
-  return rememberFarmBufferedHtml(farmOwnedResponse(html, {
+  return farmOwnedHtmlResponse(html, {
     status: response.status,
     statusText: response.statusText,
     headers,
-  }), html);
+  });
 }
 
 ${generatePreloadResponseRuntimeSource()}
@@ -9228,7 +9268,7 @@ async function handleFarmFetch(request, context) {
         const response = await _runWithCurrentRequest(request, () =>
           _runWithAfterRequest(request, runRequest, context),
         );
-        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response, getFarmOwnedBufferedHtml(response))" : "response"};
+        return ${hasCompressionRuntime && !hasPluginRuntime ? "compressFarmResponse(request, response, getFarmOwnedBufferedHtml(response), farmLazyBufferedHtml.has(response))" : "response"};
       }),
     {
       onResponseFinished: typeof context?.onResponseFinished === "function"
@@ -9237,7 +9277,7 @@ async function handleFarmFetch(request, context) {
     },
   );
 }
-export { createFarmNodeRequestAbortSignal, getFarmOwnedBufferedHtml };
+export { createFarmNodeRequestAbortSignal, getFarmOwnedBufferedHtml, useFarmNodePageResponse };
 export default { fetch, lifecycle: farmProductionLifecycle };
   `.trim();
 }
@@ -9615,10 +9655,12 @@ async function buildNitroUniversal(
 // This file adapts Farm's Web fetch handler to Nitro's event handler contract.
 
 import { useNitroHooks } from '#nitro/runtime/app'
-import handler, { farmProductionLifecycle, createFarmNodeRequestAbortSignal${nodeAdapterModule ? ", getFarmOwnedBufferedHtml" : ""} } from './${ssrEntryFile}'${
+import handler, { farmProductionLifecycle, createFarmNodeRequestAbortSignal${nodeAdapterModule ? ", getFarmOwnedBufferedHtml, useFarmNodePageResponse" : ""} } from './${ssrEntryFile}'${
     nodeAdapterModule
       ? `
-import { FastResponse } from ${JSON.stringify(nodeAdapterModule)}`
+import { FastResponse } from ${JSON.stringify(nodeAdapterModule)}
+
+useFarmNodePageResponse(FastResponse)`
       : ""
   }
 
@@ -9753,6 +9795,8 @@ export default async function farmNitroEventHandler(event) {
 // misses and that response is sent as it is.
 function toFarmNodeResponse(request, response) {
   if (request.method === 'HEAD') return response
+  // Already a FastResponse (a buffered page built as one): srvx sends it as is.
+  if (typeof response._toNodeResponse === 'function') return response
   const html = getFarmOwnedBufferedHtml(response)
   if (html === undefined) return response
   return new FastResponse(html, {

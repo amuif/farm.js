@@ -91,9 +91,15 @@ function isCompressibleMediaType(mediaType: string | undefined): boolean {
   return COMPRESSIBLE_MEDIA_TYPE_SUFFIXES.some((suffix) => mediaType.endsWith(suffix));
 }
 
-function isCompressionEligible(request: Request, response: Response): boolean {
+function isCompressionEligible(
+  request: Request,
+  response: Response,
+  bufferedText: string | undefined,
+): boolean {
   if (
-    (request.method !== "HEAD" && !response.body) ||
+    // Known buffered text proves a body without reading response.body, which
+    // would create a lazy response's Web stream.
+    (request.method !== "HEAD" && bufferedText === undefined && !response.body) ||
     response.status === 204 ||
     response.status === 205 ||
     response.status === 304 ||
@@ -149,9 +155,10 @@ function compressBufferedResponse(
   response: Response,
   text: string,
   encoding: SupportedEncoding,
+  lazyBody: boolean,
 ): Response {
   const headers = compressedHeaders(response, encoding);
-  response.body?.cancel().catch(() => {});
+  if (!lazyBody) response.body?.cancel().catch(() => {});
   const input = Buffer.from(text);
   let cancelled = false;
   const body = new ReadableStream<Uint8Array>({
@@ -223,20 +230,23 @@ function varyIdentityResponse(response: Response): Response {
  * @internal Applies Farm's production response compression contract.
  * `bufferedText` is the complete body when the caller can prove it, as Farm can
  * for documents it buffered itself; streamed bodies keep per-chunk flushing.
+ * `lazyBody` says the response has not created its Web body yet (a Node
+ * FastResponse page), so there is no stream to cancel.
  */
 export function compressFarmResponse(
   request: Request,
   response: Response,
   bufferedText?: string,
+  lazyBody = false,
 ): Response {
-  if (!isCompressionEligible(request, response)) return response;
+  if (!isCompressionEligible(request, response, bufferedText)) return response;
   if (request.method === "HEAD") return varyIdentityResponse(response);
 
   const encoding = selectEncoding(request.headers.get("accept-encoding") ?? "");
   if (!encoding) return varyIdentityResponse(response);
   return bufferedText === undefined
     ? compressResponse(response, encoding)
-    : compressBufferedResponse(response, bufferedText, encoding);
+    : compressBufferedResponse(response, bufferedText, encoding, lazyBody);
 }
 
 export function createCompressionPlugin({

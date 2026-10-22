@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
-import { gunzipSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build } from "../build";
 import { resolveConfig } from "../config";
@@ -263,6 +263,16 @@ describe("production responses Farm owns", () => {
     expect(response.body.byteLength).toBe(0);
     expect(response.headers["x-middleware"]).toBe("1");
     expect(response.headers.link).toBe('</index.md>; rel="alternate"; type="text/markdown"');
+  });
+
+  it("decodes a brotli page body that matches the identity body", async () => {
+    const identity = await rawGet(`${base}/`, { headers: { "accept-encoding": "identity" } });
+    const response = await rawGet(`${base}/`, { headers: { "accept-encoding": "br" } });
+    expect(response.headers["content-encoding"]).toBe("br");
+    expect(response.headers.vary).toBe("Accept, Accept-Encoding");
+    expect(brotliDecompressSync(response.body).toString("utf8")).toBe(
+      identity.body.toString("utf8"),
+    );
   });
 
   it("decodes a gzip page body that matches the identity body", async () => {
