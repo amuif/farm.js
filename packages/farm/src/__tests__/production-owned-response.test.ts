@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build } from "../build";
@@ -38,8 +39,9 @@ const files: Record<string, string> = {
     dependencies: { "@farm.js/core": "workspace:*" },
   }),
   "src/app/globals.css": "",
-  "src/app/layout.tsx": `export default function Layout({ children }) { return <html><body>{children}</body></html>; }`,
-  "src/app/page.tsx": `export default function Page() { return <main>owned page</main>; }`,
+  // Farm writes the document around this layout, so a suspending page streams.
+  "src/app/layout.tsx": `export default function Layout({ children }) { return <div id="layout">{children}</div>; }`,
+  "src/app/page.tsx": `export default function Page() { return <main>owned page, café ☕</main>; }`,
   "src/app/stream/page.tsx": `
 import { Suspense } from "react";
 
@@ -73,6 +75,24 @@ export async function GET() {
 }
 `,
 };
+
+// fetch hides the transfer framing; read it off the wire.
+function rawGet(
+  url: string,
+  init: { method?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { method: init.method ?? "GET", headers: init.headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
+      );
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
 
 const headerCount = (response: Response, name: string) =>
   (response.headers.get(name) ?? "")
@@ -152,7 +172,7 @@ describe("production responses Farm owns", () => {
     for (let request = 0; request < 3; request++) {
       const response = await fetch(`${base}/`, { headers: { "accept-encoding": "identity" } });
       expect(response.status).toBe(200);
-      expect(await response.text()).toContain("owned page");
+      expect(await response.text()).toContain("owned page, café ☕");
       expect(response.headers.get("link")).toBe(
         '</index.md>; rel="alternate"; type="text/markdown"',
       );
@@ -190,7 +210,7 @@ describe("production responses Farm owns", () => {
     expect(response.status).toBe(200);
     // fetch decompresses transparently; the header shows what the server sent.
     expect(response.headers.get("content-encoding")).toBe("gzip");
-    expect(await response.text()).toContain("owned page");
+    expect(await response.text()).toContain("owned page, café ☕");
     expect(
       headerCount(response, "vary").filter((value) => value === "Accept-Encoding"),
     ).toHaveLength(1);
@@ -205,6 +225,44 @@ describe("production responses Farm owns", () => {
     }
     const inspected = await (await fetch(`${base}/api/inspect`)).json();
     expect(inspected).toEqual([["x-app", "1"]]);
+  });
+
+  it("sends a buffered page in one piece with its byte length", async () => {
+    const response = await rawGet(`${base}/`, { headers: { "accept-encoding": "identity" } });
+    expect(response.status).toBe(200);
+    expect(response.body.toString("utf8")).toContain("owned page, café ☕");
+    expect(response.headers["transfer-encoding"]).toBeUndefined();
+    expect(response.headers["content-length"]).toBe(String(response.body.byteLength));
+    expect(response.headers["content-type"]).toBe("text/html; charset=utf-8");
+    expect(response.headers.link).toBe('</index.md>; rel="alternate"; type="text/markdown"');
+    expect(
+      response.headers["set-cookie"]?.filter((cookie) => cookie.startsWith("visit=")),
+    ).toHaveLength(1);
+  });
+
+  it("keeps streaming a page that suspends", async () => {
+    const response = await rawGet(`${base}/stream`, { headers: { "accept-encoding": "identity" } });
+    expect(response.status).toBe(200);
+    expect(response.headers["transfer-encoding"]).toBe("chunked");
+    expect(response.headers["content-length"]).toBeUndefined();
+    expect(response.body.toString("utf8")).toContain("slow part");
+  });
+
+  it("sends the not-found page with its status and byte length", async () => {
+    const response = await rawGet(`${base}/missing-page`, {
+      headers: { "accept-encoding": "identity" },
+    });
+    expect(response.status).toBe(404);
+    expect(response.headers["content-length"]).toBe(String(response.body.byteLength));
+    expect(response.headers["x-middleware"]).toBe("1");
+  });
+
+  it("answers HEAD for a buffered page without a body", async () => {
+    const response = await rawGet(`${base}/`, { method: "HEAD" });
+    expect(response.status).toBe(200);
+    expect(response.body.byteLength).toBe(0);
+    expect(response.headers["x-middleware"]).toBe("1");
+    expect(response.headers.link).toBe('</index.md>; rel="alternate"; type="text/markdown"');
   });
 
   it("decodes a gzip page body that matches the identity body", async () => {

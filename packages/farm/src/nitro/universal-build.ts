@@ -9237,7 +9237,7 @@ async function handleFarmFetch(request, context) {
     },
   );
 }
-export { createFarmNodeRequestAbortSignal };
+export { createFarmNodeRequestAbortSignal, getFarmOwnedBufferedHtml };
 export default { fetch, lifecycle: farmProductionLifecycle };
   `.trim();
 }
@@ -9604,13 +9604,23 @@ async function buildNitroUniversal(
   // Create the Nitro event handler adapter. Nitro accepts plain event handler
   // functions, so keep this entry dependency-free for standalone output.
   const nitroEntryPath = path.join(ssrOutputDir, "nitro-entry.mjs");
+  // node-server already bundles srvx for its server entry, and srvx writes a
+  // FastResponse string body directly (RFC 0002). Other presets keep the Web
+  // Response and no extra import.
+  const nodeAdapterModule =
+    preset === "node-server" ? resolveNitroRuntimeDependency(root, "srvx/node") : null;
 
   const nitroEntryCode = `
 // Farm.js Nitro Entry
 // This file adapts Farm's Web fetch handler to Nitro's event handler contract.
 
 import { useNitroHooks } from '#nitro/runtime/app'
-import handler, { farmProductionLifecycle, createFarmNodeRequestAbortSignal } from './${ssrEntryFile}'
+import handler, { farmProductionLifecycle, createFarmNodeRequestAbortSignal${nodeAdapterModule ? ", getFarmOwnedBufferedHtml" : ""} } from './${ssrEntryFile}'${
+    nodeAdapterModule
+      ? `
+import { FastResponse } from ${JSON.stringify(nodeAdapterModule)}`
+      : ""
+  }
 
 export { farmProductionLifecycle }
 
@@ -9721,22 +9731,46 @@ export default async function farmNitroEventHandler(event) {
   })
 
   // Nitro records asset compression negotiation on the event response. Merge
-  // Farm's cache signals there so H3 preserves both sets of Vary values.
+  // Farm's cache signals there so H3 preserves both sets of Vary values. Only
+  // merge into a Vary Nitro set: any event header makes H3 rebuild the response
+  // around its body, and without one H3 keeps Farm's Vary as it is.
   const farmVary = response.headers.get('Vary')
-  if (farmVary) mergeVaryHeaders(event.res.headers, farmVary)
-  return response
-}
+  if (farmVary) {
+    const nitroHeaders = event.res.headers
+    if (nitroHeaders.has('Vary')) mergeVaryHeaders(nitroHeaders, farmVary)
+  }
+  return ${nodeAdapterModule ? "toFarmNodeResponse(request, response)" : "response"}
+}${
+    nodeAdapterModule
+      ? `
+
+// A page Farm still holds as one complete string is sent in a single write with
+// Content-Length, instead of srvx reading the Web stream chunk by chunk. Any
+// step that read, cloned or replaced the body made a new stream, so its lookup
+// misses and that response is sent as it is.
+function toFarmNodeResponse(request, response) {
+  if (request.method === 'HEAD') return response
+  const html = getFarmOwnedBufferedHtml(response)
+  if (html === undefined) return response
+  return new FastResponse(html, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  })
+}`
+      : ""
+  }
   `.trim();
 
   await fs.writeFile(nitroEntryPath, nitroEntryCode);
   const farmNodeServerEntryPath =
     preset === "node-server" ? path.join(ssrOutputDir, "farm-node-server-entry.mjs") : null;
-  if (farmNodeServerEntryPath) {
+  if (farmNodeServerEntryPath && nodeAdapterModule) {
     await fs.writeFile(
       farmNodeServerEntryPath,
       createFarmNodeServerEntry({
         nitroEntryFile: path.basename(nitroEntryPath),
-        nodeAdapterModule: resolveNitroRuntimeDependency(root, "srvx/node"),
+        nodeAdapterModule,
         server: config.server,
         websocketAdapterModule: resolveNitroRuntimeDependency(root, "crossws/adapters/node"),
       }),
