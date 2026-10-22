@@ -1238,6 +1238,14 @@ html[data-farm-docs-runtime="true"] figure.shiki code span {
   display: block !important;
 }
 
+/* Pixel Border draws the sidebar's left edge itself and leaves the right edge
+   to Fumadocs' `border-e` utility. That utility lives in a cascade layer, and
+   this app's unlayered Tailwind base resets every border, so it never shows.
+   Draw the right edge here so the sidebar closes against the page. */
+#nd-docs-layout aside#nd-sidebar {
+  border-right: 1px solid var(--color-fd-border);
+}
+
 #nd-docs-layout aside#nd-sidebar > div:first-child {
   padding-inline: calc(var(--fd-pixel-rail-width, 12px) + 18px);
 }
