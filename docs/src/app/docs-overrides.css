@@ -466,10 +466,12 @@
 
 /* ---------- tables: a code-panel frame, mono column labels, quiet row rules ---------- */
 
+/* The theme sets .fd-table-wrapper { border-radius: 0 !important }, so the code-block radius
+   has to be important too. */
 #farm-docs-root .fd-docs-content .fd-table-wrapper {
   margin: 28px 0;
   border: 1px solid var(--farm-code-line);
-  border-radius: 3px;
+  border-radius: 3px !important;
   background: var(--farm-code-bg);
 }
 #farm-docs-root .fd-docs-content .fd-table-wrapper > table {
@@ -556,6 +558,18 @@
 }
 
 /* ---------- lists, dividers, images ---------- */
+
+/* The CSS reset sets list-style: none on every list and the docs theme doesn't put markers back,
+   so Markdown lists (which have no class) get theirs here. Styled lists keep their own. */
+#farm-docs-root .fd-docs-content ul:not([class]) {
+  list-style-type: disc;
+}
+#farm-docs-root .fd-docs-content ul:not([class]) ul:not([class]) {
+  list-style-type: circle;
+}
+#farm-docs-root .fd-docs-content ol:not([class]) {
+  list-style-type: decimal;
+}
 
 #farm-docs-root .fd-docs-content :is(ol, ul) > li::marker {
   color: var(--farm-code-dim);
