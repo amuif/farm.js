@@ -5214,6 +5214,9 @@ function generateVirtualEntryCode(
     config.renderer,
     getFarmPresetRuntime(preset),
   );
+  // React renders a page that does not suspend in one synchronous pass with
+  // renderToString; see renderFarmElementSync.
+  const hasReactSyncRender = isReactRenderer(config.renderer);
   const rendererServerImports = isReactRenderer(config.renderer)
     ? `import * as React from "react";\nimport * as ReactDOMServer from "react-dom/server";${
         hasIsolatedClientGraphRuntime
@@ -5879,6 +5882,7 @@ ${routeClientGraphServerRuntime}
 
 const farmRendererStreamingCapabilities = ${JSON.stringify(rendererStreamingCapabilities)};
 const farmRendererName = ${JSON.stringify(config.renderer.name)};
+const farmReactSyncRender = ${JSON.stringify(hasReactSyncRender)};
 const farmRendererRuntime = ${JSON.stringify(getFarmPresetRuntime(preset))};
 const farmRendererRuntimeStreamingCapabilities = ReactDOMServer.capabilities &&
   ReactDOMServer.capabilities.streaming;
@@ -6361,8 +6365,10 @@ function escapeFarmHtmlAttribute(value) {
     .replace(/>/g, "&gt;");
 }
 
-async function renderFarmElement(ReactDOMServer, element) {
+async function renderFarmElement(ReactDOMServer, element, routeKey) {
   const streamErrors = [];
+  const syncHtml = renderFarmElementSync(ReactDOMServer, element, routeKey);
+  if (syncHtml !== undefined) return { html: syncHtml, shellHtml: syncHtml, streamErrors };
   let encoder;
   const normalizeChunk = function(chunk) {
     if (typeof chunk === "string") return (encoder ||= new TextEncoder()).encode(chunk);
@@ -6433,6 +6439,7 @@ async function renderFarmElement(ReactDOMServer, element) {
       }
       throwStreamError();
       const html = decodeChunks(chunks);
+      rememberFarmSyncRender(routeKey, html);
       return { html, shellHtml: html, streamErrors };
     }
 
@@ -6564,6 +6571,7 @@ async function renderFarmElement(ReactDOMServer, element) {
       await complete;
       throwStreamError();
       const html = decodeChunks(chunks);
+      rememberFarmSyncRender(routeKey, html);
       return { html, shellHtml: html, streamErrors };
     }
 
@@ -6602,6 +6610,45 @@ async function renderFarmElementToString(ReactDOMServer, element) {
   const html = await new Response(rendered.stream).text();
   if (rendered.streamErrors.length > 0) throw rendered.streamErrors[0];
   return html;
+}
+
+// Most pages render without suspending. React's renderToString renders them in
+// one synchronous pass with string output, about half the CPU of the streaming
+// renderer, and the same markup, except that React 19's streaming renderer adds
+// a doctype before an <html> root. A route uses it only after a streaming render
+// of that route finished without suspending (remembering whether that render
+// started with a doctype), so a page that suspends keeps streaming and renders
+// once. If such a route suspends later (a Suspense boundary left to the
+// client, marked <!--$!-->, or a throw), that request renders again through the
+// streaming path and the route streams for the rest of this server process.
+const farmSyncRenderRoutes = new Map();
+const farmStreamingRenderRoutes = new Set();
+const FARM_STREAMED_DOCTYPE = "<!DOCTYPE html>";
+
+function rememberFarmSyncRender(routeKey, streamedHtml) {
+  if (!farmReactSyncRender || routeKey === undefined) return;
+  if (!farmStreamingRenderRoutes.has(routeKey)) {
+    farmSyncRenderRoutes.set(routeKey, streamedHtml.startsWith(FARM_STREAMED_DOCTYPE));
+  }
+}
+
+function renderFarmElementSync(ReactDOMServer, element, routeKey) {
+  if (!farmReactSyncRender) return undefined;
+  const addsDoctype = routeKey === undefined ? undefined : farmSyncRenderRoutes.get(routeKey);
+  if (addsDoctype === undefined) return undefined;
+  if (typeof ReactDOMServer.renderToString !== "function") return undefined;
+  let html;
+  try {
+    html = ReactDOMServer.renderToString(element);
+  } catch {
+    html = undefined;
+  }
+  if (typeof html !== "string" || html.includes("<!--$!-->")) {
+    farmSyncRenderRoutes.delete(routeKey);
+    farmStreamingRenderRoutes.add(routeKey);
+    return undefined;
+  }
+  return addsDoctype && html.startsWith("<html") ? FARM_STREAMED_DOCTYPE + html : html;
 }
 
 function createFarmDocumentStream(contentStream, prefix, suffix, onComplete) {
@@ -8491,7 +8538,7 @@ async function handleFarmRequestInContext(
           }
 
           wrappedElement = wrapWithFarmIntegrationProviders(wrappedElement);
-          return renderFarmElement(ReactDOMServer, wrappedElement);
+          return renderFarmElement(ReactDOMServer, wrappedElement, route.pattern);
         };
         const renderedPage = ${
           hasMiddlewareRuntime
