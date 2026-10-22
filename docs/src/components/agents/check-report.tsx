@@ -7,6 +7,7 @@ import type {
   StoredAgentCheck,
 } from "../../lib/agents-check";
 import { IndexedLabel } from "../site-chrome";
+import { AgentCheckMadeWith } from "./check-made-with";
 import { AGENT_CHECK_ICONS } from "./check-icons";
 
 /**
@@ -114,17 +115,15 @@ export function AgentCheckReportSections({
       <section className="agent-check-hero farm-full-rule" aria-labelledby="agent-check-host">
         <div className="agent-check-hero-top">
           <IndexedLabel index="06.4" icon={ScanSearch} label="Agent-ready check" />
-          {report.farm ? (
-            <span className="agent-check-status" data-status="pass">
-              Built with Farm.js
-            </span>
-          ) : null}
         </div>
         <div className="agent-check-hero-body">
           <div className="min-w-0">
-            <h1 id="agent-check-host" tabIndex={-1}>
-              {host}
-            </h1>
+            <div className="agent-check-host">
+              <h1 id="agent-check-host" tabIndex={-1}>
+                {host}
+              </h1>
+              <AgentCheckMadeWith report={report} />
+            </div>
             <p className="agent-check-verdict">{verdict(report.score)}</p>
             <p className="agent-check-meta">
               {report.finalUrl} · {scannedAt} UTC · {(report.durationMs / 1000).toFixed(1)}s

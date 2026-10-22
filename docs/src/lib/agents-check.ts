@@ -28,6 +28,8 @@ export interface AgentCheckReport {
   durationMs: number;
   score: number;
   farm: boolean;
+  /** What the site looks built with ("Next.js", "Hugo"…), when the check could tell. */
+  framework?: string | null;
   checks: AgentCheckResult[];
 }
 

@@ -115,6 +115,71 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The host, then what it's made with: a small mark that says so on hover or focus. */
+.agent-check-host {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+}
+.agent-check-host > h1 {
+  min-width: 0;
+}
+.agent-check-made-with {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 7px;
+  background: rgb(255 255 255 / 0.03);
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+.agent-check-made-with > :is(img, svg) {
+  width: 16px;
+  height: 16px;
+}
+.agent-check-made-with::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  z-index: 10;
+  padding: 5px 9px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 5px;
+  background: #0a0a0a;
+  color: #ededed;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -4px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+.agent-check-made-with:is(:hover, :focus-visible) {
+  border-color: rgb(255 255 255 / 0.3);
+  background: rgb(255 255 255 / 0.06);
+}
+.agent-check-made-with:is(:hover, :focus-visible)::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-check-made-with,
+  .agent-check-made-with::after {
+    transition: none;
+  }
+}
 .agent-check-verdict {
   margin-top: 16px;
   color: #aaa;
