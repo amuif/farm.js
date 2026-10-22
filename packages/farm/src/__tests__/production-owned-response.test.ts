@@ -139,8 +139,13 @@ describe("production responses Farm owns", () => {
   }, 180_000);
 
   afterAll(async () => {
-    server?.kill();
-    if (root) await fs.rm(root, { recursive: true, force: true });
+    // Windows keeps the server directory locked until the process has exited.
+    if (server && server.exitCode === null && server.signalCode === null) {
+      const exited = new Promise((resolve) => server?.once("exit", resolve));
+      server.kill();
+      await exited;
+    }
+    if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it("adds each header once, request after request", async () => {
