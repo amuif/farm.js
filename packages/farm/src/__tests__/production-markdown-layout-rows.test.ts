@@ -8,6 +8,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build } from "../build";
 import { resolveConfig } from "../config";
 import { getAvailablePort } from "./dev-server-port";
+import {
+  literalRouteExposure,
+  literalRouteFiles,
+  verifyLiteralRouteExposure,
+} from "./markdown-route-contract";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const labels = Array.from({ length: 1_000 }, (_, index) => `Item ${index}`);
@@ -42,6 +47,7 @@ describe("production Markdown layout rows", () => {
     <div>ex<span>am</span><span>ple</span></div>
   </main>;
 }`,
+      ...literalRouteFiles,
     };
     for (const [file, source] of Object.entries(files)) {
       await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
@@ -50,7 +56,7 @@ describe("production Markdown layout rows", () => {
     const config = await resolveConfig(
       {
         root,
-        md: { includeMetadata: false },
+        md: { includeMetadata: false, expose: literalRouteExposure },
         images: { provider: "none" },
         generateBuildId: () => "markdown-rows-test",
       },
@@ -119,4 +125,8 @@ describe("production Markdown layout rows", () => {
       }
     },
   );
+
+  it("keeps literal exposure and dynamic fallbacks after a production build", async () => {
+    await verifyLiteralRouteExposure(origin);
+  });
 });

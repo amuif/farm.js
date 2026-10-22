@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ViteDevServer } from "vite";
 import { createServer } from "../server/create-server";
 import { getAvailablePort } from "./dev-server-port";
+import {
+  literalRouteExposure,
+  literalRouteFiles,
+  verifyLiteralRouteExposure,
+} from "./markdown-route-contract";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const temporaryRoots = new Set<string>();
@@ -606,4 +611,36 @@ export default function Layout({ children }) {
     expect(openResponse.headers.get("content-type")).toContain("text/markdown");
     await expect(openResponse.text()).resolves.toContain("open-notes-source");
   }, 30_000);
+
+  it("keeps literal exposure and dynamic fallbacks after a long list of route misses", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "farm-development-md-routes-"));
+    temporaryRoots.add(root);
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    for (const pkg of ["react", "react-dom"]) {
+      await fs.symlink(
+        await fs.realpath(path.join(packageRoot, "node_modules", pkg)),
+        path.join(root, "node_modules", pkg),
+        "junction",
+      );
+    }
+    await fs.writeFile(path.join(root, "package.json"), '{"private":true,"type":"module"}');
+    await writeModule(
+      root,
+      "src/app/layout.tsx",
+      `import React from "react";
+export default function Layout({ children }) { return <>{children}</>; }`,
+    );
+    for (const [file, source] of Object.entries(literalRouteFiles))
+      await writeModule(root, file, source);
+    const server = await createServer({
+      root,
+      md: { expose: literalRouteExposure, includeMetadata: false },
+      images: { provider: "none" },
+    });
+    servers.add(server);
+    await server.listen(await getAvailablePort());
+    const address = server.httpServer?.address();
+    if (!address || typeof address === "string") throw new Error("Missing dev server address");
+    await verifyLiteralRouteExposure(`http://localhost:${address.port}`);
+  });
 });

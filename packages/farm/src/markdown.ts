@@ -778,6 +778,8 @@ function routeMatches(pattern: string, pathname: string): boolean {
   if (pattern === pathname) {
     return true;
   }
+  // Only bracket segments can match anything other than the literal pattern.
+  if (!pattern.includes("[")) return false;
 
   let source = "";
   pattern.split("/").forEach((segment, index) => {

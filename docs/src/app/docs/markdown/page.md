@@ -174,6 +174,8 @@ mirrors, and `/llms-full.txt`, which inlines them. See
 ## Per-route options
 
 Routes can include a display title and cache override.
+Literal entries use exact matching without compiling a regular expression. Dynamic entries such
+as `/docs/[...slug]` retain pattern matching; the first matching entry supplies the route options.
 
 ```ts
 export default defineConfig({
