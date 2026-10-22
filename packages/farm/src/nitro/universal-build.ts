@@ -9716,11 +9716,14 @@ function resolveTrustedLocalOrigin(event, request) {
 // Export the event handler for Nitro
 export default async function farmNitroEventHandler(event) {
   registerFarmCloseHook()
-  // Some Node adapters abort their Request on normal IncomingMessage close.
-  // Use the same actual disconnect events as Farm's development server.
+  // Abort only on an actual disconnect, the same events as Farm's development
+  // server. srvx's Request already aborts that way (on a response close before
+  // it ended, never on a normal IncomingMessage close), so use it as is. Other
+  // Node adapters get a copy with Farm's own signal.
   const node = event.node
-  const webRequest = event.req?._request || event.req
-  const request = node?.req && node?.res
+  const srvxRequest = event.req?._request
+  const webRequest = srvxRequest || event.req
+  const request = !srvxRequest && node?.req && node?.res
     ? new Request(webRequest, { signal: createFarmNodeRequestAbortSignal(node.req, node.res) })
     : webRequest
   const response = await handler.fetch(request, {
