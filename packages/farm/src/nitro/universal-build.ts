@@ -732,7 +732,12 @@ function restoreLiteralModuleSpecifiers(
   // does not list, take the AST path.
   let needsAst = hasRequireTemplate;
   if (!needsAst) {
+    // Oxc can list one import() twice: a parenthesized destructuring such as
+    // `({ a } = await import(...))` is parsed as a cover grammar first.
+    const seenStarts = new Set<number>();
     for (const { moduleRequest } of parsed.module.dynamicImports) {
+      if (seenStarts.has(moduleRequest.start)) continue;
+      seenStarts.add(moduleRequest.start);
       const source = code.slice(moduleRequest.start, moduleRequest.end);
       if (!source.startsWith("`")) continue;
       const value = source.slice(1, -1);
@@ -779,6 +784,8 @@ function restoreLiteralModuleSpecifiers(
   let restored = "";
   let offset = 0;
   for (const { start, end, text } of replacements.sort((a, b) => a.start - b.start)) {
+    // Never apply overlapping replacements; one would corrupt the other.
+    if (start < offset) continue;
     restored += code.slice(offset, start) + text;
     offset = end;
   }

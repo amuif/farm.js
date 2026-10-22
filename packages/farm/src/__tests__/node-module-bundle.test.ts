@@ -207,6 +207,20 @@ describe("minifyFarmServerChunk", () => {
     expect(code).toContain("import(`./not-a-module.mjs`)");
   });
 
+  it("restores an import() the module record lists twice only once", async () => {
+    // Oxc records this import() twice: the parenthesized destructuring is parsed
+    // as a cover grammar first. Replacing the same span twice corrupted the chunk.
+    const code = await minifyFarmServerChunk(
+      'export async function load() { let i; try { ({ onFarmEvent: i } = await import("./_chunks/observability.mjs")); } catch {} return i; }',
+      "_virtual_farm-ssr-entry.mjs",
+      { keepNames: true, target: "esnext" },
+    );
+
+    expect(code.match(/import\("\.\/_chunks\/observability\.mjs"\)/g)).toHaveLength(1);
+    const module = await import(`data:text/javascript,${encodeURIComponent(code)}`);
+    expect(typeof module.load).toBe("function");
+  });
+
   it("falls back to the AST for escaped import() specifiers", async () => {
     const code = await minifyFarmServerChunk(
       'export const load = () => import("./_chunks/page-\u00e9.mjs");',
