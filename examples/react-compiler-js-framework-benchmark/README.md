@@ -68,7 +68,14 @@ pnpm summarize:official /absolute/path/to/js-framework-benchmark
 The summarizer requires exactly one result file per framework and operation, rejects stale
 duplicates, verifies keyed/type metadata, recomputes every median from its raw samples, validates
 the documented sample counts, and reads the current official CPU weights from the checked-out
-harness. For a deliberately reduced rerun, pass the actual counts explicitly, for example:
+harness. Each filename must match its JSON framework identity, and all CPU, memory, and size results
+within one variant must have the same full framework/version label. The report retains that label
+in `results.<variant>.framework`; different variants keep their own labels. Mixed-version results
+fail before replacing an existing report. These labels do not distinguish separate runs or
+unpublished builds of the same version; keep those results separately as well. Run
+`pnpm test:harness` for preparation and report-validation coverage.
+
+For a deliberately reduced rerun, pass the actual counts explicitly, for example:
 
 ```bash
 FARM_BENCHMARK_CPU_SAMPLES=3 \

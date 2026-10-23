@@ -61,7 +61,7 @@ function validateMetric(metric, expectedSamples, label) {
   assert.equal(metric.median, median(metric.values), `${label} median does not match its samples.`);
 }
 
-async function result(prefix, id, type, expectedSamples) {
+async function result(prefix, id, type, expectedSamples, expectedFramework) {
   const files = resultFiles.filter(
     (entry) => entry.startsWith(prefix) && entry.endsWith(`_${id}.json`),
   );
@@ -75,9 +75,21 @@ async function result(prefix, id, type, expectedSamples) {
   assert.equal(parsed.keyed, true, `${files[0]} is not marked keyed.`);
   assert.equal(parsed.type, type, `${files[0]} result type mismatch.`);
   assert(
-    parsed.framework.startsWith(prefix.slice(0, -1)),
+    typeof parsed.framework === "string" && parsed.framework.startsWith(prefix),
     `${files[0]} framework metadata mismatch.`,
   );
+  assert.equal(
+    files[0],
+    `${parsed.framework}_${id}.json`,
+    `${files[0]} framework metadata does not match its filename.`,
+  );
+  if (expectedFramework !== undefined) {
+    assert.equal(
+      parsed.framework,
+      expectedFramework,
+      `${files[0]} framework identity mismatch. Keep each version in a separate results directory.`,
+    );
+  }
   if (type === "cpu") {
     for (const metric of ["total", "script", "paint"]) {
       validateMetric(parsed.values[metric], expectedSamples, `${files[0]} ${metric}`);
@@ -90,18 +102,21 @@ async function result(prefix, id, type, expectedSamples) {
 
 const results = {};
 for (const [variant, prefix] of Object.entries(variants)) {
+  let framework;
   const cpu = {};
   const secondary = {};
   for (const id of cpuIds) {
     const expectedSamples = requestedCpuSamples + (id === "04_select1k" ? 10 : 0);
-    cpu[id] = (await result(prefix, id, "cpu", expectedSamples)).values;
+    const parsed = await result(prefix, id, "cpu", expectedSamples, framework);
+    framework ??= parsed.framework;
+    cpu[id] = parsed.values;
   }
   for (const id of secondaryIds) {
     const type = id.startsWith("2") ? "memory" : "size";
     const expectedSamples = type === "memory" ? requestedMemorySamples : 1;
-    secondary[id] = (await result(prefix, id, type, expectedSamples)).values;
+    secondary[id] = (await result(prefix, id, type, expectedSamples, framework)).values;
   }
-  results[variant] = { cpu, secondary };
+  results[variant] = { framework, cpu, secondary };
 }
 
 function geometricMean(values) {
