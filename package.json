@@ -1,7 +1,7 @@
 {
   "name": "farm.js",
   "private": true,
-  "description": "A full-stack framework for product-integrated applications",
+  "description": "The full-stack framework for the web and agents",
   "workspaces": [
     "packages/*",
     "examples/*",

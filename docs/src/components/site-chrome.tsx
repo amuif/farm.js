@@ -323,7 +323,7 @@ export function SiteFooter() {
           </div>
           <div className="px-4 py-4 md:min-h-[154px]">
             <p className="max-w-[15rem] font-mono text-[9px] font-normal uppercase leading-5 !tracking-[0.04em] text-white/42">
-              A Framework for Product integrated Apps
+              The framework for the web and agents
             </p>
           </div>
         </div>

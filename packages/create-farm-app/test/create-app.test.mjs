@@ -48,7 +48,7 @@ test("spaces the CLI banner and matches the website hero copy", async () => {
   }
 
   assert.equal(lines[8], "");
-  assert.match(lines[9], /Create FARMJS App.*a framework for product-integrated apps/);
+  assert.match(lines[9], /Create FARMJS App.*the framework for the web and agents/);
   assert.doesNotMatch(lines.join("\n"), /React (?:meta-)?framework/i);
 });
 

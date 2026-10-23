@@ -27,7 +27,7 @@ const banner = `
 
 program
   .name("farm")
-  .description("Farm.js CLI - A framework for product-integrated apps")
+  .description("Farm.js CLI - the framework for the web and agents")
   .version(version);
 program.addHelpText("beforeAll", `${banner}\n`);
 
