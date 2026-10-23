@@ -47,7 +47,8 @@ export function serializeMiddlewareCookie(
   if (resolved.expires) cookie += `; Expires=${resolved.expires.toUTCString()}`;
   cookie += `; Path=${resolved.path || "/"}`;
   if (resolved.domain) cookie += `; Domain=${resolved.domain}`;
-  if (resolved.secure) cookie += "; Secure";
+  // Browsers also discard SameSite=None without Secure, for the same reason.
+  if (resolved.secure || resolved.sameSite === "none") cookie += "; Secure";
   if (resolved.httpOnly) cookie += "; HttpOnly";
   if (resolved.sameSite) {
     cookie += `; SameSite=${resolved.sameSite.charAt(0).toUpperCase()}${resolved.sameSite.slice(1)}`;
