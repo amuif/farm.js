@@ -85,6 +85,7 @@ async function fixture(t) {
   return {
     records,
     output,
+    commonFile: path.join(commonRoot, "Common.ts"),
     file: (variant, id) => path.join(resultsRoot, `${frameworks[variant]}_${id}.json`),
     run: () =>
       spawnSync(process.execPath, [script, root], {
@@ -210,4 +211,103 @@ test("still validates raw sample counts and medians", async (t) => {
   record.values.total.median = 11;
   await writeFile(input.file("hybrid", "01_run1k"), JSON.stringify(record));
   await rejectsReport(input, /median does not match its samples/);
+});
+
+for (const variant of Object.keys(frameworks)) {
+  test(`rejects a zero ${variant} total median without replacing the report`, async (t) => {
+    const input = await fixture(t);
+    const id = "09_clear1k_x8";
+    const record = input.records[variant][id];
+    record.values.total = metric(0, 10);
+    await writeFile(input.file(variant, id), JSON.stringify(record));
+    await rejectsReport(input, /09_clear1k_x8.json total median must be positive and finite/);
+  });
+}
+
+for (const [reference, candidate] of [
+  ["react", "hybrid"],
+  ["off", "hybrid"],
+  ["react", "static"],
+]) {
+  for (const [kind, numerator, denominator] of [
+    ["overflow", 2 ** 1000, 2 ** -1000],
+    ["underflow", 2 ** -1000, 2 ** 1000],
+  ]) {
+    test(`rejects ${reference}/${candidate} ratio ${kind} from positive finite medians`, async (t) => {
+      const input = await fixture(t);
+      const id = "01_run1k";
+      for (const [variant, value] of [
+        [reference, numerator],
+        [candidate, denominator],
+      ]) {
+        const record = input.records[variant][id];
+        record.values.total = metric(value, 10);
+        await writeFile(input.file(variant, id), JSON.stringify(record));
+      }
+      await rejectsReport(
+        input,
+        new RegExp(`${reference}/${candidate} ${id} must be positive and finite`),
+      );
+    });
+  }
+}
+
+test("rejects a non-finite aggregate without serializing it as null", async (t) => {
+  const input = await fixture(t);
+  await writeFile(
+    input.commonFile,
+    `if (type === BenchmarkType.CPU) { benchmarkWeights = [${Array(9).fill(1e308).join(",")}]; }`,
+  );
+  await rejectsReport(input, /hybridVsOffOfficialWeightedSpeedup must be positive and finite/);
+});
+
+test("preserves isolated zero samples and zero non-total metrics", async (t) => {
+  const input = await fixture(t);
+  for (const [variant, records] of Object.entries(input.records)) {
+    for (const [id, record] of Object.entries(records)) {
+      if (record.type === "cpu") {
+        record.values.total.values[0] = 0;
+        record.values.paint = metric(0, record.values.paint.values.length);
+      } else {
+        record.values.DEFAULT = metric(0, record.values.DEFAULT.values.length);
+      }
+      await writeFile(input.file(variant, id), JSON.stringify(record));
+    }
+  }
+  const result = input.run();
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(input.output, "utf8"));
+  for (const [variant, records] of Object.entries(input.records)) {
+    for (const [id, record] of Object.entries(records)) {
+      const group = record.type === "cpu" ? "cpu" : "secondary";
+      assert.deepEqual(report.results[variant][group][id], record.values);
+    }
+  }
+  assert(Object.values(report.aggregate).every((value) => Number.isFinite(value) && value > 0));
+});
+
+test("replays recorded samples with exactly the same medians and aggregates", async (t) => {
+  const input = await fixture(t);
+  const recorded = JSON.parse(
+    await readFile(new URL("../BENCHMARK_RESULTS.json", import.meta.url), "utf8"),
+  );
+  await writeFile(
+    input.commonFile,
+    `if (type === BenchmarkType.CPU) { benchmarkWeights = [${recorded.harness.officialCpuWeights.join(",")}]; }`,
+  );
+  for (const [variant, records] of Object.entries(input.records)) {
+    for (const [id, record] of Object.entries(records)) {
+      const group = record.type === "cpu" ? "cpu" : "secondary";
+      record.values = recorded.results[variant][group][id];
+      await writeFile(input.file(variant, id), JSON.stringify(record));
+    }
+  }
+  const result = input.run();
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(input.output, "utf8"));
+  assert.deepEqual(report.aggregate, recorded.aggregate);
+  for (const variant of Object.keys(frameworks)) {
+    assert.deepEqual(report.results[variant].cpu, recorded.results[variant].cpu);
+    assert.deepEqual(report.results[variant].secondary, recorded.results[variant].secondary);
+  }
 });

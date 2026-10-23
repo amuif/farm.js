@@ -75,6 +75,11 @@ fail before replacing an existing report. These labels do not distinguish separa
 unpublished builds of the same version; keep those results separately as well. Run
 `pnpm test:harness` for preparation and report-validation coverage.
 
+CPU total medians, per-operation speedup ratios, and aggregate speedups must be positive and finite.
+Invalid calculations fail before replacing an existing report; they are not clamped or omitted.
+Individual zero total samples remain valid when their median is positive, and zero script, paint,
+memory, and size metrics remain supported. Valid samples and scoring formulas are unchanged.
+
 For a deliberately reduced rerun, pass the actual counts explicitly, for example:
 
 ```bash

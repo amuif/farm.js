@@ -94,6 +94,10 @@ async function result(prefix, id, type, expectedSamples, expectedFramework) {
     for (const metric of ["total", "script", "paint"]) {
       validateMetric(parsed.values[metric], expectedSamples, `${files[0]} ${metric}`);
     }
+    assert(
+      Number.isFinite(parsed.values.total.median) && parsed.values.total.median > 0,
+      `${files[0]} total median must be positive and finite.`,
+    );
   } else {
     validateMetric(parsed.values.DEFAULT, expectedSamples, `${files[0]} DEFAULT`);
   }
@@ -150,15 +154,20 @@ assert(
   "Official CPU weights must be positive finite numbers.",
 );
 
-const hybridVsReact = cpuIds.map(
-  (id) => results.react.cpu[id].total.median / results.hybrid.cpu[id].total.median,
-);
-const hybridVsOff = cpuIds.map(
-  (id) => results.off.cpu[id].total.median / results.hybrid.cpu[id].total.median,
-);
-const staticVsReact = cpuIds.map(
-  (id) => results.react.cpu[id].total.median / results.static.cpu[id].total.median,
-);
+function cpuSpeedups(reference, candidate) {
+  return cpuIds.map((id) => {
+    const ratio = results[reference].cpu[id].total.median / results[candidate].cpu[id].total.median;
+    assert(
+      Number.isFinite(ratio) && ratio > 0,
+      `CPU speedup ${reference}/${candidate} ${id} must be positive and finite.`,
+    );
+    return ratio;
+  });
+}
+
+const hybridVsReact = cpuSpeedups("react", "hybrid");
+const hybridVsOff = cpuSpeedups("off", "hybrid");
+const staticVsReact = cpuSpeedups("react", "static");
 
 const summary = {
   generatedAt: new Date().toISOString(),
@@ -190,6 +199,10 @@ const summary = {
   },
   results,
 };
+
+for (const [name, value] of Object.entries(summary.aggregate)) {
+  assert(Number.isFinite(value) && value > 0, `${name} must be positive and finite.`);
+}
 
 const output = path.resolve(
   process.env.FARM_BENCHMARK_OUTPUT || path.join(exampleRoot, "BENCHMARK_RESULTS.json"),
