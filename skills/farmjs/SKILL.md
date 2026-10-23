@@ -430,14 +430,18 @@ Use `definePlugin` for custom behavior:
 import { definePlugin } from "@farm.js/core";
 
 export const plugin = definePlugin({
-  name: "request-context-demo",
-  beforeRequest(req, _res, context) {
-    context.req.set("demo.path", req.url, {
-      exposeToPage: true,
-    });
+  name: "acme:request-context",
+  runtime: {
+    context({ request, req }) {
+      const path = new URL(request.url).pathname;
+      req.set("demo.path", path, { exposeToPage: true });
+      return { path };
+    },
   },
 });
 ```
+
+Hooks are grouped: `runtime` (`endpoints`, `start`, `context`, `before`, `after`, `error`, `close`), `router`, `render` (`before`, `html`), `build`, `dev`, and `client`. Flat hooks such as `beforeRequest`, `afterResponse`, and `transformHTML` are deprecated; see `PLUGIN_SYSTEM.md` for every option.
 
 Built-in server plugins are imported from `@farm.js/core/plugin/server`, including logger and compression helpers. Plugins run in order; use `enforce: "pre"` or `enforce: "post"` when order matters.
 
