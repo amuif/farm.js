@@ -20,6 +20,17 @@ rows, and installs self-contained production artifacts at:
 - `frameworks/keyed/farm-react-static`
 - `frameworks/keyed/farm-react-hybrid`
 
+Version labels come from the installed renderer and React packages, not a hard-coded release or
+dependency range. Preparation rejects mismatched React/React DOM versions. The Vite config deduplicates
+React and React DOM to the example's pinned copies, including imports from the workspace renderer.
+Compiler-marker validation accepts minifier quote styles but still rejects missing compilation,
+missing delegation, or the wrong reactivity mode. Run `pnpm test:harness` for these reporting guards.
+
+The checked-in results below describe their recorded versions and environment; they are not updated
+by preparing newer artifacts. Keep previous results separately when rerunning with a new version.
+When testing workspace compiler changes, build `@farm.js/react` first: a package version alone does
+not identify unpublished source edits or refresh its built compiler.
+
 Build the official `frameworks/keyed/react-hooks` entry and start the benchmark server. Validate
 identity before measuring:
 
