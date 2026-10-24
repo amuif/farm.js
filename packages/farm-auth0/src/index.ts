@@ -172,11 +172,14 @@ function unsignValue<T>(signed: string | undefined, secret: string): T | null {
   const signature = signed.slice(separator + 1);
   const expected = createHmac("sha256", secret).update(payload).digest("hex");
 
-  if (signature.length !== expected.length) {
-    return null;
-  }
-
-  if (!timingSafeEqual(Buffer.from(signature, "utf8"), Buffer.from(expected, "utf8"))) {
+  // Compare byte lengths: a multibyte signature can match the hex digest's
+  // character count, and timingSafeEqual throws on unequal buffers.
+  const signatureBytes = Buffer.from(signature, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  if (
+    signatureBytes.length !== expectedBytes.length ||
+    !timingSafeEqual(signatureBytes, expectedBytes)
+  ) {
     return null;
   }
 
