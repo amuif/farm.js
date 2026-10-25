@@ -11,6 +11,12 @@
  * The layout function is called by the wrapper to see what it returns. The wrapper is
  * keyed by the layout component, so a hot-reloaded layout remounts instead of reusing
  * another component's hooks.
+ *
+ * Renderers that export \`markFunctionComponent\` (Svelte, Vue) compile components that are
+ * plain functions too, so the wrapper could not tell a layout it may call from one it must
+ * mount, and would itself be mounted as one of their components. Under those renderers the
+ * layout is rendered inside the boundary element, the same tree the server renders, so
+ * hydration keeps the server markup.
  */
 export const FARM_LAYOUT_ELEMENT_CLIENT_SOURCE = String.raw`
 const farmLayoutComponentKeys = new WeakMap();
@@ -41,19 +47,23 @@ function unwrapFarmDocumentElement(node) {
   });
 }
 
+function farmLayoutBoundaryElement(pattern, content) {
+  return React.createElement(
+    "div",
+    {
+      "data-farm-layout-boundary": "true",
+      "data-farm-layout-pattern": pattern,
+      style: { display: "contents" },
+    },
+    content,
+  );
+}
+
 function FarmLayoutBoundary(props) {
   const Component = props.component;
   const layoutProps = { children: props.children, params: props.params };
   const boundary = function (content) {
-    return React.createElement(
-      "div",
-      {
-        "data-farm-layout-boundary": "true",
-        "data-farm-layout-pattern": props.pattern,
-        style: { display: "contents" },
-      },
-      content,
-    );
+    return farmLayoutBoundaryElement(props.pattern, content);
   };
   const isPlainFunction =
     typeof Component === "function" &&
@@ -69,6 +79,12 @@ function FarmLayoutBoundary(props) {
 }
 
 function createFarmLayoutElement(Component, pattern, children, params) {
+  if (typeof React.markFunctionComponent === "function") {
+    return farmLayoutBoundaryElement(
+      pattern,
+      React.createElement(Component, { children: children, params: params }),
+    );
+  }
   return React.createElement(
     FarmLayoutBoundary,
     { key: farmLayoutComponentKey(Component), component: Component, pattern: pattern, params: params },
