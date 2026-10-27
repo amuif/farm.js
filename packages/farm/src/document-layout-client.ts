@@ -35,9 +35,17 @@ function farmLayoutComponentKey(Component) {
   return key;
 }
 
+// React.Children is React's own; other renderers (Preact) hand children over as plain arrays.
+function farmChildrenToArray(children) {
+  if (React.Children) return React.Children.toArray(children);
+  return [children].flat(Infinity).filter(function (child) {
+    return child !== null && child !== undefined && typeof child !== "boolean";
+  });
+}
+
 function unwrapFarmDocumentElement(node) {
   if (!React.isValidElement(node) || node.type !== "html") return undefined;
-  const children = React.Children.toArray(node.props.children);
+  const children = farmChildrenToArray(node.props.children);
   const body = children.find(function (child) {
     return React.isValidElement(child) && child.type === "body";
   });

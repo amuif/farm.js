@@ -7218,7 +7218,7 @@ function stripFarmDocumentWrappers(markup) {
 function peelFarmDocumentPrefix(markup) {
   let inner = markup.replace(/^\\s+/, "");
   let hoisted = "";
-  const wrapper = /^<div\\b[^>]*style=["']display\\s*:\\s*contents["'][^>]*>/i;
+  const wrapper = /^<div\\b[^>]*style=["']display\\s*:\\s*contents;?\\s*["'][^>]*>/i;
   const hoistable = /${HOISTED_HEAD_ELEMENT.source}/i;
   let match;
   while ((match = wrapper.exec(inner) || hoistable.exec(inner))) {
