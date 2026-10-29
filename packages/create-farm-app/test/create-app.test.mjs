@@ -1115,7 +1115,11 @@ test("generates every official integration starter", async () => {
       assertNoSecretValues(environment);
 
       if (template.name === "ai") {
-        await readFile(path.join(generatedDir, "src/app/api/chat/route.ts"), "utf8");
+        const chatRoute = await readFile(
+          path.join(generatedDir, "src/app/api/chat/route.ts"),
+          "utf8",
+        );
+        assert.match(chatRoute, /authorize: \(\) => process\.env\.NODE_ENV === "development"/);
       } else {
         assert.match(
           await readFile(path.join(generatedDir, "farm.config.ts"), "utf8"),
