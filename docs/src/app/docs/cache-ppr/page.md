@@ -345,6 +345,9 @@ sends it with `X-Farm-PPR: bypass` and `Cache-Control: private, no-store`. The s
 request: it renders per request instead of advertising a shared `s-maxage`. Reads in middleware do
 not count, since they run before the page renders.
 
+`preloadQuery` from [`@farm.js/convex/server`](/docs/integrations/convex#caching) reads the request
+the same way, so a page that preloads live Convex data is never stored in the shared cache.
+
 ```tsx
 import { Suspense } from "react";
 
