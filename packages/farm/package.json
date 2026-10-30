@@ -190,6 +190,12 @@
       "internal/isolated-boundary": [
         "./dist/internal/isolated-boundary.d.ts"
       ],
+      "internal/island-value-store": [
+        "./dist/internal/island-value-store.d.ts"
+      ],
+      "internal/island-codec": [
+        "./dist/internal/island-codec.d.ts"
+      ],
       "internal/server-tree": [
         "./dist/internal/server-tree.d.ts"
       ],
@@ -648,10 +654,30 @@
       "import": "./dist/internal/isolated-boundary.mjs",
       "require": "./dist/internal/isolated-boundary.cjs"
     },
+    "./internal/island-value-store": {
+      "types": "./dist/internal/island-value-store.d.ts",
+      "import": "./dist/internal/island-value-store.mjs",
+      "require": "./dist/internal/island-value-store.cjs"
+    },
+    "./internal/island-codec": {
+      "types": "./dist/internal/island-codec.d.ts",
+      "import": "./dist/internal/island-codec.mjs",
+      "require": "./dist/internal/island-codec.cjs"
+    },
     "./internal/server-tree": {
       "types": "./dist/internal/server-tree.d.ts",
       "import": "./dist/internal/server-tree.mjs",
       "require": "./dist/internal/server-tree.cjs"
+    },
+    "./internal/form-actions": {
+      "types": "./dist/internal/form-actions.d.ts",
+      "import": "./dist/internal/form-actions.mjs",
+      "require": "./dist/internal/form-actions.cjs"
+    },
+    "./internal/form-actions-client": {
+      "types": "./dist/internal/form-actions-client.d.ts",
+      "import": "./dist/internal/form-actions-client.mjs",
+      "require": "./dist/internal/form-actions-client.cjs"
     },
     "./internal/build-runtime": {
       "types": "./dist/internal/build-runtime.d.ts",

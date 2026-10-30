@@ -76,13 +76,14 @@ describe("experimental.serverComponents from farm.config", () => {
     expect(farmAppUsesRscPipeline({}, createApp())).toBe(false);
   });
 
-  it("fails clearly for islands mode and for an explicit rsc mode without packages", () => {
-    expect(() =>
+  it("keeps islands mode off the rsc pipeline, and takes it for an explicit rsc mode without packages", () => {
+    // Islands mode runs on Farm's own pipeline, never the RSC one.
+    expect(
       farmAppUsesRscPipeline(
         { experimental: { serverComponents: { mode: "islands" } } },
         createApp(),
       ),
-    ).toThrow('{ mode: "islands" } is planned (RFC 0003) and not available yet');
+    ).toBe(false);
     // `{ mode: "rsc" }` takes the pipeline, which then names the packages to install.
     expect(
       farmAppUsesRscPipeline(
@@ -128,12 +129,11 @@ describe("experimental.serverComponents from farm.config", () => {
     expect(config.i18n).toEqual({ locales: ["en"], defaultLocale: "en" });
     expect(config.resolve).toEqual({ alias: { "#app": "/web" } });
 
-    const names = config.plugins.map((plugin: { name: string }) => plugin.name);
+    const plugins = config.plugins.flat(Infinity) as Array<{ name: string }>;
+    const names = plugins.map((plugin) => plugin.name);
     // The app's own Tailwind plugin is not added twice.
     expect(names).toEqual(["app-plugin", "@tailwindcss/vite:scan", "rsc", "nitro"]);
-    const byName = Object.fromEntries(
-      config.plugins.map((plugin: { name: string }) => [plugin.name, plugin]),
-    );
+    const byName = Object.fromEntries(plugins.map((plugin) => [plugin.name, plugin]));
     expect(byName.rsc.options).toEqual({
       serverHandler: false,
       entries: {
@@ -147,6 +147,32 @@ describe("experimental.serverComponents from farm.config", () => {
       preset: "node-server",
       outputDir: path.join(root, ".farm", ".output"),
     });
+  });
+
+  it("gives development Fast Refresh with core's plugin-react when the app has none", async () => {
+    // The RSC client bootstrap imports /@react-refresh in development.
+    const config = (await createFarmRscViteConfig(
+      { experimental: { serverComponents: true } },
+      { root: createApp(), command: "serve" },
+    )) as Record<string, any>;
+    const names = (config.plugins.flat(Infinity) as Array<{ name: string }>).map(
+      (plugin) => plugin.name,
+    );
+    expect(names).toContain("vite:react-refresh");
+  });
+
+  it("keeps the app's own plugin-react instead of adding core's", async () => {
+    const config = (await createFarmRscViteConfig(
+      {
+        experimental: { serverComponents: true },
+        vite: { plugins: [{ name: "vite:react-refresh" }, { name: "@tailwindcss/vite:scan" }] },
+      },
+      { root: createApp(), command: "serve" },
+    )) as Record<string, any>;
+    const names = (config.plugins.flat(Infinity) as Array<{ name: string }>).map(
+      (plugin) => plugin.name,
+    );
+    expect(names.filter((name) => name === "vite:react-refresh")).toHaveLength(1);
   });
 
   it("names the packages to install when they are missing", async () => {

@@ -1,3 +1,4 @@
+import { resolveServerActionsConfig } from "../server-action-security";
 import { resolveFarmServerComponentsMode } from "../server-components-mode";
 import { createBundledEnv } from "../env";
 import { generateNativeMCPPluginSource } from "./native-mcp-source";
@@ -1625,7 +1626,7 @@ function getCachedClientModuleHydrationPlan(
   cache: Map<string, ClientModuleHydrationPlan>,
   options: FarmClientHydrationPlanOptions = {},
 ): ClientModuleHydrationPlan {
-  const key = `${path.resolve(root)}\0${mode}\0${options.asyncOwnerIslands === true}\0${path.resolve(modulePath)}`;
+  const key = `${path.resolve(root)}\0${mode}\0${options.asyncOwnerIslands === true}\0${options.serverOwners === true}\0${path.resolve(modulePath)}`;
   let plan = cache.get(key);
   if (!plan) {
     plan = getClientModuleHydrationPlan(modulePath, root, mode, options);
@@ -1700,6 +1701,11 @@ async function buildClient(
     config.renderer,
     Boolean(unsupportedIntegrationProvider),
   );
+  const pagePlanOptions = {
+    ...planOptions,
+    serverOwners:
+      resolveFarmServerComponentsMode(config.experimental?.serverComponents) === "islands",
+  };
 
   const clientLayouts = layoutRoutes.map((layout) => {
     try {
@@ -1791,7 +1797,7 @@ async function buildClient(
           root,
           isolatedMode,
           hydrationPlanCache,
-          planOptions,
+          pagePlanOptions,
         ),
   }));
 
@@ -1985,6 +1991,7 @@ async function buildClient(
     config.basePath,
     generateClientCachePersistenceCode(resolveFarmClientCacheAdapterEntry(root, config.cache)),
     adapterOwnsDocsRuntime ? getFarmDocsAdapterConfigModule(config.docs) : undefined,
+    resolveFarmServerComponentsMode(config.experimental?.serverComponents) === "islands",
   );
 
   // Write the client entry to a temporary file
@@ -2766,13 +2773,17 @@ export function generateUniversalRouterStateProperties(): string {
 
   clearPrefetchedPath: function(url) {
     const interceptionPrefix = url + "\\nintercept:";
+    const partialPrefix = url + "\\npartial:";
+    const matches = function(key) {
+      return key === url || key.startsWith(interceptionPrefix) || key.startsWith(partialPrefix);
+    };
     for (const key of this.prefetchCache.keys()) {
-      if (key === url || key.startsWith(interceptionPrefix)) {
+      if (matches(key)) {
         this.prefetchCache.delete(key);
       }
     }
     for (const [key, pending] of this.pendingPrefetches) {
-      if (key === url || key.startsWith(interceptionPrefix)) {
+      if (matches(key)) {
         pending.valid = false;
         this.pendingPrefetches.delete(key);
       }
@@ -2786,9 +2797,18 @@ export function generateUniversalRouterStateProperties(): string {
     this.pendingPrefetches.clear();
   },
 
-  fetchPrefetchedDocument: async function(url, interceptFrom, fresh, recover, signal, cacheResult = true) {
+  // Islands mode: a partial response (layouts kept, or only the page's payload) suits the page
+  // that asked for it, so the cache keys it by what that page told the server.
+  prefetchRequest: function(url, interceptFrom, layoutChain = true) {
+    const base = interceptFrom ? url + "\\nintercept:" + interceptFrom : url;
+    const partial = layoutChain && this.partialNavigationHeaders ? this.partialNavigationHeaders() : {};
+    const identity = Object.keys(partial).length ? JSON.stringify(partial) : "";
+    return { cacheKey: identity ? base + "\\npartial:" + identity : base, headers: partial };
+  },
+
+  fetchPrefetchedDocument: async function(url, interceptFrom, fresh, recover, signal, cacheResult = true, layoutChain = true) {
     signal?.throwIfAborted();
-    const cacheKey = interceptFrom ? url + "\\nintercept:" + interceptFrom : url;
+    const { cacheKey, headers: partialHeaders } = this.prefetchRequest(url, interceptFrom, layoutChain);
     if (fresh) this.clearPrefetchedPath(url);
     const cached = fresh ? undefined : this.readFreshPrefetch(cacheKey);
     if (cached !== undefined) return cached;
@@ -2820,6 +2840,10 @@ export function generateUniversalRouterStateProperties(): string {
       const response = await fetchFarmNavigationDocument(url, {
         "Accept": "text/html",
         ...(interceptFrom ? { "X-Farm-Intercept-From": interceptFrom } : {}),
+        // Islands mode: the server leaves out island values this browser holds, and the
+        // layouts it shows.
+        ...getFarmIslandValueHeaders(),
+        ...partialHeaders,
       }, recover, signal);
       if (!response.ok) throw new Error("Failed to fetch page");
       const html = await response.text();
@@ -2977,6 +3001,32 @@ export function generateUniversalRouterStateProperties(): string {
 `.trim();
 }
 
+/**
+ * Islands mode's segment navigation on the production server (RFC 0003). A client navigation names
+ * the layouts the browser shows, by key: the pattern with its params filled in, so a layout whose
+ * params change renders again. The response leaves out the leading layouts the browser keeps.
+ */
+/** @internal Exported for tests. */
+export const FARM_SEGMENT_NAVIGATION_SERVER_RUNTIME = `
+function getFarmLayoutKey(pattern, params) {
+  return pattern.replace(/\\[\\[?\\.\\.\\.([^\\]]+)\\]?\\]|\\[([^\\]]+)\\]/g, function(match, rest, name) {
+    const value = params ? params[rest || name] : undefined;
+    if (Array.isArray(value)) return value.map(encodeURIComponent).join("/");
+    return value === undefined ? "" : encodeURIComponent(String(value));
+  });
+}
+
+function countFarmKeptLayouts(request, layouts, params) {
+  const chain = parseFarmLayoutChainHeader(request.headers.get("f-layouts"));
+  if (chain.length === 0) return 0;
+  const keys = layouts.map(function(layout) { return getFarmLayoutKey(layout.pattern, params); });
+  if (chain[0] === keys[0]) return getSharedLayoutPrefixLength(chain, keys);
+  // A root layout that renders the document itself leaves no boundary in the page, so the
+  // browser's chain starts at the next layout.
+  return keys.length > 1 ? 1 + getSharedLayoutPrefixLength(chain, keys.slice(1)) : 0;
+}
+`;
+
 function generateClientHydrationEntry(
   clientPages: Array<{
     pattern: string;
@@ -3031,6 +3081,7 @@ function generateClientHydrationEntry(
   basePath = "/",
   clientCachePersistence: ClientCachePersistenceEntryCode = { imports: "", init: "" },
   docsConfigModule?: string,
+  islandValues = false,
 ): string {
   const toImportPath = (targetPath: string) => targetPath.replace(/\\/g, "/");
   const clientPluginEntry: FarmClientPluginEntryCode = generateFarmClientPluginEntryCode(
@@ -3151,7 +3202,7 @@ function isFarmDocsPath() {
 // Farm.js Client Runtime (no client components)
 ${cssImport}
 ${layoutImports}
-import { createClientCancellation, createClientPluginManager, getHashTargetElement, installChunkErrorRecovery, isFarmBlockedNavigationURL, isFarmExternalNavigationURL, reconcileFarmDocumentHead, setFarmBasePath, setFarmTrailingSlashPreference, stripFarmBasePath } from "@farm.js/core/internal/client-runtime";
+import { createClientCancellation, createClientPluginManager, getFarmIslandValueHeaders, getHashTargetElement, installChunkErrorRecovery, isFarmBlockedNavigationURL, isFarmExternalNavigationURL, reconcileFarmDocumentHead, setFarmBasePath, setFarmTrailingSlashPreference, stripFarmBasePath } from "@farm.js/core/internal/client-runtime";
 import { createFarmDeploymentMismatchError, createFarmDeploymentRequestHeaders, isFarmDeploymentMismatchResponse } from "@farm.js/core/deployment";
 ${clientPluginEntry.imports}
 ${clientCachePersistence.imports}
@@ -3458,7 +3509,7 @@ document.addEventListener("click", function(e) {
   // Only an app with a server-tree page ships the code that rebuilds one.
   const serverTreeEnabled = isolatedHydrationEnabled && clientPages.some((page) => page.serverTree);
   const isolatedHydrationImport = isolatedHydrationEnabled
-    ? `import { createFarmIsolatedHydrationRuntime, createFarmServerPageBoundary, wrapFarmIsolatedClientGraph } from "@farm.js/core/internal/isolated-boundary";${serverTreeEnabled ? '\nimport { createFarmServerTreeElement } from "@farm.js/core/internal/server-tree";' : ""}`
+    ? `import { createFarmIsolatedHydrationRuntime, createFarmServerPageBoundary, wrapFarmIsolatedClientGraph } from "@farm.js/core/internal/isolated-boundary";${islandValues ? '\nimport { getFarmIslandValueStore } from "@farm.js/core/internal/island-value-store";\nimport { getFarmFormActionStub } from "@farm.js/core/internal/form-actions-client";\nimport { decodeFarmTagged } from "@farm.js/core/internal/island-codec";' : ""}${serverTreeEnabled ? '\nimport { createFarmServerTreeElement } from "@farm.js/core/internal/server-tree";' : ""}`
     : "";
   const isolatedHydrationRuntime = isolatedHydrationEnabled
     ? `const farmIsolatedBoundaryLoaders = {
@@ -3479,7 +3530,7 @@ const farmIsolatedHydrationRuntime = createFarmIsolatedHydrationRuntime({
   hydrateRoot,
   load: loadFarmIsolatedBoundary,
   schedule: scheduleFarmIslandHydration,
-  wrap: wrapWithIntegrationProviders,
+  wrap: wrapWithIntegrationProviders,${islandValues ? "\n  values: getFarmIslandValueStore(),\n  actions: getFarmFormActionStub,\n  decode: decodeFarmTagged," : ""}
 });
 
 // A hydrating layout keeps a non-hydrating page as server HTML; this wrapper runs its islands.
@@ -3501,7 +3552,7 @@ async function createFarmServerTreePageElement(source, pathname) {
     return await createFarmServerTreeElement(React, source, {
       load: loadFarmIsolatedBoundary,
       ServerHtml: FarmServerPage,
-      key: pathname,
+      key: pathname,${islandValues ? "\n      values: getFarmIslandValueStore(),\n      actions: getFarmFormActionStub,\n      decode: decodeFarmTagged," : ""}
     });
   } catch (error) {
     console.warn("[Farm.js] Could not rebuild the server tree of " + pathname + "; its server HTML was kept.", error);
@@ -3538,7 +3589,7 @@ ${layoutImports}
 ${rendererClientImports}
 ${isolatedHydrationImport}
 ${providerClientCode.imports}
-import { createClientCancellation, createClientPluginManager, getHashTargetElement, installChunkErrorRecovery, isFarmBlockedNavigationURL, isFarmExternalNavigationURL, reconcileFarmDocumentHead, scheduleFarmIslandHydration, searchParamsToObject, setFarmBasePath, setFarmTrailingSlashPreference, stripFarmBasePath } from "@farm.js/core/internal/client-runtime";
+import { createClientCancellation, createClientPluginManager, getFarmIslandValueHeaders, getHashTargetElement, installChunkErrorRecovery, isFarmBlockedNavigationURL, isFarmExternalNavigationURL, reconcileFarmDocumentHead, scheduleFarmIslandHydration, searchParamsToObject, setFarmBasePath, setFarmTrailingSlashPreference, stripFarmBasePath } from "@farm.js/core/internal/client-runtime";
 import { createFarmDeploymentMismatchError, createFarmDeploymentRequestHeaders, isFarmDeploymentMismatchResponse } from "@farm.js/core/deployment";
 import { createFarmRouter, isFarmRouteActive, matchFarmRoute } from "@farm.js/core/router";
 ${clientPluginEntry.imports}
@@ -3715,6 +3766,10 @@ async function createMatchedHydrationRoute(matched, pathname, searchParams, serv
     const serverPage = document.getElementById("__farm_page__");
     const pageSource = typeof serverHtml === "string" ? serverHtml : serverPage;
     const serverTree = pageSource ? await createFarmServerTreePageElement(pageSource, pathname) : null;
+    // A payload-only page (islands mode) has no HTML to fall back to: fetch the whole document.
+    if (!serverTree && typeof serverHtml === "string" && serverHtml.includes('<script type="f/tree" partial')) {
+      return null;
+    }
     pageElement = serverTree
       ? createLayoutPageBoundary(matched.route, serverTree)
       : createLayoutPageBoundary(
@@ -4052,7 +4107,7 @@ async function hydrate() {
       isolatedHydrationEnabled
         ? `const isolatedHydration =
       !hasHydratableLayout(pathname) &&
-      document.querySelector('farm-client-boundary[data-farm-client-boundary]')
+      document.querySelector('f-island[src]')
         ? hydrateFarmIsolatedClientBoundaries(document, hydrationController.signal)
         : Promise.resolve();
     await Promise.all([pageHydration, isolatedHydration]);`
@@ -4065,18 +4120,43 @@ async function hydrate() {
   }
 }
 
+// A layout boundary is the same layout when its key matches: islands mode keys it by pattern and
+// params, so a layout whose params change renders again. Other modes compare patterns.
+function getLayoutIdentity(boundary) {
+  return boundary.getAttribute("data-farm-layout-key") || boundary.getAttribute("data-farm-layout-pattern");
+}
+
 function findLayoutBoundary(root, pattern) {
   const boundaries = root?.querySelectorAll?.('[data-farm-layout-boundary="true"]') || [];
   for (const boundary of boundaries) {
-    if (boundary.getAttribute("data-farm-layout-pattern") === pattern) return boundary;
+    if (getLayoutIdentity(boundary) === pattern) return boundary;
   }
   return null;
 }
 
 function getLayoutPatterns(root) {
   return Array.from(root?.querySelectorAll?.('[data-farm-layout-boundary="true"]') || [])
-    .map(function(element) { return element.getAttribute("data-farm-layout-pattern"); })
+    .map(getLayoutIdentity)
     .filter(Boolean);
+}
+
+${
+  islandValues
+    ? `// A segment response leaves out the layouts the browser said it shows. It fits this page only if
+// the page still shows each of them, at the same depth.
+function fitsSegmentResponse(currentRoot, nextRoot) {
+  const nextBoundaries = Array.from(nextRoot.querySelectorAll('[data-farm-layout-boundary="true"]'));
+  const lastKept = nextBoundaries.map(function(boundary) {
+    return boundary.getAttribute("data-farm-layout-kept") === "true";
+  }).lastIndexOf(true);
+  if (lastKept === -1) return true;
+  const current = getLayoutPatterns(currentRoot);
+  for (let index = 0; index <= lastKept; index++) {
+    if (current[index] !== getLayoutIdentity(nextBoundaries[index])) return false;
+  }
+  return true;
+}`
+    : ""
 }
 
 function activateNavigationScripts(root) {
@@ -4090,7 +4170,7 @@ function activateNavigationScripts(root) {
   }
 }
 
-function replaceSharedLayoutBoundary(currentRoot, nextRoot) {
+function replaceSharedLayoutBoundary(currentRoot, nextRoot, refresh = false) {
   const currentPatterns = getLayoutPatterns(currentRoot);
   const nextPatterns = getLayoutPatterns(nextRoot);
   let sharedCount = 0;
@@ -4111,7 +4191,17 @@ function replaceSharedLayoutBoundary(currentRoot, nextRoot) {
     : nextRoot.querySelector("#__farm_page__");
 
   if (!currentTarget || !nextTarget) return false;
-  ${isolatedHydrationEnabled ? "disposeFarmIsolatedClientBoundaries(currentTarget);" : ""}
+  ${
+    isolatedHydrationEnabled
+      ? `${
+          islandValues
+            ? `// A refresh keeps the islands still on the page, with their state and new props.
+  if (refresh) farmIsolatedHydrationRuntime.carryOver(currentTarget, nextTarget);
+  `
+            : ""
+        }disposeFarmIsolatedClientBoundaries(currentTarget);`
+      : ""
+  }
   currentTarget.replaceWith(nextTarget);
   activateNavigationScripts(nextTarget);
   if (nextTreeRoot && nextTreeRoot !== nextTarget) nextTreeRoot.remove();
@@ -4132,7 +4222,21 @@ function replaceSharedLayoutBoundary(currentRoot, nextRoot) {
 const spaRouter = {
 ${generateUniversalRouterStateProperties()}
   prefetchCache: new Map(),
-  
+${
+  islandValues
+    ? `  // Islands mode: navigations name the layouts on screen, and say when this page renders the
+  // next one in its own React root; the server leaves out what the browser keeps or rebuilds.
+  partialNavigationHeaders: function() {
+    const root = document.getElementById("root") || document.body;
+    const layouts = getLayoutPatterns(root);
+    return {
+      ...(layouts.length ? { "F-Layouts": JSON.stringify(layouts) } : {}),
+      ...(reactRoot && reactRootContainer === root ? { "F-Render": "tree" } : {}),
+    };
+  },
+`
+    : ""
+}  
   navigate: async function(href, options = {}) {
     const url = new URL(href, window.location.href);
     if (isFarmBlockedNavigationURL(url)) return;
@@ -4187,6 +4291,8 @@ ${generateUniversalRouterStateProperties()}
     cancelPendingPageHydration();
     this.saveScrollPosition(window.location.pathname + window.location.search);
     const navigation = this.startNavigation(from, url, action);
+    // A refresh keeps the islands still on the page (islands mode).
+    navigation.refresh = options.refresh === true;
     let clientNavigation;
 
     try {
@@ -4289,26 +4395,48 @@ ${generateUniversalRouterStateProperties()}
           this.currentPath = to;
         });
       } else {
+        // A refresh renders every layout again; other navigations keep the ones on screen.
         const html = await this.fetchPage(
           url.pathname + url.search,
           undefined,
           options.refresh === true,
           true,
           navigation.controller.signal,
+          options.refresh !== true,
         );
         if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
         await farmClientRuntime.markNavigationLoaded(clientNavigation, html);
         if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
         await this.runViewTransition(options.viewTransition, async () => {
           if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
-          const swapped = await this.swapContent(
+          let swapped = await this.swapContent(
             html,
             url.pathname + url.search,
             navigation,
             clientNavigation,
           );
           if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
-          if (!swapped) {
+          if (swapped === "segment-mismatch") {
+            // The page changed since this segment was requested (a prefetch, a later
+            // navigation): fetch the whole document instead.
+            const documentHtml = await this.fetchPage(
+              url.pathname + url.search,
+              undefined,
+              true,
+              true,
+              navigation.controller.signal,
+              false,
+            );
+            if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
+            swapped = await this.swapContent(
+              documentHtml,
+              url.pathname + url.search,
+              navigation,
+              clientNavigation,
+            );
+            if (!this.isCurrentNavigation(navigation, clientNavigation)) return;
+          }
+          if (!swapped || swapped === "segment-mismatch") {
             throw new Error("Farm could not swap the target document");
           }
           this.writeHistoryEntry(action, url.pathname + url.search, options.state, url);
@@ -4358,8 +4486,8 @@ ${generateUniversalRouterStateProperties()}
     });
   },
   
-  fetchPage: async function(url, interceptFrom, fresh = false, recover = true, signal) {
-    return this.fetchPrefetchedDocument(url, interceptFrom, fresh, recover, signal);
+  fetchPage: async function(url, interceptFrom, fresh = false, recover = true, signal, layoutChain = true) {
+    return this.fetchPrefetchedDocument(url, interceptFrom, fresh, recover, signal, true, layoutChain);
   },
   
   swapContent: async function(html, targetPath, navigation, clientNavigation) {
@@ -4380,6 +4508,18 @@ ${generateUniversalRouterStateProperties()}
     // whole document (and remounting every isolated client boundary).
     const newRoot = doc.getElementById("root") || doc.body;
     const currentRoot = document.getElementById("root") || document.body;
+    ${
+      islandValues
+        ? `const isSegment = Boolean(newRoot?.querySelector('[data-farm-layout-kept="true"]'));
+    // A segment needs this page's kept layouts in place, outside a React-owned root.
+    if (
+      isSegment &&
+      (!currentRoot || reactRootContainer === currentRoot || !fitsSegmentResponse(currentRoot, newRoot))
+    ) {
+      return "segment-mismatch";
+    }`
+        : ""
+    }
     if (!newRoot || !currentRoot) {
       if (!isNavigationCurrent()) return false;
       return this.swapDocument(doc);
@@ -4410,13 +4550,20 @@ ${generateUniversalRouterStateProperties()}
       }
     }
 
+    ${
+      islandValues
+        ? `// A payload-only page renders only in a React root that rebuilds it.
+    if (nextPage?.querySelector('script[type="f/tree"][partial]')) return "segment-mismatch";`
+        : ""
+    }
     const rootWasReactOwned = reactRootContainer === currentRoot;
     resetReactRoot();
     resetRouteSlotRoots();
     const replacedSharedBoundary = rootWasReactOwned
       ? null
-      : replaceSharedLayoutBoundary(currentRoot, newRoot);
+      : replaceSharedLayoutBoundary(currentRoot, newRoot, navigation?.refresh === true);
     let isolatedHydrationScope = replacedSharedBoundary || currentRoot;
+    ${islandValues ? 'if (!replacedSharedBoundary && isSegment) return "segment-mismatch";' : ""}
     if (!replacedSharedBoundary) {
       ${isolatedHydrationEnabled ? "disposeFarmIsolatedClientBoundaries(currentRoot);" : ""}
       currentRoot.innerHTML = newRoot.innerHTML;
@@ -4503,7 +4650,7 @@ ${generateUniversalRouterStateProperties()}
     // navigation (double fetch per prefetched link) and sent
     // X-Farm-Intercept-From, which bypasses the shared cache server-side.
     const pathname = url.pathname + url.search;
-    if (this.readFreshPrefetch(pathname) !== undefined) return;
+    if (this.readFreshPrefetch(this.prefetchRequest(pathname).cacheKey) !== undefined) return;
     
     return this.fetchPage(pathname, undefined, false, false)
       .catch(function(error) {
@@ -5597,6 +5744,9 @@ function generateVirtualEntryCode(
   isolatedClientBoundaryModules: ReadonlySet<string>,
   hydrationPlanCache: Map<string, ClientModuleHydrationPlan>,
 ): string {
+  // Islands mode runs `"use server"` actions posted to a page (RFC 0003).
+  const farmIslandsMode =
+    resolveFarmServerComponentsMode(config.experimental?.serverComponents) === "islands";
   const hasCompressionRuntime =
     config.compress && resolveFarmInstrumentationRuntime(preset) === "nodejs";
   // agent.crawlers serves /robots.txt unless a root robots.ts owns it.
@@ -5671,14 +5821,17 @@ function isolateFarmRouteServerPage(element) {
 
 // An async page below a hydrating layout renders as a serialized tree the browser rebuilds in
 // the layout's React root, so its client components read the layout's context.
-function renderFarmRouteServerTree(element) {
-  return renderFarmServerTreePage(React, element, { isolate: isolateFarmRouteServerPage });
+function renderFarmRouteServerTree(element, extra) {
+  return renderFarmServerTreePage(React, element, {
+    isolate: isolateFarmRouteServerPage,${farmIslandsMode ? "\n    values: true," : ""}
+    ...extra,
+  });
 }`
     : `function wrapFarmRouteClientGraph(element) { return element; }
 
 function isolateFarmRouteServerPage(element) { return element; }
 
-function renderFarmRouteServerTree(element) { return element; }`;
+function renderFarmRouteServerTree(element, extra) { return element; }`;
   const hasGeneratedMetadataImages = metadataImageRoutes.some(
     (image) => image.sourceType === "module",
   );
@@ -5731,6 +5884,11 @@ function renderFarmRouteServerTree(element) { return element; }`;
     config.renderer,
     Boolean(unsupportedIntegrationProvider),
   );
+  const pageHydrationPlanOptions = {
+    ...hydrationPlanOptions,
+    serverOwners:
+      resolveFarmServerComponentsMode(config.experimental?.serverComponents) === "islands",
+  };
   const layoutHydrationPlans = layoutRoutes.map((layout) => ({
     ...layout,
     hydration: getCachedClientModuleHydrationPlan(
@@ -5757,7 +5915,7 @@ function renderFarmRouteServerTree(element) { return element; }`;
             config.root,
             isolatedHydrationMode,
             hydrationPlanCache,
-            hydrationPlanOptions,
+            pageHydrationPlanOptions,
           ),
     ]),
   );
@@ -6111,7 +6269,11 @@ function renderFarmRouteServerTree(element) { return element; }`;
       ? "\n  _registerFarmStorageModules,\n  disposeFarmStorage,\n  initFarmStorage,"
       : ""
   }
-} from "@farm.js/core/internal/production-runtime";`;
+} from "@farm.js/core/internal/production-runtime";${
+    farmIslandsMode
+      ? `\nimport { getSharedLayoutPrefixLength, handleFarmFormActionRequest, ignoreFarmHeldValues, installFarmIslandValues, parseFarmLayoutChainHeader } from "@farm.js/core/internal/production-runtime";\nconst farmFormActionsConfig = ${JSON.stringify(resolveServerActionsConfig(config.serverActions))};\ninstallFarmIslandValues();\n${FARM_SEGMENT_NAVIGATION_SERVER_RUNTIME}`
+      : ""
+  }`;
   const productionSiteTelemetryImport = config.telemetry
     ? `import { createFarmProductionSiteReporter } from "@farm.js/core/internal/product-telemetry-runtime";`
     : "";
@@ -7425,7 +7587,7 @@ const farmClientEntryPreloadTags = farmClientModulePreloads
   : "";
 // The client modules a document's markup loads: its islands' boundaries and the
 // client references of its server tree.
-const FARM_CLIENT_MODULE_REFERENCE_PATTERN = /data-farm-client-boundary="([^"]+)"|"r":"(\\/[^"]+)"/g;
+const FARM_CLIENT_MODULE_REFERENCE_PATTERN = /<f-island src="([^"]+)"|"r":"(\\/[^"]+)"/g;
 
 function renderFarmClientModulePreload(index) {
   return '\\n  <link rel="modulepreload" href="/' +
@@ -9136,6 +9298,15 @@ ${
   // Handle page routes (SSR)
   emitFarmEvent({ type: "render.start", route: pathname, pathname });
   const matchedRoute = matchPageRoute(routePathname);
+  ${
+    farmIslandsMode
+      ? `// Islands mode: a form or client component posting a server action to this page.
+  if (matchedRoute && request.method === "POST") {
+    const actionResponse = await handleFarmFormActionRequest(request, farmFormActionsConfig);
+    if (actionResponse) return applyProductionMiddlewareHeaders(actionResponse, middlewareHeaders);
+  }`
+      : ""
+  }
   if (matchedRoute) {
     const trailingSlashLocation = resolveFarmTrailingSlashRedirect(
       url,
@@ -9154,6 +9325,25 @@ ${
     emitFarmEvent({ type: "route.matched", pathname, route: route.pattern, params });
     
     try {
+      ${
+        farmIslandsMode
+          ? `// Islands mode: the layouts the navigating browser keeps, decided before the shell cache
+      // so a PPR route caches each segment under its own key. A static page, a layout that
+      // hydrates as a root, or a route slot always renders whole.
+      const farmSegmentLayouts = getApplicableLayouts(
+        routePathname,
+        route.directory || route.pattern,
+      );
+      const farmKeptLayoutCount =
+        resolveRouteRenderingView(route).ssg ||
+        farmSegmentLayouts.some((layout) => layout.shouldHydrate === true) ||
+        matchRouteSlots(routePathname, request.headers.get("x-farm-intercept-from")).length > 0
+          ? 0
+          : countFarmKeptLayouts(request, farmSegmentLayouts, params);
+      // The root layout always renders, so keeping one layout keeps nothing.
+      const farmKeptLayouts = farmKeptLayoutCount > 1 ? farmKeptLayoutCount : 0;`
+          : `const farmKeptLayouts = 0;`
+      }
       const pprConfig = resolvePPRConfig(route);
       const pprBypassReason = pprConfig.enabled
         ? getPPRShellBypassReason(request, middlewareData, middlewareContext)
@@ -9166,7 +9356,7 @@ ${
             farmLocaleResolution && farmI18nConfig.routing !== "none"
               ? resolveFarmI18nAlternateOrigin(request)
               : ""
-          )
+          ) + (farmKeptLayouts ? ":segment:" + farmKeptLayouts : "")
         : null;
       if (pprConfig.enabled && pprBypassReason) {
         emitFarmEvent({ type: "ppr.shell.bypass", route: pathname, reason: pprBypassReason });
@@ -9193,6 +9383,10 @@ ${
               "x-farm-preload-buffered": getFarmBufferedPreloadMarker(cachedPPRShell),
               ...(farmFontPreloadHeader ? { "Link": farmFontPreloadHeader } : {}),
               ...getPPRHeaders("hit", pprConfig),
+              // A segment is one navigation's answer, never a CDN entry: some CDNs ignore Vary.
+              ...(farmKeptLayouts
+                ? { "Cache-Control": "private, no-store", "Vary": "F-Layouts" }
+                : {}),
             },
           }), middlewareHeaders), cachedPPRShell);
         }
@@ -9419,6 +9613,25 @@ ${
           };
         });
         
+        ${
+          farmIslandsMode
+            ? `// Islands mode: a route a shared cache may store (a PPR shell, a static page) renders
+        // whole for every request, so a cache hit stays a hit. Other routes leave out what the
+        // navigating browser keeps: the layouts it shows and the values it holds.
+        const farmSharedCacheableRoute = Boolean(getRouteSharedCacheControl(route, pprCanCache));
+        if (farmSharedCacheableRoute) ignoreFarmHeldValues();
+        const farmLayoutKeyOf = getFarmLayoutKey;
+        // A navigation the browser renders in its layout's React root rebuilds a server-tree page
+        // from its payload, so the page's rendered HTML would go unused.
+        const farmPayloadOnlyNavigation =
+          !farmSharedCacheableRoute &&
+          shouldHydrateLayout &&
+          route.serverTree === true &&
+          !route.shouldHydrate &&
+          request.headers.get("f-render") === "tree";`
+            : `const farmLayoutKeyOf = null;
+        const farmPayloadOnlyNavigation = false;`
+        }
         const renderPageElement = async () => {
             // First, render the page content
             let pageElement;
@@ -9445,7 +9658,10 @@ ${
               pageElement = wrapFarmRouteClientGraph(pageElement);
             } else if (shouldHydrateLayout && !route.shouldHydrate) {
               pageElement = route.serverTree
-                ? await renderFarmRouteServerTree(pageElement)
+                ? await renderFarmRouteServerTree(
+                    pageElement,
+                    farmPayloadOnlyNavigation ? { payloadOnly: true } : undefined,
+                  )
                 : isolateFarmRouteServerPage(pageElement);
             }
 
@@ -9470,6 +9686,22 @@ ${
             for (let i = applicableLayouts.length - 1; i >= 0; i--) {
               const layout = applicableLayouts[i];
               const LayoutComponent = layout.module.default;
+              // Islands mode: a layout the browser keeps sends only its boundary, so the client
+              // knows where the rest goes. The root layout always renders: it may own the document.
+              if (LayoutComponent && i > 0 && i < farmKeptLayouts) {
+                wrappedElement = React.createElement(
+                  "div",
+                  {
+                    "data-farm-layout-boundary": "true",
+                    "data-farm-layout-pattern": layout.pattern,
+                    "data-farm-layout-key": farmLayoutKeyOf(layout.pattern, params),
+                    "data-farm-layout-kept": "true",
+                    style: { display: "contents" },
+                  },
+                  wrappedElement,
+                );
+                continue;
+              }
               if (LayoutComponent) {
                 const slotProps = {};
                 for (const slot of renderedRouteSlots) {
@@ -9496,6 +9728,9 @@ ${
                   {
                     "data-farm-layout-boundary": "true",
                     "data-farm-layout-pattern": layout.pattern,
+                    "data-farm-layout-key": farmLayoutKeyOf
+                      ? farmLayoutKeyOf(layout.pattern, params)
+                      : undefined,
                     style: { display: "contents" },
                   },
                   wrappedElement,
@@ -9614,7 +9849,7 @@ ${
           farmLocaleResolution,
         );
         const hasRequestScopedRender = Boolean(
-          pageStatus >= 400 ||
+          pageStatus >= 400 ||${farmIslandsMode ? "\n          farmKeptLayouts > 0 ||\n          farmPayloadOnlyNavigation ||" : ""}
           renderReadRequest ||
           request.headers.get("x-farm-intercept-from") ||
           hasPrivateRequestHeaders ||
@@ -9634,7 +9869,16 @@ ${
         if (renderedPage.stream || hasRequestScopedRender || !sharedCacheControl) {
           responseHeaders["Cache-Control"] = "private, no-store";
         }
-        const farmI18nSnapshot = getFarmI18nSnapshot();
+        const farmI18nSnapshot = getFarmI18nSnapshot();${
+          farmIslandsMode
+            ? `
+        // Islands mode: a navigation that names the values it holds, or the layouts it shows,
+        // gets HTML without them.
+        responseHeaders["Vary"] = farmSharedCacheableRoute
+          ? "F-Layouts"
+          : "F-Values, F-Layouts, F-Render";`
+            : ""
+        }
         let html = renderedPage.html;
         
         // Check if the layout already rendered a full HTML document

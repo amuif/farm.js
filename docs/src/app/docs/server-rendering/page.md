@@ -301,14 +301,41 @@ them with the app's package manager: `@farm.js/plugin` at the installed `@farm.j
 plugin requires. Commit the updated `package.json` and lockfile. In CI (`CI` is set) nothing is
 installed: `serverComponents: true` runs without RSC and warns, and an explicit `mode` fails with the
 command to run. Set `FARM_SKIP_RSC_INSTALL=1` anywhere else the build must not change dependencies.
-`@vitejs/plugin-react` is optional and adds Fast Refresh.
+Fast Refresh works in development without more setup; an app that installs `@vitejs/plugin-react`
+gets its own copy instead of Farm's.
 
 `serverComponents: true` is the same as `serverComponents: { mode: "rsc" }`, React's own server
-components engine. `{ mode: "islands" }` is reserved for Farm's own engine, which sends static output
-once as HTML and hydrates only client components
-([RFC 0003](https://github.com/farming-labs/farm.js/blob/main/rfcs/0003-islands-server-components.md)).
-It is not available yet, and `farm dev` and `farm build` stop with an error that says so. Both modes
-share the authoring rules on this page, so switching between them is a one-line change.
+components engine. `{ mode: "islands" }` is Farm's own engine
+([RFC 0003](https://github.com/farming-labs/farm.js/blob/main/rfcs/0003-islands-server-components.md)):
+it renders on Farm's normal pipeline, sends static output once as HTML, and hydrates only client
+components. A client component that receives server output (`children`, or any element prop) keeps
+that output as a slot of the existing HTML instead of receiving it again, and a server page under a
+layout that hydrates (a client provider, say) hydrates inside that layout's tree, so its client
+components read the provider's context. A large prop value (512 bytes of JSON or more, such as a
+navigation tree) travels once, keyed by its content: client components that share it share one
+copy, and a client navigation leaves out the values the browser already holds. A client navigation
+also leaves out the layouts the browser keeps: the server renders the page and any layout that
+changed, so a layout's client state survives and its HTML is not sent again. A layout the browser
+keeps does not render on that navigation, so put access checks in middleware or a page `guard`,
+not in a layout's body. `router.refresh()` and full loads render every layout. A PPR route caches
+each segment under its own key next to the full page, and sends every value so the cached HTML
+suits any browser; a prerendered page always sends the whole document. A page under a layout that
+hydrates as one root (a client provider around the pages) sends its large prop values once too,
+in the payload its client components rebuild from. When the browser already renders that layout,
+a navigation to such a page carries only that payload: the browser rebuilds the page in the
+layout's React tree, so the server leaves out the page's HTML. `"use server"`
+functions work from forms, with or without JavaScript, and from client components, in `farm dev`
+and in production. A server component can pass one to a client component as a prop. After an
+action called from JavaScript, the page refreshes, as the form posted without JavaScript would show
+it: islands still on the page keep their state and get their new props, and a `redirect()` from the
+action becomes a client navigation. Props and action arguments are not limited to JSON:
+`undefined`, `NaN`, `Infinity`, `-0`, `BigInt`, `Date`, `Map`, `Set`, `URL`, `RegExp`, typed arrays
+and `ArrayBuffer` arrive as themselves (`URL` and `RegExp` in islands mode only; RSC does not
+support them). Functions other than server actions and class instances do not cross; a client
+component given one keeps its server HTML and is not hydrated. Islands mode needs none of the RSC packages and is experimental. Both modes share
+the authoring rules on this page, so switching between them is a one-line change; the same contract
+tests (`tests/e2e-server-components`) run against both, in development and in production builds.
+`benchmarks/server-components-payload` compares what each mode sends.
 
 The app's `vite` options and plugins apply as in other Farm apps, and so does built-in Tailwind.
 The build goes to the deploy target's
