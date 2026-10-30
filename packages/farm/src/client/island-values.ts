@@ -181,6 +181,23 @@ const SERVER_KEY = Symbol.for("farm.island-values.server");
  * Gives island boundaries rendered on this server their value addressing. Boundaries reach it
  * through a global, so the browser bundle never carries it.
  */
+const sentByRequest = new WeakMap<Request, Set<string>>();
+
+/**
+ * What islx needs to render islands mode's islands, from Farm's request: the values this
+ * request's browser holds, and which this response already wrote (`islands-server.ts`).
+ */
+export function resolveFarmIslandRenderState(): {
+  held: ReadonlySet<string> | null;
+  sent: Set<string>;
+} | null {
+  const request = _resolveCurrentRequest();
+  if (!request) return null;
+  let sent = sentByRequest.get(request);
+  if (!sent) sentByRequest.set(request, (sent = new Set()));
+  return { held: readFarmHeldValues(), sent };
+}
+
 export function installFarmIslandValues(): void {
   (globalThis as typeof globalThis & Record<symbol, FarmIslandValuesServer>)[SERVER_KEY] = {
     address: addressFarmValues,
