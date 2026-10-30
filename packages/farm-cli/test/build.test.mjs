@@ -177,3 +177,41 @@ test("lets configure change the preset when the CLI has no deploy override", asy
 test("keeps an explicit CLI preset ahead of configure", async () => {
   assert.equal(await observeBuildPreset("vercel"), "vercel");
 });
+
+test("keeps building an app that sets experimental.serverComponents without the RSC packages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "farm-cli-build-rsc-"));
+
+  try {
+    await writeFile(path.join(root, "package.json"), '{ "name": "rsc-app", "type": "module" }\n');
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      [
+        "export default {",
+        "  experimental: { serverComponents: true },",
+        "  generateBuildId() {",
+        '    throw new Error("normal-pipeline-reached");',
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // Without the RSC packages the build warns and takes the normal pipeline, as before the flag
+    // loaded the RSC pipeline; the probe stops it there.
+    await assert.rejects(
+      execFileAsync(process.execPath, [cliBin, "build", "--root", root]),
+      (error) => {
+        const output = `${error.stdout || ""}\n${error.stderr || ""}`;
+        assert.match(
+          output,
+          /runs without React Server Components\. A future release makes true always run them/,
+        );
+        assert.match(output, /normal-pipeline-reached/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

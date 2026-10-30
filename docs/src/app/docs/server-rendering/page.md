@@ -279,9 +279,49 @@ rules. This experiment is disabled when RSC owns the route. Integration provider
 route-wide root unless they explicitly declare that they can be recreated around independent
 isolated roots.
 
-## The RSC pipeline
+## React Server Components
 
-Apps built with `defineConfig` from `@farm.js/plugin/rsc` follow the same route contract:
+Turn on React Server Components in `farm.config.ts`. `farm dev`, `farm build`, and `farm start`
+then run Farm's RSC pipeline on the official `@vitejs/plugin-rsc`: pages and layouts are server
+components, and `"use client"` marks client components.
+
+```bash
+pnpm add react@19.2.8 react-dom@19.2.8 react-server-dom-webpack@19.2.8
+pnpm add -D @farm.js/plugin @vitejs/plugin-rsc@0.5.32 @vitejs/plugin-react
+```
+
+```ts
+import { defineConfig } from "@farm.js/core";
+
+export default defineConfig({
+  experimental: {
+    serverComponents: true,
+  },
+});
+```
+
+The app's `vite` options and plugins apply as in other Farm apps, and so does built-in Tailwind.
+`@vitejs/plugin-react` is optional and adds Fast Refresh. The build goes to the deploy target's
+output directory, so `farm start` and platform deploys work unchanged.
+
+The pipeline does not run every Farm feature yet:
+
+- `auth`, `integrations`, `headers`, `redirects`, `rewrites`, `routeRules`, and `context` decide
+  what a request may see or receive. Running the app without them could expose what they protect,
+  so `farm dev` and `farm build` stop with an error that names them.
+- Farm `plugins`, `storage`, `schema`, `cron`, `workflows`, `docs`, `theme`, and `observability`
+  are ignored, with a warning.
+
+Before this flag ran the RSC pipeline it only switched off isolated hydration, so some apps set it
+without using React Server Components. An app with `serverComponents: true` but without the RSC
+packages installed keeps running without them and warns once; a future release makes `true` always
+run React Server Components. `farm doctor` reports which way an app goes.
+
+A `vite.config.ts` built with `defineConfig` from
+`@farm.js/plugin/rsc` and the `vite` CLI keeps working, as in the
+[`rsc-demo` example](https://github.com/farming-labs/farm.js/tree/main/examples/rsc-demo).
+
+Both setups follow the same route contract:
 
 - **Static pages.** A page that opts in to static rendering, as in [Static rendering](#static-rendering),
   is prerendered at build time together with its RSC payload. A dynamic route lists its paths with

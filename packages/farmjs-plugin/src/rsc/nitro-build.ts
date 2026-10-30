@@ -557,15 +557,8 @@ function removeSeedOutput(nitro: Nitro, fileName: string | undefined): void {
 }
 
 export async function buildRscNitro(options: BuildRscNitroOptions): Promise<void> {
-  const {
-    rendererPath,
-    publicDir,
-    ssrPath,
-    assetsDir,
-    root,
-    outputDir = path.join(root, ".output"),
-    preset = "vercel",
-  } = options;
+  const { rendererPath, publicDir, ssrPath, assetsDir, root, preset = "vercel" } = options;
+  const outputDir = options.outputDir ?? path.join(root, ".output");
 
   const { build, copyPublicAssets, createNitro, prepare, prerender } =
     await import("nitro/builder");
@@ -573,8 +566,11 @@ export async function buildRscNitro(options: BuildRscNitroOptions): Promise<void
   console.log(`[FARM] Building RSC server with Nitro (preset: ${preset})...`);
 
   const buildDir = path.join(root, ".nitro");
-  const serverDir = path.join(outputDir, "server");
-  const publicOutDir = path.join(outputDir, "public");
+  // Vercel's Build Output API has its own layout (functions/, static/), which the preset owns when
+  // the caller names the deployment directory (`farm build`). Without one, the output keeps the
+  // server/ and public/ layout that hand-written post-build scripts copy from.
+  const presetOwnsLayout =
+    options.outputDir !== undefined && (preset === "vercel" || preset === "vercel-edge");
 
   // The server sets NODE_ENV to "production" unless the deployment chose one, as the core
   // node-server output does. The RSC and SSR bundles read it at runtime: left unset, React loads
@@ -614,11 +610,13 @@ export async function buildRscNitro(options: BuildRscNitroOptions): Promise<void
     alias: {
       h3: runtimeRequire.resolve("h3"),
     },
-    output: {
-      dir: outputDir,
-      serverDir,
-      publicDir: publicOutDir,
-    },
+    output: presetOwnsLayout
+      ? { dir: outputDir }
+      : {
+          dir: outputDir,
+          serverDir: path.join(outputDir, "server"),
+          publicDir: path.join(outputDir, "public"),
+        },
     publicAssets,
     renderer: { handler: entryPath },
     // The prebuilt RSC/SSR bundles are copied after Nitro finishes, so Nitro's
@@ -653,6 +651,7 @@ export async function buildRscNitro(options: BuildRscNitroOptions): Promise<void
   }
 
   const nitro = await createNitro(config);
+  const serverDir = nitro.options.output.serverDir;
   await prepare(nitro);
   await copyPublicAssets(nitro);
   await prerenderRscPages(nitro, prerender, path.dirname(path.dirname(path.resolve(rendererPath))));
