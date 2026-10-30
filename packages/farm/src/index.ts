@@ -205,11 +205,17 @@ export * from "./server-action-security";
 export * from "./deployment";
 export {
   FARM_RSC_INSTALL_HINT,
+  findFarmAppPackageDir,
   formatFarmRscBlockingMessage,
   formatFarmRscFallbackMessage,
   inspectFarmServerComponents,
   type FarmServerComponentsStatus,
 } from "./server-components-status";
+export type {
+  FarmServerComponentsConfig,
+  FarmServerComponentsMode,
+  FarmServerComponentsOptions,
+} from "./server-components-mode";
 export type {
   FarmImageConfig,
   FarmImageFormat,

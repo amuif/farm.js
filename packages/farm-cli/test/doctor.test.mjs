@@ -485,7 +485,7 @@ test("reports whether experimental.serverComponents runs React Server Components
       (entry) => entry.code === "SERVER_COMPONENTS_FALLBACK",
     );
     assert.equal(fallbackCheck?.status, "warn");
-    assert.match(fallbackCheck?.message || "", /A future release makes true always run them/);
+    assert.match(fallbackCheck?.message || "", /`farm dev` and `farm build` install them/);
 
     for (const name of ["@farm.js/plugin", "@vitejs/plugin-rsc", "react-server-dom-webpack"]) {
       const dir = path.join(root, "node_modules", ...name.split("/"));
@@ -496,6 +496,16 @@ test("reports whether experimental.serverComponents runs React Server Components
     assert.equal(
       ready.checks.find((entry) => entry.code === "SERVER_COMPONENTS_READY")?.status,
       "pass",
+    );
+
+    await writeFile(
+      path.join(root, "farm.config.mjs"),
+      'export default { experimental: { serverComponents: { mode: "islands" } } };\n',
+    );
+    const islands = await runFarmDoctor({ root, offline: true });
+    assert.equal(
+      islands.checks.find((entry) => entry.code === "SERVER_COMPONENTS_UNAVAILABLE")?.status,
+      "fail",
     );
 
     // Config RSC cannot run that decides what a request may receive stops it, as farm dev does.

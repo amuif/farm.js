@@ -1055,14 +1055,37 @@ function collectServerComponentsChecks(
   checks: FarmDoctorCheck[],
 ): void {
   const status = inspectFarmServerComponents(userConfig, root);
+  if (status.mode === "islands") {
+    checks.push({
+      status: "fail",
+      code: "SERVER_COMPONENTS_UNAVAILABLE",
+      title: "Islands mode is not available yet",
+      message: 'experimental.serverComponents: { mode: "islands" } is planned (RFC 0003).',
+      action: 'Use { mode: "rsc" } or true.',
+    });
+    return;
+  }
   if (!status.enabled) return;
+  if (status.missingPackages.length > 0 && !status.fallback) {
+    checks.push({
+      status: "fail",
+      code: "SERVER_COMPONENTS_PACKAGES_MISSING",
+      title: "React Server Components packages are not installed",
+      message: `experimental.serverComponents: { mode: "rsc" } needs ${status.missingPackages.join(", ")}.`,
+      action: `Install them: ${FARM_RSC_INSTALL_HINT}`,
+    });
+    return;
+  }
   if (status.fallback) {
     checks.push({
       status: "warn",
       code: "SERVER_COMPONENTS_FALLBACK",
       title: "experimental.serverComponents runs without React Server Components",
-      message: formatFarmRscFallbackMessage(status.missingPackages),
-      action: `Install the RSC packages (${FARM_RSC_INSTALL_HINT}) or remove experimental.serverComponents.`,
+      message: formatFarmRscFallbackMessage(status.missingPackages, status.blockingKeys),
+      action:
+        status.blockingKeys.length > 0
+          ? "Remove experimental.serverComponents, or move those features out of farm.config."
+          : `Run farm dev or farm build to install them, or ${FARM_RSC_INSTALL_HINT}.`,
     });
     return;
   }
