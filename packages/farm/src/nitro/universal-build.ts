@@ -144,9 +144,12 @@ import type { FarmRouteRuntimeManifest, FarmRouteRuntimeManifestEntry } from "..
 import { createFarmVercelRouteRuntimeFunctions } from "./vercel-route-runtime";
 import { buildFarmVercelRoutes } from "./vercel-assets";
 import { createFarmNetlifyEntry, resolveNitroNetlifyEntry } from "./netlify-entry";
+import { farmStripPlatformConfigPlugin } from "../build/strip-platform-config";
 import {
   createFarmBunServerEntry,
   createFarmNodeServerEntry,
+  FARM_DESKTOP_ENV_MODULE_FILE,
+  FARM_DESKTOP_ENV_MODULE_SOURCE,
   FARM_NODE_ENV_MODULE_FILE,
   FARM_NODE_ENV_MODULE_SOURCE,
 } from "./node-server-entry";
@@ -5203,6 +5206,16 @@ async function buildSSRInMemory(
         farmServerOnlyEntriesPlugin(),
         farmPlugin({ ...config, isolatedClientBoundaryModules }, pluginManager),
         farmEnvironmentFunctionsPlugin(config),
+        ...(hasRuntimeConfigModule
+          ? [
+              farmStripPlatformConfigPlugin(
+                [
+                  configModulePath,
+                  ...(config.layers || []).map((layer) => layer.configFile),
+                ].filter((file): file is string => Boolean(file)),
+              ),
+            ]
+          : []),
         {
           name: "farm-virtual-ssr-entry",
           resolveId(id) {
@@ -11427,6 +11440,24 @@ function toFarmNodeResponse(request, response) {
   `.trim();
 
   await fs.writeFile(nitroEntryPath, nitroEntryCode);
+  // `farm build --desktop`: the entry exports start() for the shell and guards every request.
+  const desktopServerEntry = config.desktop
+    ? {
+        basePath: config.basePath === "/" ? "" : config.basePath || "",
+        guardModule: "@farm.js/core/internal/desktop-guard",
+      }
+    : undefined;
+  if (desktopServerEntry) {
+    if (preset !== "bun" && preset !== "node-server") {
+      throw new Error(
+        `[Farm] A desktop build runs its server in the shell, so it needs the "bun" or "node-server" preset, not "${preset}".`,
+      );
+    }
+    await fs.writeFile(
+      path.join(ssrOutputDir, FARM_DESKTOP_ENV_MODULE_FILE),
+      FARM_DESKTOP_ENV_MODULE_SOURCE,
+    );
+  }
   const farmNodeServerEntryPath =
     preset === "node-server" ? path.join(ssrOutputDir, "farm-node-server-entry.mjs") : null;
   if (farmNodeServerEntryPath && nodeAdapterModule) {
@@ -11441,6 +11472,7 @@ function toFarmNodeResponse(request, response) {
         nodeAdapterModule,
         server: config.server,
         websocketAdapterModule: resolveNitroRuntimeDependency(root, "crossws/adapters/node"),
+        desktop: desktopServerEntry,
       }),
     );
   }
@@ -11456,6 +11488,7 @@ function toFarmNodeResponse(request, response) {
         bunAdapterModule: resolveNitroRuntimeDependency(root, "srvx/bun"),
         server: config.server,
         websocketAdapterModule: resolveNitroRuntimeDependency(root, "crossws/adapters/bun"),
+        desktop: desktopServerEntry,
       }),
     );
   }
